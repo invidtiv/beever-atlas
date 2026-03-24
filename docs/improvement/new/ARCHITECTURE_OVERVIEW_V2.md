@@ -113,6 +113,11 @@ flowchart TB
         M3["Quality logs"]
     end
 
+    subgraph Decompose["🔀 QUERY DECOMPOSITION"]
+        direction TB
+        QD["QueryDecomposer<br/>(LLM flash-lite)<br/>Complex → parallel sub-queries"]
+    end
+
     subgraph Router["🧠 SMART QUERY ROUTER"]
         direction TB
         QU["Query Understanding<br/>(LLM flash-lite)"]
@@ -128,6 +133,11 @@ flowchart TB
     subgraph Sys2["🔗 SYSTEM-2: Graph Retrieval"]
         direction TB
         S2R["Entity resolution<br/>Multi-hop traversal<br/>Temporal chain following<br/>Episodic enrichment from Weaviate"]
+    end
+
+    subgraph ExtSearch["🌐 EXTERNAL SEARCH"]
+        direction TB
+        ES["Tavily API<br/>Web search + doc lookup<br/>Content extraction"]
     end
 
     subgraph Response["📤 RESPONSE GENERATION"]
@@ -152,12 +162,15 @@ flowchart TB
     P6 --> GraphMem
     P6 --> State
 
+    Decompose --> Router
     Router --> |"semantic"| Sys1
     Router --> |"graph"| Sys2
     Router --> |"both"| Sys1 & Sys2
+    Decompose --> |"external_queries"| ExtSearch
 
     Sys1 --> Response
     Sys2 --> Response
+    ExtSearch --> Response
 
     SemanticMem --> Sys1
     GraphMem --> Sys2
@@ -174,9 +187,11 @@ flowchart TB
     style SemanticMem fill:#e8f5e9,color:#333
     style GraphMem fill:#e1f5fe,color:#333
     style State fill:#eceff1,color:#333
+    style Decompose fill:#fce4ec,color:#333
     style Router fill:#fff8e1,color:#333
     style Sys1 fill:#e8f5e9,color:#333
     style Sys2 fill:#e1f5fe,color:#333
+    style ExtSearch fill:#fff3e0,color:#333
     style Response fill:#e0f2f1,color:#333
     style Wiki fill:#fce4ec,color:#333
     style Lifecycle fill:#fff8e1,color:#333
@@ -220,7 +235,7 @@ flowchart LR
     CS -.->|"POST /api/ingest"| Norm
 
     style Mode1 fill:#e8f5e9,color:#333
-    style Mode2 fill:#fff3e0,stroke-dasharray: 5 5,color:#333
+    style Mode2 fill:#fff3e0,color:#333,stroke-dasharray: 5 5
 ```
 
 **Mode 1 (Python Adapters)** is the primary ingestion path. Each adapter fetches message history via platform-specific APIs and normalizes to `NormalizedMessage`.
@@ -613,7 +628,10 @@ Query: "How did the auth approach evolve?"
 
 ```mermaid
 flowchart TB
-    Q["User Query"] --> QU["Query Understanding<br/>(LLM Flash Lite ~$0.001)"]
+    Q["User Query"] --> QD["Query Decomposer<br/>(simple → pass-through<br/>complex → parallel sub-queries)"]
+
+    QD --> QU["Query Understanding<br/>(LLM Flash Lite ~$0.001)"]
+    QD --> |"external_queries"| EXT["External Search<br/>(Tavily API)"]
 
     QU --> |"route=semantic<br/>conf > 0.7"| S1["SYSTEM-1<br/>Semantic Retrieval<br/>(Weaviate 3-tier)"]
 
@@ -626,12 +644,15 @@ flowchart TB
 
     S1 --> MERGE["Result Merger<br/>Dedup + rank + decay"]
     S2 --> MERGE
+    EXT --> MERGE
 
     MERGE --> RESP["Response Generator<br/>(Gemini Flash)<br/>Grounded answer + citations"]
 
     style S1 fill:#e8f5e9,color:#333
     style S2 fill:#e1f5fe,color:#333
     style BOTH fill:#fff8e1,color:#333
+    style EXT fill:#fff3e0,color:#333
+    style QD fill:#fce4ec,color:#333
 ```
 
 ### Routing Decision Table
@@ -647,6 +668,8 @@ flowchart TB
 | "How did the auth approach evolve?" | Graph (temporal) | System-2 | ~$0.005 | ~500ms |
 | "What blocks the migration project?" | Graph | System-2 | ~$0.005 | ~500ms |
 | "Tell me about the JWT migration" | Both (parallel) | System-1 + 2 | ~$0.006 | ~500ms |
+| "How does our auth compare to best practices?" | Decomposed | Internal + External (Tavily) | ~$0.01 | ~1.5s |
+| "What auth method did we pick and is it OWASP-compliant?" | Decomposed | System-1 + Tavily parallel | ~$0.01 | ~1.5s |
 
 ### Average Query Cost
 
@@ -929,9 +952,11 @@ flowchart TB
 
     subgraph App["⚙️ APPLICATION LAYER"]
         A1["Ingestion Service<br/>Adapters + Pipeline"]
+        A0["Query Decomposer<br/>Parallel sub-queries"]
         A2["Query Router<br/>Understanding + Routing"]
         A3["Semantic Retriever<br/>Weaviate 3-tier"]
         A4["Graph Retriever<br/>Neo4j traversal"]
+        A7["External Search<br/>Tavily API"]
         A5["Wiki Service<br/>Generation + Cache"]
         A6["Consolidation Service<br/>Clusters + Summaries"]
     end
@@ -974,6 +999,7 @@ flowchart TB
 | **Embeddings** | Jina v4 | 2048-dim unified multimodal space (text + image + doc in same space) |
 | **LLM (cheap)** | Gemini Flash Lite | $0.30/1M tokens — extraction, tagging, query understanding |
 | **LLM (quality)** | Gemini Flash | $0.60/1M tokens — response generation, complex synthesis |
+| **External Search** | Tavily | AI-optimized web search, doc extraction, 1K free credits/mo |
 | **Backend** | FastAPI | Async-first, MCP support via FastMCP, Python ecosystem |
 | **Frontend** | React + Vite | Fast dev, component ecosystem, Tailwind CSS |
 
@@ -1033,9 +1059,11 @@ src/beever_atlas/
 │   └── mongo_store.py               #   State + wiki cache
 │
 ├── retrieval/                       # Query system
+│   ├── query_decomposer.py         #   Complex Q → parallel sub-queries
 │   ├── query_router.py              #   LLM understanding + routing
 │   ├── semantic_retriever.py        #   System-1 (Weaviate)
 │   ├── graph_retriever.py           #   System-2 (Neo4j + enrichment)
+│   ├── external_search.py           #   Tavily web search (from v1)
 │   ├── result_merger.py             #   Merge + dedup + rank
 │   ├── temporal.py                  #   Ebbinghaus decay
 │   ├── consolidation.py             #   Cluster building (FIXED)
@@ -1086,6 +1114,8 @@ src/beever_atlas/
 | "What blocks the migration?" | System-2 | Neo4j traversal | ~$0.005 | ~500ms |
 | "Tell me about JWT migration" | Both | Parallel → merge | ~$0.006 | ~500ms |
 | "Why did we choose PostgreSQL?" | Both | Parallel → LLM synth | ~$0.025 | ~2s |
+| "How does our auth compare to OWASP?" | Decomposed | Internal + Tavily | ~$0.01 | ~1.5s |
+| "What auth did we pick and is it secure?" | Decomposed | System-1 + Tavily | ~$0.01 | ~1.5s |
 
 ---
 
@@ -1111,6 +1141,8 @@ src/beever_atlas/
 | **Cross-Modal Search** | Text query finding images/PDFs via unified embedding space |
 | **NormalizedMessage** | Platform-agnostic message model for multi-platform ingestion |
 | **Consolidation** | Background service that builds topic clusters and channel summaries |
+| **Query Decomposition** | Breaking complex questions into focused parallel sub-queries (internal + external) |
+| **External Search** | Tavily-powered web search for best practices, docs, and industry comparisons |
 
 ---
 

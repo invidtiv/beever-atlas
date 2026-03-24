@@ -589,6 +589,61 @@ class Neo4jStore:
 
 ## 4. Smart Query Router
 
+### 4.0 Query Decomposition (Preserved from v1)
+
+Complex questions are decomposed into focused parallel sub-queries before routing. This was a key v1 feature that the v2 router must preserve and enhance.
+
+```python
+class QueryDecomposer:
+    """Decompose complex questions into parallel sub-queries.
+
+    Example:
+    "What auth method did we decide on and how does it compare to best practices?"
+    → internal_queries:
+        - {"query": "authentication decision JWT", "focus": "decision"}
+        - {"query": "OAuth implementation alice", "focus": "implementation"}
+    → external_queries:
+        - {"query": "JWT vs OAuth best practices 2025", "focus": "comparison"}
+    """
+
+    async def decompose(self, question: str) -> QueryPlan:
+        """Break down a question into internal + external sub-queries."""
+        # Fast path: simple questions → single internal query, no decomposition
+        if self._is_simple(question):
+            return QueryPlan(
+                internal_queries=[{"query": question, "focus": "direct"}],
+                external_queries=[],
+            )
+
+        # Complex questions → LLM decomposition (flash-lite)
+        plan = await self._llm_decompose(question)
+        return plan  # 2-4 internal + 0-2 external queries
+
+DECOMPOSITION_PROMPT = """
+You are a query decomposition specialist. Break down this question into
+focused sub-queries that can be executed in parallel.
+
+OUTPUT JSON:
+{
+    "internal_queries": [
+        {"query": "specific search terms", "focus": "what this targets"}
+    ],
+    "external_queries": [
+        {"query": "web search terms", "focus": "what to learn from web"}
+    ]
+}
+
+RULES:
+1. Generate 2-4 focused internal queries for different aspects
+2. Generate 0-2 external queries ONLY if best practices / documentation
+   comparison is needed
+3. Internal queries should be keyword-focused (not full sentences)
+4. If the question is simple, a single internal query suffices
+"""
+```
+
+The decomposed sub-queries are then each routed independently through the Query Understanding step below, enabling parallel execution across both memory systems AND external search.
+
 ### 4.1 LLM-Powered Query Understanding
 
 Replaces the brittle regex classifier (weakness 1.10) with an LLM call (~$0.001/query using flash-lite).
@@ -688,6 +743,61 @@ Output JSON.
 | "What blocks the migration?" | Graph | Project→BLOCKED_BY traversal | $0.005 | ~500ms |
 | "Tell me about the JWT migration" | Both (parallel) | Needs facts AND relationships | $0.006 | ~500ms |
 | "What happened with auth last week?" | Both (parallel) | Temporal + factual | $0.006 | ~500ms |
+
+### 4.3 External Search (Tavily — Preserved from v1)
+
+The v1 external search via Tavily is preserved in v2. It handles factual queries that require web knowledge (best practices, documentation, industry comparisons) — things NOT in the team's Slack history.
+
+```python
+class ExternalSearchService:
+    """Web search via Tavily API for grounding with external knowledge.
+
+    Why Tavily:
+    - Cost-effective: 1,000 free credits/month vs $35/1K (Google)
+    - Multiple tools: search, extract, crawl
+    - No model restrictions: works with any LLM
+    - Designed for AI/RAG: optimized for LLM consumption
+    """
+
+    async def search(self, query: str, search_depth: str = "basic",
+                     max_results: int = 5, include_answer: bool = True,
+                     include_domains: list[str] | None = None,
+                     exclude_domains: list[str] | None = None,
+                     ) -> ExternalSearchResponse:
+        """Search the web. Returns results + optional AI-generated answer."""
+        ...
+
+    async def search_documentation(self, query: str,
+                                    technology: str | None = None,
+                                    max_results: int = 5,
+                                    ) -> ExternalSearchResponse:
+        """Optimized for finding API docs, tutorials, official docs."""
+        ...
+
+    async def extract_content(self, urls: list[str]) -> dict[str, str]:
+        """Extract clean content from specific URLs."""
+        ...
+```
+
+**Integration with Query Decomposition:**
+
+When the `QueryDecomposer` produces `external_queries`, they are executed via Tavily in parallel with internal queries:
+
+```
+Complex Query → QueryDecomposer
+  ├─ internal_queries → [routed to Semantic/Graph in parallel]
+  └─ external_queries → [executed via Tavily in parallel]
+      → Results merged into response context
+```
+
+**Routing decision:** The router classifies `external` queries via the decomposer, not via the query understanding LLM. Only queries that need web knowledge (comparisons, docs, best practices) generate external sub-queries.
+
+| Config | Default |
+|--------|---------|
+| `TAVILY_API_KEY` | Required for external search |
+| `ENABLE_EXTERNAL_SEARCH` | `true` |
+| `TAVILY_SEARCH_DEPTH` | `"basic"` (1 credit) or `"advanced"` (2 credits) |
+| `TAVILY_MAX_RESULTS` | `5` |
 
 #### Graph Retrieval with Weaviate Enrichment
 
@@ -974,9 +1084,11 @@ src/beever_atlas/
 │   └── mongo_store.py           # State + wiki cache
 │
 ├── retrieval/                   # Query system
+│   ├── query_decomposer.py     # Complex question → parallel sub-queries
 │   ├── query_router.py          # LLM understanding + routing
 │   ├── semantic_retriever.py    # Weaviate 3-tier (improved)
 │   ├── graph_retriever.py       # Neo4j traversal + Weaviate enrichment
+│   ├── external_search.py       # Tavily web search (preserved from v1)
 │   ├── result_merger.py         # Merge + dedup + rank
 │   ├── temporal.py              # Temporal decay (ACTUALLY APPLIED)
 │   ├── consolidation.py         # Cluster building (ACTUALLY LINKS)
@@ -1016,6 +1128,7 @@ src/beever_atlas/
 3. **Consolidation frequency**: After every sync? Daily schedule? On-demand?
 4. **MCP surface**: Expose graph queries as separate tools (`query_graph`) or abstract behind `ask_questions`?
 5. **Chat SDK bridge**: Worth building the TypeScript webhook service for real-time ingestion in Phase 2?
+6. **Decomposition threshold**: When should queries be decomposed vs. sent as-is? Token length? LLM confidence?
 
 ---
 
