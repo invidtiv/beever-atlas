@@ -57,3 +57,7 @@ bot/node_modules/
 bot/dist/
 web/node_modules/
 web/dist/
+.omc/
+.agents/
+.impeccable.md
+beever.pen
