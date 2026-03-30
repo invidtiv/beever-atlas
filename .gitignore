@@ -57,7 +57,9 @@ bot/node_modules/
 bot/dist/
 web/node_modules/
 web/dist/
-.omc/
+
+# Tooling state (OMC, agents, etc.)
+**/.omc/
 .agents/
 .impeccable.md
-beever.pen
+*.pen
