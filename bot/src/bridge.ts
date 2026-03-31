@@ -378,7 +378,7 @@ async function handleFileProxy(
 ): Promise<void> {
   try {
     const decodedUrl = decodeURIComponent(fileUrl);
-    const token = (slackAdapter as any).client.token;
+    const token = (slackAdapter as any).getToken();
     const response = await fetch(decodedUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
