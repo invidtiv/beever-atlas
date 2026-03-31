@@ -68,6 +68,28 @@ async def main() -> None:
         from beever_atlas.adapters.bridge import ChatBridgeAdapter
         adapter = ChatBridgeAdapter(bridge_url=settings.bridge_url, api_key=settings.bridge_api_key)
         messages = await adapter.fetch_history(args.channel_id, limit=500)
+        print(f"   Fetched {len(messages)} top-level messages")
+
+        # Fetch thread replies for messages with reply_count > 0
+        thread_parents = [m for m in messages if getattr(m, "reply_count", 0) > 0]
+        if thread_parents:
+            print(f"   Fetching replies for {len(thread_parents)} threads...")
+            total_replies = 0
+            merged: list[Any] = []
+            for m in messages:
+                merged.append(m)
+                if getattr(m, "reply_count", 0) > 0:
+                    mid = getattr(m, "message_id", "")
+                    try:
+                        replies = await adapter.fetch_thread(args.channel_id, mid)
+                        replies = [r for r in replies if getattr(r, "message_id", "") != mid]
+                        merged.extend(replies)
+                        total_replies += len(replies)
+                    except Exception as e:
+                        print(f"   ⚠️  Failed to fetch thread {mid}: {e}")
+            messages = merged
+            print(f"   Fetched {total_replies} thread replies")
+
         raw_messages = [vars(m) for m in messages]
         # Cache for next time
         cache_file.write_text(json.dumps(raw_messages, default=str, indent=2))

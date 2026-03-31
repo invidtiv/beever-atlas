@@ -112,6 +112,45 @@ async def get_channel_messages(
     ]
 
 
+@router.get(
+    "/api/channels/{channel_id}/threads/{thread_id}/messages",
+    response_model=list[MessageResponse],
+)
+async def get_thread_messages(
+    channel_id: str,
+    thread_id: str,
+) -> list[MessageResponse]:
+    """Get all messages in a thread (parent + replies)."""
+    adapter = get_adapter()
+    try:
+        messages = await adapter.fetch_thread(channel_id, thread_id)
+    except (KeyError, Exception) as e:
+        raise HTTPException(
+            status_code=404, detail=f"Thread {thread_id} not found"
+        ) from e
+
+    return [
+        MessageResponse(
+            content=m.content,
+            author=m.author,
+            author_name=m.author_name,
+            author_image=m.author_image,
+            platform=m.platform,
+            channel_id=m.channel_id,
+            channel_name=m.channel_name,
+            message_id=m.message_id,
+            timestamp=m.timestamp.isoformat(),
+            thread_id=m.thread_id,
+            attachments=m.attachments,
+            reactions=m.reactions,
+            reply_count=m.reply_count,
+            is_bot=m.raw_metadata.get("is_bot", False),
+            links=m.raw_metadata.get("links", []),
+        )
+        for m in messages
+    ]
+
+
 @router.get("/api/files/proxy")
 async def proxy_file(url: str = Query(..., description="Slack file URL to proxy")):
     adapter = get_adapter()

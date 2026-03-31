@@ -9,6 +9,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Chat } from "chat";
 import type { SlackAdapter } from "@chat-adapter/slack";
+import { cleanSlackMrkdwn } from "./slack-mrkdwn.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ interface NormalizedMessage {
   reactions: Array<{ name: string; count: number }>;
   reply_count: number;
   is_bot: boolean;
+  subtype: string | null;
   links: Array<{ url: string; title?: string; description?: string; imageUrl?: string; siteName?: string }>;
 }
 
@@ -239,8 +241,20 @@ async function handleGetMessages(
     const messages: NormalizedMessage[] = rawMessages.map(
       ({ msg, dateSent, authorId, isBot, authorNameHint }) => {
         const userInfo = userMap.get(authorId);
+        // Use raw Slack event text (preserves \n) instead of Chat SDK's
+        // extractPlainText() which strips newlines.
+        const raw = (msg as any).raw || {};
+        const rawText: string = raw.text || msg.text || "";
+        const subtype: string | undefined = raw.subtype;
+        const botId: string | undefined = raw.bot_id;
+        const threadTs: string | undefined = raw.thread_ts;
+        const rawReplyCount: number = raw.reply_count || 0;
+        // A message is a bot if Chat SDK says so, or raw event has bot_id,
+        // or subtype is "bot_message".
+        const detectedBot = isBot || !!botId || subtype === "bot_message";
+
         return {
-          content: msg.text || "",
+          content: cleanSlackMrkdwn(rawText, userMap),
           author: authorId,
           author_name: authorNameHint || userInfo?.name || authorId,
           author_image: userInfo?.image || null,
@@ -249,15 +263,16 @@ async function handleGetMessages(
           channel_name: channelName,
           message_id: msg.id || "",
           timestamp: dateSent?.toISOString() || new Date().toISOString(),
-          thread_id: null, // top-level channel messages
+          thread_id: threadTs && threadTs !== msg.id ? threadTs : null,
           attachments: (msg.attachments || []).map((a: any) => ({
             type: a.type || "file",
             url: a.url,
             name: a.name,
           })),
           reactions: [], // Chat SDK doesn't expose reactions on fetched messages
-          reply_count: 0,
-          is_bot: isBot,
+          reply_count: rawReplyCount,
+          is_bot: detectedBot,
+          subtype: subtype || null,
           links: (msg.links || []).map((l: any) => ({
             url: l.url,
             title: l.title,
@@ -282,47 +297,70 @@ async function handleGetMessages(
 async function handleGetThreadMessages(
   _req: IncomingMessage,
   res: ServerResponse,
-  bot: Chat,
+  slackAdapter: SlackAdapter,
   channelId: string,
   threadId: string,
 ): Promise<void> {
   try {
-    const platform = detectPlatform(bot);
-    const channel = bot.channel(`${platform}:${channelId}`);
-    const channelName = (await channel.fetchMetadata()).name || "";
+    // Use Slack conversations.replies API directly — O(1) vs O(n) channel iteration
+    const result = await (slackAdapter as any).client.conversations.replies({
+      channel: channelId,
+      ts: threadId,
+      limit: 200,
+    });
 
-    // Construct thread ID in Chat SDK format
-    const fullThreadId = `${platform}:${channelId}:${threadId}`;
+    const rawReplies = result.messages || [];
 
-    // Access thread through the channel
-    const messages: NormalizedMessage[] = [];
-
-    for await (const msg of channel.messages) {
-      // Find the thread root and its replies
-      if (msg.id === threadId || msg.threadId === fullThreadId) {
-        messages.push({
-          content: msg.text || "",
-          author: msg.author?.userId || "unknown",
-          author_name: msg.author?.userName || msg.author?.fullName || "unknown",
-          author_image: null,
-          platform,
-          channel_id: channelId,
-          channel_name: channelName,
-          message_id: msg.id || "",
-          timestamp: msg.metadata?.dateSent?.toISOString() || new Date().toISOString(),
-          thread_id: threadId,
-          attachments: (msg.attachments || []).map((a) => ({
-            type: a.type || "file",
-            url: a.url,
-            name: a.name,
-          })),
-          reactions: [],
-          reply_count: 0,
-          is_bot: msg.author?.isBot === true,
-          links: [],
-        });
+    // Resolve user profiles for all authors
+    const userIds: string[] = [...new Set<string>(
+      rawReplies
+        .filter((m: any) => m.user && !m.bot_id)
+        .map((m: any) => m.user as string),
+    )];
+    const userMap = new Map<string, { name: string; image: string | null }>();
+    for (let i = 0; i < userIds.length; i += USER_LOOKUP_CONCURRENCY) {
+      const chunk = userIds.slice(i, i + USER_LOOKUP_CONCURRENCY);
+      const resolved = await Promise.all(
+        chunk.map(async (uid: string) => [uid, await resolveUser(slackAdapter, uid)] as const),
+      );
+      for (const [uid, profile] of resolved) {
+        userMap.set(uid, profile);
       }
     }
+
+    const messages: NormalizedMessage[] = rawReplies.map((msg: any) => {
+      const authorId: string = msg.user || msg.bot_id || "unknown";
+      const userInfo = userMap.get(authorId);
+      const subtype: string | undefined = msg.subtype;
+      const detectedBot = !!msg.bot_id || subtype === "bot_message";
+      const rawText: string = msg.text || "";
+
+      return {
+        content: cleanSlackMrkdwn(rawText, userMap),
+        author: authorId,
+        author_name: msg.username || userInfo?.name || authorId,
+        author_image: userInfo?.image || null,
+        platform: "slack",
+        channel_id: channelId,
+        channel_name: "",
+        message_id: msg.ts || "",
+        timestamp: new Date(Number.parseFloat(msg.ts || "0") * 1000).toISOString(),
+        thread_id: threadId,
+        attachments: (msg.files || []).map((f: any) => ({
+          type: f.mimetype?.startsWith("image/") ? "image" : "file",
+          url: f.url_private,
+          name: f.name,
+        })),
+        reactions: (msg.reactions || []).map((r: any) => ({
+          name: r.name,
+          count: r.count,
+        })),
+        reply_count: 0,
+        is_bot: detectedBot,
+        subtype: subtype || null,
+        links: [],
+      };
+    });
 
     jsonResponse(res, 200, { messages });
   } catch (err) {
@@ -383,7 +421,7 @@ export function registerBridgeRoutes(
       /^\/bridge\/channels\/([^/]+)\/threads\/([^/]+)\/messages/,
     );
     if (req.method === "GET" && threadMatch) {
-      await handleGetThreadMessages(req, res, bot, threadMatch[1], threadMatch[2]);
+      await handleGetThreadMessages(req, res, slackAdapter, threadMatch[1], threadMatch[2]);
       return true;
     }
 

@@ -149,12 +149,15 @@ class SyncRunner:
                 resolved_type,
             )
 
-        # 4. Get channel info for the human-readable name.
+        # 4. Fetch thread replies for messages with reply_count > 0.
+        messages = await self._fetch_thread_replies(channel_id, messages)
+
+        # 5. Get channel info for the human-readable name.
         adapter = get_adapter()
         channel_info = await adapter.get_channel_info(channel_id)
         channel_name = channel_info.name
 
-        # 5. Create sync job in MongoDB.
+        # 6. Create sync job in MongoDB.
         job = await stores.mongodb.create_sync_job(
             channel_id=channel_id,
             sync_type=resolved_type,
@@ -163,7 +166,7 @@ class SyncRunner:
         )
         job_id: str = job.id
 
-        # 6. Launch background task and track it.
+        # 7. Launch background task and track it.
         task = asyncio.create_task(
             self._run_sync(
                 job_id=job_id,
@@ -257,6 +260,79 @@ class SyncRunner:
             cursor = latest_ts
 
         return all_messages
+
+    async def _fetch_thread_replies(
+        self,
+        channel_id: str,
+        messages: list[Any],
+    ) -> list[Any]:
+        """Fetch thread replies for messages with reply_count > 0.
+
+        Inserts replies adjacent to their parent so the batch processor
+        groups them in the same batch for thread context resolution.
+
+        Uses a semaphore to respect Slack API rate limits (Tier 3).
+        """
+        adapter = get_adapter()
+        sem = asyncio.Semaphore(3)
+
+        # Identify thread parents
+        thread_parents = [
+            m for m in messages
+            if getattr(m, "reply_count", 0) > 0
+        ]
+
+        if not thread_parents:
+            return messages
+
+        logger.info(
+            "SyncRunner: fetching thread replies for %d threads in channel %s",
+            len(thread_parents),
+            channel_id,
+        )
+
+        # Fetch replies concurrently with semaphore
+        async def _fetch_one(msg: Any) -> tuple[str, list[Any]]:
+            thread_id = getattr(msg, "message_id", "") or getattr(msg, "ts", "")
+            async with sem:
+                try:
+                    replies = await adapter.fetch_thread(channel_id, thread_id)
+                    # Exclude the parent message (Slack includes it as first reply)
+                    replies = [
+                        r for r in replies
+                        if getattr(r, "message_id", "") != thread_id
+                    ]
+                    return (thread_id, replies)
+                except Exception as e:
+                    logger.warning(
+                        "SyncRunner: failed to fetch thread %s: %s",
+                        thread_id,
+                        e,
+                    )
+                    return (thread_id, [])
+
+        results = await asyncio.gather(*[_fetch_one(m) for m in thread_parents])
+        thread_replies: dict[str, list[Any]] = dict(results)
+
+        # Insert replies after their parent in the message list
+        merged: list[Any] = []
+        total_replies = 0
+        for m in messages:
+            merged.append(m)
+            mid = getattr(m, "message_id", "") or getattr(m, "ts", "")
+            if mid in thread_replies:
+                replies = thread_replies[mid]
+                merged.extend(replies)
+                total_replies += len(replies)
+
+        logger.info(
+            "SyncRunner: fetched %d thread replies across %d threads for channel %s",
+            total_replies,
+            len(thread_parents),
+            channel_id,
+        )
+
+        return merged
 
     async def _run_sync(
         self,

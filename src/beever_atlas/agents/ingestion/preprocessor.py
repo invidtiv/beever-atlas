@@ -9,6 +9,7 @@ No LLM calls are made; this is a deterministic ``BaseAgent`` subclass.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
@@ -39,6 +40,56 @@ _SYSTEM_SUBTYPES: frozenset[str] = frozenset(
         "unpinned_item",
     }
 )
+
+
+# ── Slack mrkdwn fallback cleaner ────────────────────────────────────────────
+# The bridge (TypeScript) does primary cleaning. This is a safety net so the
+# LLM never sees raw Slack markup even if the bridge is bypassed or misses
+# an edge case.
+
+_SLACK_LINK_RE = re.compile(r"<([^>]+)>")
+_HTML_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">"}
+
+
+def _clean_slack_text(text: str) -> str:
+    """Strip residual Slack mrkdwn markup from message text.
+
+    Handles ``<url|label>`` links, ``<@U123>`` mentions, ``<#C123|name>``
+    channel refs, ``<!here>``-style special mentions, and HTML entities.
+    """
+    if not text:
+        return text
+
+    def _replace_bracket(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        # User mention: <@U123> or <@U123|name>
+        if inner.startswith("@"):
+            parts = inner.split("|", 1)
+            return f"@{parts[1]}" if len(parts) > 1 else f"@{inner[1:]}"
+        # Channel mention: <#C123|name>
+        if inner.startswith("#"):
+            parts = inner.split("|", 1)
+            return f"#{parts[1]}" if len(parts) > 1 else f"#{inner[1:]}"
+        # Special: <!here>, <!channel>, <!everyone>, <!subteam^...|@group>
+        if inner.startswith("!"):
+            parts = inner.split("|", 1)
+            if len(parts) > 1:
+                return parts[1]
+            keyword = inner[1:].split("^")[0]
+            return f"@{keyword}"
+        # URL with label: <url|label>
+        if "|" in inner:
+            return inner.split("|", 1)[1]
+        # Bare URL
+        return inner
+
+    cleaned = _SLACK_LINK_RE.sub(_replace_bracket, text)
+
+    # Decode HTML entities
+    for entity, char in _HTML_ENTITIES.items():
+        cleaned = cleaned.replace(entity, char)
+
+    return cleaned
 
 
 def _is_skippable(msg: dict[str, Any]) -> bool:
@@ -207,7 +258,8 @@ class PreprocessorAgent(BaseAgent):
 
             enriched = dict(msg)
             # Normalize to prompt-expected keys while preserving the original payload.
-            enriched["text"] = (msg.get("text") or msg.get("content") or "").strip()
+            raw_text = (msg.get("text") or msg.get("content") or "").strip()
+            enriched["text"] = _clean_slack_text(raw_text)
             enriched["ts"] = _coerce_timestamp_str(msg)
             enriched["user"] = msg.get("user") or msg.get("author") or "unknown"
             enriched["username"] = (

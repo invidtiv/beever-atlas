@@ -5,6 +5,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AlertCircle, MessageSquare, ChevronDown, ChevronUp, ImageIcon, Play, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { emojify } from "node-emoji";
 import type { SyncState } from "@/hooks/useSync";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -24,6 +25,7 @@ interface Message {
   reactions: Array<{ name: string; count: number }>;
   reply_count: number;
   is_bot: boolean;
+  subtype: string | null;
   links: Array<{ url: string; title?: string; description?: string; imageUrl?: string; siteName?: string }>;
 }
 
@@ -81,15 +83,44 @@ function reactionEmoji(name: string): string {
   return map[name] ?? `:${name}:`;
 }
 
+/**
+ * Clean any residual Slack mrkdwn that survived bridge cleaning.
+ * This is a frontend safety net — the bridge handles primary cleanup.
+ */
+function cleanResidualSlackMarkup(text: string): string {
+  // <url|label> → label, <@U123> → @U123, <#C123|name> → #name
+  return text.replace(/<([^>]+)>/g, (_m, inner: string) => {
+    if (inner.startsWith("@")) {
+      const parts = inner.split("|");
+      return `@${parts[1] || inner.slice(1)}`;
+    }
+    if (inner.startsWith("#")) {
+      const parts = inner.split("|");
+      return `#${parts[1] || inner.slice(1)}`;
+    }
+    if (inner.startsWith("!")) {
+      const parts = inner.split("|");
+      if (parts[1]) return parts[1];
+      return `@${inner.slice(1).split("^")[0]}`;
+    }
+    if (inner.includes("|")) return inner.split("|")[1];
+    return inner;
+  });
+}
+
 function renderContent(text: string): React.ReactNode {
-  const parts = text.split(/(https?:\/\/[^\s<]+|<@[A-Z0-9]+>)/g);
+  const cleaned = cleanResidualSlackMarkup(text);
+  // Convert Slack emoji shortcodes (:tada:, :rocket:, etc.) to Unicode
+  const withEmoji = emojify(cleaned, { fallback: (name) => `:${name}:` });
+  // Split on URLs and @mentions (1-3 capitalized name words only)
+  // Match @FirstName or @FirstName LastName (max 2 words for names)
+  const parts = withEmoji.split(/(https?:\/\/[^\s]+|@[A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)?)/g);
   return parts.map((part, i) => {
     if (part.match(/^https?:\/\//)) {
       return <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-all">{part}</a>;
     }
-    if (part.match(/^<@[A-Z0-9]+>$/)) {
-      const userId = part.slice(2, -1);
-      return <span key={i} className="bg-primary/10 text-primary rounded px-1 py-0.5 text-sm font-medium">@{userId}</span>;
+    if (part.match(/^@[A-Z]/)) {
+      return <span key={i} className="bg-primary/10 text-primary rounded px-1 py-0.5 text-sm font-medium">{part}</span>;
     }
     return part;
   });
@@ -221,47 +252,87 @@ export function MessagesTab() {
     );
   }
 
-  const topLevel = messages.filter((m) => !m.thread_id);
-  const threaded = messages.filter((m) => m.thread_id);
-  const threadMap = new Map<string, Message[]>();
-  for (const m of threaded) {
-    if (!threadMap.has(m.thread_id!)) threadMap.set(m.thread_id!, []);
-    threadMap.get(m.thread_id!)!.push(m);
-  }
+  // Filter out system messages (channel_join, channel_leave, etc.)
+  const SYSTEM_SUBTYPES = new Set([
+    "channel_join", "channel_leave", "channel_topic", "channel_purpose",
+    "channel_name", "channel_archive", "channel_unarchive",
+    "group_join", "group_leave", "bot_add", "bot_remove",
+    "pinned_item", "unpinned_item",
+  ]);
+  // Content-based fallback: Chat SDK history may not expose subtype
+  const SYSTEM_CONTENT_PATTERNS = /has joined the channel|has left the channel|set the channel topic|set the channel purpose|was added to the channel|was removed from the channel/i;
+  const displayMessages = messages.filter((m) => {
+    if (m.subtype && SYSTEM_SUBTYPES.has(m.subtype)) return false;
+    if (SYSTEM_CONTENT_PATTERNS.test(m.content)) return false;
+    return true;
+  });
+
+  const topLevel = displayMessages.filter((m) => !m.thread_id);
 
   return (
     <div className="animate-fade-in bg-muted/10 min-h-full">
       <div className="p-4 sm:p-6 py-6">
         <div className="max-w-4xl mx-auto space-y-5">
           <h2 className="text-base font-semibold tracking-tight text-foreground mb-1">
-            {messages.length} messages
+            {displayMessages.length} messages
           </h2>
-          {topLevel.map((msg) => {
-            const replies = threadMap.get(msg.message_id) ?? [];
-            return <MessageThreadCard key={msg.message_id} msg={msg} replies={replies} />;
-          })}
+          {topLevel.map((msg) => (
+            <MessageThreadCard key={msg.message_id} msg={msg} channelId={channelId!} />
+          ))}
         </div>
       </div>
     </div>
   );
 }
 
-function MessageThreadCard({ msg, replies }: { msg: Message; replies: Message[] }) {
+function MessageThreadCard({ msg, channelId }: { msg: Message; channelId: string }) {
   const [expanded, setExpanded] = useState(false);
+  const [replies, setReplies] = useState<Message[]>([]);
+  const [loadingReplies, setLoadingReplies] = useState(false);
+  const hasReplies = msg.reply_count > 0;
+
+  const toggleReplies = useCallback(() => {
+    if (!expanded && replies.length === 0 && hasReplies) {
+      setLoadingReplies(true);
+      api
+        .get<Message[]>(`/api/channels/${channelId}/threads/${msg.message_id}/messages`)
+        .then((data) => {
+          // Filter out the parent message (first reply is the parent in Slack's API)
+          setReplies(data.filter((m) => m.message_id !== msg.message_id));
+        })
+        .catch((err) => console.error("Failed to fetch thread replies:", err))
+        .finally(() => setLoadingReplies(false));
+    }
+    setExpanded(!expanded);
+  }, [expanded, replies.length, hasReplies, channelId, msg.message_id]);
 
   return (
     <div className="bg-card border border-border/60 shadow-sm rounded-xl p-5 transition-shadow hover:shadow-md">
       <MessageRow
         msg={msg}
-        onToggleReplies={replies.length > 0 ? () => setExpanded(!expanded) : undefined}
+        onToggleReplies={hasReplies ? toggleReplies : undefined}
         isExpanded={expanded}
       />
-      {expanded && replies.length > 0 && (
+      {expanded && (
         <div className="relative mt-4 ml-[22px] pl-6 sm:pl-8 space-y-2 pt-2">
           <div className="absolute left-0 top-0 bottom-6 w-px bg-border/80" />
-          {replies.map((reply) => (
-            <MessageRow key={reply.message_id} msg={reply} isReply />
-          ))}
+          {loadingReplies ? (
+            <div className="py-3 space-y-2">
+              {Array.from({ length: Math.min(msg.reply_count, 3) }).map((_, i) => (
+                <div key={i} className="flex gap-3 px-2">
+                  <Skeleton className="w-8 h-8 rounded-full shrink-0" />
+                  <div className="flex-1 space-y-1.5">
+                    <Skeleton className="h-3 w-24" />
+                    <Skeleton className="h-4 w-full max-w-xs" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            replies.map((reply) => (
+              <MessageRow key={reply.message_id} msg={reply} isReply />
+            ))
+          )}
         </div>
       )}
     </div>
