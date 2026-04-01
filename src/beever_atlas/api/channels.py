@@ -151,6 +151,38 @@ async def get_thread_messages(
     ]
 
 
+@router.delete("/api/channels/{channel_id}/data")
+async def clear_channel_data(channel_id: str):
+    """Delete all synced data (facts, entities, events, media, sync state) for a channel."""
+    from beever_atlas.stores import get_stores
+
+    stores = get_stores()
+    results: dict[str, Any] = {}
+
+    # Clear Weaviate facts
+    try:
+        weaviate_deleted = await stores.weaviate.delete_by_channel(channel_id)
+        results["weaviate_facts_deleted"] = weaviate_deleted
+    except Exception as exc:
+        results["weaviate_error"] = str(exc)
+
+    # Clear Neo4j entities, events, media
+    try:
+        neo4j_results = await stores.neo4j.delete_channel_data(channel_id)
+        results.update(neo4j_results)
+    except Exception as exc:
+        results["neo4j_error"] = str(exc)
+
+    # Clear MongoDB sync state
+    try:
+        await stores.mongodb.clear_channel_sync_state(channel_id)
+        results["sync_state_cleared"] = True
+    except Exception as exc:
+        results["mongodb_error"] = str(exc)
+
+    return results
+
+
 @router.get("/api/files/proxy")
 async def proxy_file(url: str = Query(..., description="Slack file URL to proxy")):
     adapter = get_adapter()

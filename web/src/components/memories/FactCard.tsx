@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, ExternalLink, ImageIcon, FileText, Film } from "lucide-react";
 import type { MemoryTier2 } from "@/lib/types";
+import { MediaModal } from "@/components/graph/MediaModal";
 
 interface FactCardProps {
   fact: MemoryTier2;
@@ -37,6 +38,7 @@ function formatTimestamp(ts: string | null): string {
 
 export function FactCard({ fact }: FactCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [lightbox, setLightbox] = useState<{ url: string; name: string } | null>(null);
 
   return (
     <div className="rounded-xl border border-border bg-background hover:bg-muted/35 transition-colors">
@@ -115,13 +117,56 @@ export function FactCard({ fact }: FactCardProps) {
               </span>
             ))}
           </div>
-          {fact.source_media_url && fact.source_media_type === "image" && (
-            <img
-              src={`${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/files/proxy?url=${encodeURIComponent(fact.source_media_url)}`}
-              alt="Source media"
-              className="w-20 h-20 rounded-lg border border-border object-cover"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-            />
+          {/* Media attachments (images, PDFs, videos) */}
+          {(fact.source_media_urls?.length > 0 || fact.source_media_url) && (
+            <div className="flex flex-wrap gap-2">
+              {(fact.source_media_urls?.length > 0 ? fact.source_media_urls : [fact.source_media_url].filter(Boolean)).map((url, i) => {
+                const proxyUrl = `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/files/proxy?url=${encodeURIComponent(url)}`;
+                const isImage = fact.source_media_type === "image" || url.match(/\.(png|jpg|jpeg|gif|webp)(\?|$)/i);
+                if (isImage) {
+                  return (
+                    <img
+                      key={url}
+                      src={proxyUrl}
+                      alt="Source media"
+                      className="w-20 h-20 rounded-lg border border-border object-cover cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all"
+                      onClick={() => setLightbox({ url, name: "Image" })}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    />
+                  );
+                }
+                const isPdf = fact.source_media_type === "pdf" || url.match(/\.pdf(\?|$)/i);
+                return (
+                  <a
+                    key={url}
+                    href={proxyUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border border-border bg-muted/50 hover:bg-muted text-foreground transition-colors"
+                  >
+                    {isPdf ? <FileText size={12} /> : <Film size={12} />}
+                    {isPdf ? "View PDF" : "View file"}{fact.source_media_urls?.length > 1 ? ` (${i + 1})` : ""}
+                  </a>
+                );
+              })}
+            </div>
+          )}
+          {/* Shared links/URLs */}
+          {fact.source_link_urls?.length > 0 && (
+            <div className="space-y-1">
+              {fact.source_link_urls.map((url, i) => (
+                <a
+                  key={url}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-xs text-primary hover:underline"
+                >
+                  <ExternalLink size={12} />
+                  {fact.source_link_titles?.[i] || url}
+                </a>
+              ))}
+            </div>
           )}
           {fact.source_message_id && (
             <div className="text-xs text-muted-foreground">
@@ -130,6 +175,14 @@ export function FactCard({ fact }: FactCardProps) {
             </div>
           )}
         </div>
+      )}
+      {lightbox && (
+        <MediaModal
+          name={lightbox.name}
+          url={lightbox.url}
+          mediaType="image"
+          onClose={() => setLightbox(null)}
+        />
       )}
     </div>
   );

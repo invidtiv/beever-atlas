@@ -31,6 +31,13 @@ interface UseGraphReturn {
   refetch: () => void;
 }
 
+interface MediaNode {
+  id: string;
+  url: string;
+  media_type: string;
+  title: string;
+}
+
 export function useGraph(channelId: string): UseGraphReturn {
   const [entities, setEntities] = useState<GraphEntity[]>([]);
   const [relationships, setRelationships] = useState<GraphRelationship[]>([]);
@@ -42,15 +49,40 @@ export function useGraph(channelId: string): UseGraphReturn {
     setLoading(true);
     setError(null);
     try {
-      // API returns flat arrays for entities and relationships separately.
-      const [entityData, relData] = await Promise.all([
+      // Fetch entities, relationships, and media nodes in parallel.
+      const [entityData, relData, mediaData] = await Promise.all([
         api.get<GraphEntity[]>(`/api/graph/entities?channel_id=${channelId}`),
         api.get<{ source: string; target: string; type: string; id?: string }[]>(
           `/api/graph/relationships?channel_id=${channelId}`,
         ),
+        api.get<MediaNode[]>(`/api/graph/media?channel_id=${channelId}`),
       ]);
-      const entities = Array.isArray(entityData) ? entityData : [];
+      const baseEntities = Array.isArray(entityData) ? entityData : [];
+
+      // Convert Media nodes to GraphEntity format for unified rendering.
+      // Deduplicate: skip Media nodes whose name closely matches an existing Entity.
+      const entityNames = new Set(baseEntities.map((e) => e.name.toLowerCase().replace(/[\s_-]+/g, "")));
+      const mediaEntities: GraphEntity[] = (Array.isArray(mediaData) ? mediaData : [])
+        .map((m) => {
+          let name: string;
+          try {
+            name = m.title || (m.media_type === "link" ? new URL(m.url).hostname : m.url.split("/").pop() || m.url);
+          } catch {
+            name = m.url.split("/").pop() || m.url;
+          }
+          return {
+            id: m.id,
+            name,
+            type: m.media_type === "link" ? "Link" : m.media_type === "pdf" ? "Document" : m.media_type === "image" ? "Image" : "Media",
+            scope: "channel",
+            properties: { url: m.url, media_type: m.media_type },
+          };
+        })
+        .filter((m) => !entityNames.has(m.name.toLowerCase().replace(/[\s_-]+/g, "")));
+
+      const entities = [...baseEntities, ...mediaEntities];
       setEntities(entities);
+
       // Map relationship source/target names to entity IDs for cytoscape edges.
       const nameToId = new Map(entities.map((e) => [e.name, e.id]));
       const rels: GraphRelationship[] = (Array.isArray(relData) ? relData : [])

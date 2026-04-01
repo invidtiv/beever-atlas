@@ -253,7 +253,7 @@ async function handleGetMessages(
             type: f.mimetype?.startsWith("image/") ? "image"
                 : f.mimetype?.startsWith("video/") ? "video"
                 : "file",
-            url: f.url_private || f.permalink,
+            url: f.url_private_download || f.url_private || f.permalink,
             name: f.name || f.title,
           })),
           // Slack attachment unfurls with standalone images (not link previews)
@@ -378,17 +378,42 @@ async function handleFileProxy(
 ): Promise<void> {
   try {
     const decodedUrl = decodeURIComponent(fileUrl);
-    const token = (slackAdapter as any).getToken();
-    const response = await fetch(decodedUrl, {
+    const token = (slackAdapter as any).defaultBotToken || (slackAdapter as any).getToken();
+
+    // Try direct download first
+    let response = await fetch(decodedUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
+
+    // If Slack returns HTML instead of the file (common in sandbox/enterprise),
+    // try extracting the file ID and using files.info for url_private_download
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html") && decodedUrl.includes("files-pri")) {
+      console.log("Bridge: fileProxy got HTML, trying files.sharedPublicURL fallback");
+      // Extract file ID from URL: /files-pri/TEAM-FILEID/filename
+      const match = decodedUrl.match(/files-pri\/[^/]+-([^/]+)\//);
+      if (match) {
+        const fileId = `F${match[1]}`;
+        try {
+          const fileInfo = await (slackAdapter as any).client.files.info({ file: fileId });
+          const downloadUrl = fileInfo.file?.url_private_download || fileInfo.file?.url_private;
+          if (downloadUrl) {
+            response = await fetch(downloadUrl, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+          }
+        } catch (e) {
+          console.log("Bridge: files.info fallback failed:", e);
+        }
+      }
+    }
     if (!response.ok) {
       jsonResponse(res, response.status, { error: "Failed to fetch file" });
       return;
     }
-    const contentType = response.headers.get("content-type") || "application/octet-stream";
+    const finalContentType = response.headers.get("content-type") || "application/octet-stream";
     res.writeHead(200, {
-      "Content-Type": contentType,
+      "Content-Type": finalContentType,
       "Cache-Control": "public, max-age=3600",
     });
     const buffer = Buffer.from(await response.arrayBuffer());
@@ -442,8 +467,10 @@ export function registerBridgeRoutes(
 
     // GET /bridge/files?url=...
     if (req.method === "GET" && url.startsWith("/bridge/files")) {
+      console.log("Bridge: /bridge/files route matched, url:", url.slice(0, 80));
       const fileQuery = parseQuery(url);
       const fileUrl = fileQuery.get("url");
+      console.log("Bridge: parsed fileUrl:", fileUrl?.slice(0, 60));
       if (fileUrl) {
         await handleFileProxy(req, res, slackAdapter, fileUrl);
         return true;

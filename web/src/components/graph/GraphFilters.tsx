@@ -13,6 +13,13 @@ const KNOWN_TYPE_COLORS: Record<string, { pill: string; pillActive: string; node
   Team:       { pill: "bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/20", pillActive: "bg-cyan-600 text-white border-cyan-600", node: "#0891B2", nodeBorder: "#0E7490" },
   Meeting:    { pill: "bg-slate-500/10 text-slate-700 dark:text-slate-300 border-slate-500/20", pillActive: "bg-slate-600 text-white border-slate-600", node: "#475569", nodeBorder: "#334155" },
   Artifact:   { pill: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/20", pillActive: "bg-rose-600 text-white border-rose-600", node: "#E11D48", nodeBorder: "#BE123C" },
+  Document:   { pill: "bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/20", pillActive: "bg-orange-600 text-white border-orange-600", node: "#EA580C", nodeBorder: "#C2410C" },
+  Image:      { pill: "bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/20", pillActive: "bg-sky-600 text-white border-sky-600", node: "#0284C7", nodeBorder: "#0369A1" },
+  Link:       { pill: "bg-green-500/10 text-green-700 dark:text-green-300 border-green-500/20", pillActive: "bg-green-600 text-white border-green-600", node: "#16A34A", nodeBorder: "#15803D" },
+  Media:      { pill: "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/20", pillActive: "bg-violet-600 text-white border-violet-600", node: "#7C3AED", nodeBorder: "#6D28D9" },
+  Client:     { pill: "bg-pink-500/10 text-pink-700 dark:text-pink-300 border-pink-500/20", pillActive: "bg-pink-600 text-white border-pink-600", node: "#DB2777", nodeBorder: "#BE185D" },
+  Channel:    { pill: "bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300 border-fuchsia-500/20", pillActive: "bg-fuchsia-600 text-white border-fuchsia-600", node: "#C026D3", nodeBorder: "#A21CAF" },
+  Location:   { pill: "bg-lime-500/10 text-lime-700 dark:text-lime-300 border-lime-500/20", pillActive: "bg-lime-600 text-white border-lime-600", node: "#65A30D", nodeBorder: "#4D7C0F" },
 };
 
 // Generate a deterministic color from a string hash for unknown types

@@ -106,8 +106,14 @@ class PersisterAgent(BaseAgent):
             )
             if source_msg:
                 media_urls = source_msg.get("source_media_urls") or []
+                fact_data["source_media_urls"] = media_urls
                 fact_data["source_media_url"] = media_urls[0] if media_urls else ""
                 fact_data["source_media_type"] = source_msg.get("source_media_type", "")
+                fact_data["source_media_names"] = source_msg.get("source_media_names") or []
+                # Thread link metadata
+                fact_data["source_link_urls"] = source_msg.get("source_link_urls") or []
+                fact_data["source_link_titles"] = source_msg.get("source_link_titles") or []
+                fact_data["source_link_descriptions"] = source_msg.get("source_link_descriptions") or []
 
             fact = AtomicFact(id=fact_id, **fact_data)
             facts.append(fact)
@@ -190,6 +196,45 @@ class PersisterAgent(BaseAgent):
         except Exception:  # noqa: BLE001
             pass  # reconciler handles this
 
+        # --- 4b. Reconcile entity_tags: create stub entities for missing names ---
+        # Facts are ground truth. If a fact references an entity in entity_tags
+        # that the entity extractor didn't create (e.g., due to the orphan rule),
+        # we create a minimal stub entity so episodic + media links succeed.
+        all_tag_names: set[str] = set()
+        for f in facts:
+            all_tag_names.update(f.entity_tags)
+        extracted_names: set[str] = {e.name for e in entities}
+        missing_names = all_tag_names - extracted_names
+        if missing_names:
+            # Check which of these already exist in Neo4j from prior batches
+            for name in list(missing_names):
+                existing = await stores.neo4j.execute_query(
+                    "MATCH (e:Entity {name: $name}) RETURN e.name AS name LIMIT 1",
+                    name=name,
+                )
+                if existing:
+                    missing_names.discard(name)
+            # Create stub entities for truly missing names
+            for name in missing_names:
+                stub = GraphEntity(
+                    name=name,
+                    type="Project",
+                    scope="global",
+                    properties={"stub": True},
+                    source_message_id=facts[0].source_message_id if facts else "",
+                    message_ts=facts[0].message_ts if facts else "",
+                )
+                await stores.neo4j.upsert_entity(stub)
+            if missing_names:
+                logger.info(
+                    "PersisterAgent: created %d stub entities job_id=%s channel=%s batch=%s names=%s",
+                    len(missing_names),
+                    sync_job_id,
+                    channel_id,
+                    batch_num,
+                    list(missing_names)[:5],
+                )
+
         # --- 5. Create episodic links (entity → Event → weaviate_fact_id) ---
         for fact, weaviate_id in zip(facts, weaviate_ids, strict=True):
             for entity_name in fact.entity_tags:
@@ -198,7 +243,52 @@ class PersisterAgent(BaseAgent):
                     weaviate_fact_id=weaviate_id,
                     message_ts=fact.message_ts,
                     channel_id=fact.channel_id,
+                    media_urls=fact.source_media_urls,
+                    link_urls=fact.source_link_urls,
                 )
+
+            # --- 5b. Create Media nodes and link entities to them ---
+            all_media_urls = [
+                (url, fact.source_media_type or "file")
+                for url in (fact.source_media_urls or [])
+            ] + [
+                (url, "link")
+                for url in (fact.source_link_urls or [])
+            ]
+            for url, mtype in all_media_urls:
+                # Find a meaningful title for this media
+                title = ""
+                if mtype == "link":
+                    idx = (fact.source_link_urls or []).index(url) if url in (fact.source_link_urls or []) else -1
+                    if idx >= 0 and idx < len(fact.source_link_titles or []):
+                        title = fact.source_link_titles[idx]
+                    if not title:
+                        # Derive readable name from URL
+                        try:
+                            parts = url.split("//")[-1].split("/")
+                            title = "/".join(parts[:3]) if len(parts) > 2 else parts[0]
+                        except Exception:
+                            title = url
+                else:
+                    # Use original attachment name from Slack
+                    media_urls = fact.source_media_urls or []
+                    media_names = fact.source_media_names or []
+                    if url in media_urls:
+                        idx = media_urls.index(url)
+                        if idx < len(media_names) and media_names[idx]:
+                            title = media_names[idx]
+                await stores.neo4j.upsert_media(
+                    url=url,
+                    media_type=mtype,
+                    title=title,
+                    channel_id=fact.channel_id,
+                    message_ts=fact.message_ts,
+                )
+                for entity_name in fact.entity_tags:
+                    await stores.neo4j.link_entity_to_media(
+                        entity_name=entity_name,
+                        media_url=url,
+                    )
 
         # --- 6. Mark intent fully complete ---
         await stores.mongodb.mark_intent_complete(intent_id)

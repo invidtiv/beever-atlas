@@ -78,6 +78,10 @@ class WeaviateStore:
         ("graph_entity_ids", DataType.TEXT_ARRAY),
         ("source_media_url", DataType.TEXT),
         ("source_media_type", DataType.TEXT),
+        ("source_media_urls", DataType.TEXT_ARRAY),
+        ("source_link_urls", DataType.TEXT_ARRAY),
+        ("source_link_titles", DataType.TEXT_ARRAY),
+        ("source_link_descriptions", DataType.TEXT_ARRAY),
         ("valid_at", DataType.DATE),
         ("invalid_at", DataType.DATE),
     ]
@@ -204,6 +208,10 @@ class WeaviateStore:
             "graph_entity_ids": fact.graph_entity_ids,
             "source_media_url": fact.source_media_url,
             "source_media_type": fact.source_media_type,
+            "source_media_urls": fact.source_media_urls,
+            "source_link_urls": fact.source_link_urls,
+            "source_link_titles": fact.source_link_titles,
+            "source_link_descriptions": fact.source_link_descriptions,
         }
         # Weaviate DATE fields require proper datetime objects or must be omitted.
         valid_at = WeaviateStore._coerce_date(fact.valid_at)
@@ -238,6 +246,10 @@ class WeaviateStore:
             graph_entity_ids=props.get("graph_entity_ids") or [],
             source_media_url=props.get("source_media_url", ""),
             source_media_type=props.get("source_media_type", ""),
+            source_media_urls=props.get("source_media_urls") or [],
+            source_link_urls=props.get("source_link_urls") or [],
+            source_link_titles=props.get("source_link_titles") or [],
+            source_link_descriptions=props.get("source_link_descriptions") or [],
             valid_at=props.get("valid_at"),
             invalid_at=props.get("invalid_at"),
         )
@@ -450,6 +462,23 @@ class WeaviateStore:
             return result.total_count or 0
 
         return await asyncio.to_thread(_count)
+
+    async def delete_by_channel(self, channel_id: str) -> int:
+        """Delete all facts for a given channel. Returns count of deleted objects."""
+
+        def _delete() -> int:
+            collection = self._collection()
+            # Fetch all objects matching the channel, then delete by ID.
+            result = collection.query.fetch_objects(
+                filters=Filter.by_property("channel_id").equal(channel_id),
+                limit=10000,
+            )
+            ids = [obj.uuid for obj in result.objects]
+            for uid in ids:
+                collection.data.delete_by_id(uuid=uid)
+            return len(ids)
+
+        return await asyncio.to_thread(_delete)
 
     async def fetch_by_ids(self, fact_ids: list[str]) -> list[AtomicFact]:
         """Fetch multiple facts by their ids. Skips ids that are not found."""

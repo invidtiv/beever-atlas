@@ -29,8 +29,13 @@ class AtomicFact(BaseModel):
     action_tags: list[str] = Field(default_factory=list)
     importance: str = "medium"
     graph_entity_ids: list[str] = Field(default_factory=list)
-    source_media_url: str = ""
+    source_media_url: str = ""  # Deprecated: use source_media_urls
     source_media_type: str = ""  # "image", "pdf", "doc", "video", ""
+    source_media_urls: list[str] = Field(default_factory=list)
+    source_media_names: list[str] = Field(default_factory=list)
+    source_link_urls: list[str] = Field(default_factory=list)
+    source_link_titles: list[str] = Field(default_factory=list)
+    source_link_descriptions: list[str] = Field(default_factory=list)
     valid_at: datetime | None = None
     invalid_at: datetime | None = None
     text_vector: list[float] | None = None

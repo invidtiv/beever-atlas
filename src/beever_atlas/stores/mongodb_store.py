@@ -134,6 +134,11 @@ class MongoDBStore:
             upsert=True,
         )
 
+    async def clear_channel_sync_state(self, channel_id: str) -> None:
+        """Delete the sync state for a channel, forcing a full re-sync next time."""
+        await self._channel_sync_state.delete_one({"channel_id": channel_id})
+        await self._sync_jobs.delete_many({"channel_id": channel_id})
+
     async def count_synced_channels(self) -> int:
         """Return the number of channels that have a sync state record."""
         return await self._channel_sync_state.count_documents({})

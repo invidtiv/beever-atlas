@@ -39,6 +39,10 @@ class Neo4jStore:
                 "CREATE INDEX event_weaviate_id IF NOT EXISTS "
                 "FOR (ev:Event) ON (ev.weaviate_id)"
             )
+            await session.run(
+                "CREATE INDEX media_url IF NOT EXISTS "
+                "FOR (m:Media) ON (m.url)"
+            )
             # Backfill optional fields to avoid noisy "property key does not exist"
             # notifications in read queries that project aliases.
             await session.run(
@@ -255,8 +259,14 @@ class Neo4jStore:
         weaviate_fact_id: str,
         message_ts: str,
         channel_id: str = "",
+        media_urls: list[str] | None = None,
+        link_urls: list[str] | None = None,
     ) -> None:
-        """MERGE an Event node and link the named entity to it via MENTIONED_IN."""
+        """MERGE an Event node and link the named entity to it via MENTIONED_IN.
+
+        Optionally stores media_urls and link_urls on the Event node for
+        graph-traversable media references.
+        """
         async with self._driver.session() as session:
             await session.run(
                 """
@@ -264,14 +274,120 @@ class Neo4jStore:
                 MERGE (ev:Event {weaviate_id: $weaviate_id})
                     ON CREATE SET
                         ev.message_ts  = $message_ts,
-                        ev.channel_id  = $channel_id
+                        ev.channel_id  = $channel_id,
+                        ev.media_urls  = $media_urls,
+                        ev.link_urls   = $link_urls
+                    ON MATCH SET
+                        ev.media_urls  = CASE WHEN ev.media_urls IS NULL THEN $media_urls ELSE ev.media_urls END,
+                        ev.link_urls   = CASE WHEN ev.link_urls IS NULL THEN $link_urls ELSE ev.link_urls END
                 MERGE (e)-[:MENTIONED_IN]->(ev)
                 """,
                 entity_name=entity_name,
                 weaviate_id=weaviate_fact_id,
                 message_ts=message_ts,
                 channel_id=channel_id,
+                media_urls=media_urls or [],
+                link_urls=link_urls or [],
             )
+
+    # ------------------------------------------------------------------
+    # Write — media nodes
+    # ------------------------------------------------------------------
+
+    async def upsert_media(
+        self,
+        url: str,
+        media_type: str,
+        title: str = "",
+        channel_id: str = "",
+        message_ts: str = "",
+    ) -> None:
+        """MERGE a Media node by URL. Idempotent."""
+        async with self._driver.session() as session:
+            await session.run(
+                """
+                MERGE (m:Media {url: $url})
+                    ON CREATE SET
+                        m.media_type  = $media_type,
+                        m.title       = $title,
+                        m.channel_id  = $channel_id,
+                        m.message_ts  = $message_ts
+                    ON MATCH SET
+                        m.title       = CASE WHEN $title <> '' THEN $title ELSE m.title END
+                """,
+                url=url,
+                media_type=media_type,
+                title=title,
+                channel_id=channel_id,
+                message_ts=message_ts,
+            )
+
+    async def link_entity_to_media(
+        self, entity_name: str, media_url: str
+    ) -> None:
+        """Create REFERENCES_MEDIA relationship from Entity to Media."""
+        async with self._driver.session() as session:
+            await session.run(
+                """
+                MATCH (e:Entity {name: $entity_name})
+                MATCH (m:Media {url: $media_url})
+                MERGE (e)-[:REFERENCES_MEDIA]->(m)
+                """,
+                entity_name=entity_name,
+                media_url=media_url,
+            )
+
+    # ------------------------------------------------------------------
+    # Delete — channel scoped
+    # ------------------------------------------------------------------
+
+    async def delete_channel_data(self, channel_id: str) -> dict[str, int]:
+        """Delete all entities, events, media, and relationships for a channel.
+
+        Returns counts of deleted nodes and relationships.
+        """
+        async with self._driver.session() as session:
+            # Delete Event nodes and their relationships for this channel
+            result = await session.run(
+                "MATCH (ev:Event {channel_id: $channel_id}) "
+                "DETACH DELETE ev RETURN count(ev) AS n",
+                channel_id=channel_id,
+            )
+            record = await result.single()
+            events_deleted = int(record["n"]) if record else 0
+
+            # Delete Media nodes for this channel
+            result = await session.run(
+                "MATCH (m:Media {channel_id: $channel_id}) "
+                "DETACH DELETE m RETURN count(m) AS n",
+                channel_id=channel_id,
+            )
+            record = await result.single()
+            media_deleted = int(record["n"]) if record else 0
+
+            # Delete channel-scoped entities
+            result = await session.run(
+                "MATCH (e:Entity {channel_id: $channel_id}) "
+                "DETACH DELETE e RETURN count(e) AS n",
+                channel_id=channel_id,
+            )
+            record = await result.single()
+            entities_deleted = int(record["n"]) if record else 0
+
+            # Clean up orphaned global entities that have no remaining relationships
+            result = await session.run(
+                "MATCH (e:Entity) WHERE e.scope = 'global' "
+                "AND NOT EXISTS { MATCH (e)-[]-() } "
+                "DELETE e RETURN count(e) AS n",
+            )
+            record = await result.single()
+            orphans_deleted = int(record["n"]) if record else 0
+
+        return {
+            "events_deleted": events_deleted,
+            "media_deleted": media_deleted,
+            "entities_deleted": entities_deleted + orphans_deleted,
+        }
 
     # ------------------------------------------------------------------
     # Read
@@ -283,19 +399,31 @@ class Neo4jStore:
         entity_type: str | None = None,
         limit: int = 50,
     ) -> list[GraphEntity]:
-        """Return entities, optionally filtered by channel and/or type."""
-        conditions: list[str] = []
+        """Return entities, optionally filtered by channel and/or type.
+
+        When channel_id is provided, returns entities that either:
+        - Have channel_id matching directly, OR
+        - Have at least one episodic link (MENTIONED_IN) to an Event in that channel
+        This ensures only entities actually referenced in the channel appear.
+        """
         params: dict[str, Any] = {"limit": limit}
 
         if channel_id is not None:
-            conditions.append("(e.channel_id = $channel_id OR e.scope = 'global')")
+            # Use episodic links to scope entities to the channel
+            match_clause = (
+                "MATCH (e:Entity) "
+                "WHERE e.channel_id = $channel_id "
+                "OR EXISTS { MATCH (e)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }"
+            )
             params["channel_id"] = channel_id
+        else:
+            match_clause = "MATCH (e:Entity)"
+
         if entity_type is not None:
-            conditions.append("e.type = $entity_type")
+            match_clause += " AND e.type = $entity_type" if "WHERE" in match_clause else " WHERE e.type = $entity_type"
             params["entity_type"] = entity_type
 
-        where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-        query = f"MATCH (e:Entity) {where_clause} RETURN e LIMIT $limit"  # noqa: S608
+        query = f"{match_clause} RETURN e LIMIT $limit"  # noqa: S608
 
         async with self._driver.session() as session:
             result = await session.run(query, **params)
@@ -361,9 +489,18 @@ class Neo4jStore:
         channel_id: str | None = None,
         limit: int = 200,
     ) -> list[GraphRelationship]:
-        """Return relationships between entities, optionally scoped to a channel."""
+        """Return relationships between entities, optionally scoped to a channel.
+
+        When channel_id is provided, only returns relationships where at least
+        one endpoint entity has an episodic link to an Event in that channel.
+        """
         if channel_id is not None:
-            where = "WHERE a.channel_id = $channel_id OR a.scope = 'global'"
+            where = (
+                "WHERE (a.channel_id = $channel_id "
+                "OR EXISTS { MATCH (a)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }) "
+                "AND (b.channel_id = $channel_id "
+                "OR EXISTS { MATCH (b)-[:MENTIONED_IN]->(ev2:Event) WHERE ev2.channel_id = $channel_id })"
+            )
             params: dict[str, Any] = {"channel_id": channel_id, "limit": limit}
         else:
             where = ""
@@ -388,6 +525,79 @@ class Neo4jStore:
             ))
         return rels
 
+    async def list_media_relationships(
+        self,
+        channel_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return REFERENCES_MEDIA relationships between entities and media."""
+        params: dict[str, Any] = {"limit": limit}
+        if channel_id is not None:
+            where = "WHERE m.channel_id = $channel_id"
+            params["channel_id"] = channel_id
+        else:
+            where = ""
+        query = (
+            f"MATCH (e:Entity)-[r:REFERENCES_MEDIA]->(m:Media) {where} "  # noqa: S608
+            "RETURN e.name AS src, m.title AS tgt_title, m.url AS tgt_url, "
+            "m.media_type AS media_type, type(r) AS rel_type "
+            "LIMIT $limit"
+        )
+        async with self._driver.session() as session:
+            result = await session.run(query, **params)
+            records = await result.data()
+        rels: list[dict[str, Any]] = []
+        for row in records:
+            # Use title or derive name from URL for the target
+            tgt_name = row.get("tgt_title") or ""
+            if not tgt_name:
+                url = row.get("tgt_url", "")
+                media_type = row.get("media_type", "")
+                if media_type == "link":
+                    try:
+                        tgt_name = url.split("//")[-1].split("/")[0]
+                    except Exception:
+                        tgt_name = url
+                else:
+                    tgt_name = url.split("/")[-1] if "/" in url else url
+            rels.append({
+                "source": row.get("src", ""),
+                "target": tgt_name,
+                "type": row.get("rel_type", "REFERENCES_MEDIA"),
+            })
+        return rels
+
+    async def list_media(
+        self,
+        channel_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return Media nodes, optionally filtered by channel."""
+        params: dict[str, Any] = {"limit": limit}
+        if channel_id is not None:
+            where = "WHERE m.channel_id = $channel_id"
+            params["channel_id"] = channel_id
+        else:
+            where = ""
+        query = f"MATCH (m:Media) {where} RETURN m LIMIT $limit"  # noqa: S608
+
+        async with self._driver.session() as session:
+            result = await session.run(query, **params)
+            records = [record async for record in result]
+        media_list: list[dict[str, Any]] = []
+        for r in records:
+            node = r["m"]
+            props = dict(node)
+            media_list.append({
+                "id": getattr(node, "element_id", None) or props.get("url", ""),
+                "url": props.get("url", ""),
+                "media_type": props.get("media_type", ""),
+                "title": props.get("title", ""),
+                "channel_id": props.get("channel_id", ""),
+                "message_ts": props.get("message_ts", ""),
+            })
+        return media_list
+
     async def get_decisions(self, channel_id: str, limit: int = 20) -> list[GraphEntity]:
         """Return entities of type 'Decision' visible in a channel."""
         return await self.list_entities(
@@ -398,7 +608,10 @@ class Neo4jStore:
         """Return total entity count, optionally scoped to a channel."""
         params: dict[str, Any] = {}
         if channel_id is not None:
-            where = "WHERE e.channel_id = $channel_id OR e.scope = 'global'"
+            where = (
+                "WHERE e.channel_id = $channel_id "
+                "OR EXISTS { MATCH (e)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }"
+            )
             params["channel_id"] = channel_id
         else:
             where = ""
@@ -415,7 +628,10 @@ class Neo4jStore:
         if channel_id is not None:
             query = (
                 "MATCH (a:Entity)-[r]->(b:Entity) "
-                "WHERE a.channel_id = $channel_id OR a.scope = 'global' "
+                "WHERE (a.channel_id = $channel_id "
+                "OR EXISTS { MATCH (a)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }) "
+                "AND (b.channel_id = $channel_id "
+                "OR EXISTS { MATCH (b)-[:MENTIONED_IN]->(ev2:Event) WHERE ev2.channel_id = $channel_id }) "
                 "RETURN count(r) AS n"
             )
             params: dict[str, Any] = {"channel_id": channel_id}

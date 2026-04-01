@@ -27,7 +27,13 @@ _ATTACHMENT_REF_PATTERNS = re.compile(
 )
 
 # Maximum characters of extracted PDF text to include
-_MAX_PDF_TEXT_CHARS = 2000
+_MAX_PDF_TEXT_CHARS = 5000
+
+# Filenames matching these patterns suggest visual content worth describing
+_VISUAL_FILENAME_RE = re.compile(
+    r"screenshot|diagram|chart|graph|whiteboard|mockup|wireframe|design|sketch",
+    re.IGNORECASE,
+)
 
 
 class MediaProcessor:
@@ -232,17 +238,30 @@ class MediaProcessor:
             return None
 
     def _extract_pdf_text(self, data: bytes) -> str:
-        """Extract text from PDF bytes using pypdf."""
+        """Extract text from PDF bytes using pypdf with page-aware truncation."""
         try:
             from pypdf import PdfReader
 
             reader = PdfReader(io.BytesIO(data))
+            total_pages = len(reader.pages)
             pages: list[str] = []
+            char_count = 0
+            pages_extracted = 0
             for page in reader.pages:
                 text = page.extract_text() or ""
                 if text.strip():
                     pages.append(text.strip())
-            return "\n\n".join(pages)
+                    char_count += len(text.strip())
+                    pages_extracted += 1
+                    if char_count >= _MAX_PDF_TEXT_CHARS:
+                        break
+            result = "\n\n".join(pages)
+            if char_count >= _MAX_PDF_TEXT_CHARS:
+                result = result[:_MAX_PDF_TEXT_CHARS]
+                remaining = total_pages - pages_extracted
+                if remaining > 0:
+                    result += f"\n[...truncated, {remaining} more pages]"
+            return result
         except Exception:
             logger.warning("MediaProcessor: PDF text extraction failed", exc_info=True)
             return ""
@@ -300,11 +319,16 @@ class MediaProcessor:
         text = (message_text or "").strip()
 
         # Very short text — likely just "see attached" or emoji
-        if len(text) < 20:
+        if len(text) < 50:
             return True
 
         # Text explicitly references the attachment
         if _ATTACHMENT_REF_PATTERNS.search(text):
+            return True
+
+        # Filename suggests visual content worth describing
+        name = attachment.get("name") or ""
+        if name and _VISUAL_FILENAME_RE.search(name):
             return True
 
         # Text has substance — skip vision

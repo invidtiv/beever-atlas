@@ -128,6 +128,10 @@ export interface MemoryTier2 {
   graph_entity_ids: string[];
   source_media_url: string;
   source_media_type: string; // "image" | "pdf" | "doc" | "video" | ""
+  source_media_urls: string[];
+  source_link_urls: string[];
+  source_link_titles: string[];
+  source_link_descriptions: string[];
   valid_at: string | null;
   invalid_at: string | null;
 }

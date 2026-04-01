@@ -24,6 +24,12 @@ export function GraphCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
 
+  // Keep a stable ref to the latest onSelectEntity to avoid stale closures
+  // in cytoscape event handlers (the main useEffect doesn't include
+  // onSelectEntity in its deps to avoid destroying cytoscape on every render).
+  const onSelectRef = useRef(onSelectEntity);
+  onSelectRef.current = onSelectEntity;
+
   // Build elements whenever data changes
   useEffect(() => {
     if (!containerRef.current) return;
@@ -307,13 +313,13 @@ export function GraphCanvas({
       cy.elements().addClass("dimmed");
       neighborhood.removeClass("dimmed");
       neighborhood.edges().addClass("highlighted");
-      onSelectEntity(node.id());
+      onSelectRef.current(node.id());
     });
 
     cy.on("tap", (evt) => {
       if (evt.target === cy) {
         cy.elements().removeClass("dimmed highlighted hover");
-        onSelectEntity(null);
+        onSelectRef.current(null);
       }
     });
 
@@ -369,7 +375,7 @@ export function GraphCanvas({
   return (
     <div
       ref={containerRef}
-      className="flex-1 min-h-0 bg-muted/5"
+      className="flex-1 min-h-0 bg-muted/5 overflow-hidden"
     />
   );
 }

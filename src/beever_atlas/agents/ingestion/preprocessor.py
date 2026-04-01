@@ -293,15 +293,74 @@ class PreprocessorAgent(BaseAgent):
             enriched["preprocessed"] = True
             preprocessed.append(enriched)
 
-        # Process media attachments for mixed-modality messages (bounded-async).
+        # Process media attachments and extract links for all messages.
         media_enriched = 0
+        media_processor = None
         for enriched_msg in preprocessed:
+            # --- Extract link/unfurl metadata for ALL messages ---
+            raw_meta = enriched_msg.get("raw_metadata") if isinstance(enriched_msg.get("raw_metadata"), dict) else {}
+            links = raw_meta.get("links") or enriched_msg.get("links") or []
+
+            # Also extract bare URLs from message text (not already in unfurls)
+            unfurl_urls = {link.get("url", "") for link in links}
+            text_urls = re.findall(r'https?://[^\s<>\]|)]+', enriched_msg.get("text", ""))
+            for url in text_urls:
+                # Strip trailing punctuation
+                url = url.rstrip(".,;:!?")
+                if url and url not in unfurl_urls:
+                    links.append({"url": url, "title": "", "description": ""})
+
+            if links:
+                link_urls: list[str] = []
+                link_titles: list[str] = []
+                link_descriptions: list[str] = []
+                link_text_parts: list[str] = []
+                for link in links:
+                    url = link.get("url", "")
+                    title = link.get("title", "")
+                    description = link.get("description", "")
+                    if url:
+                        link_urls.append(url)
+                        link_titles.append(title)
+                        link_descriptions.append(description)
+                        if title or description:
+                            link_text_parts.append(f"[Link: {title} — {description} ({url})]" if description else f"[Link: {title} ({url})]")
+                enriched_msg["source_link_urls"] = link_urls
+                enriched_msg["source_link_titles"] = link_titles
+                enriched_msg["source_link_descriptions"] = link_descriptions
+                if link_text_parts:
+                    enriched_msg["text"] += "\n\n" + "\n".join(link_text_parts)
+
             if enriched_msg.get("modality") != "mixed":
                 continue
-            try:
-                from beever_atlas.services.media_processor import MediaProcessor
 
-                media_processor = MediaProcessor()
+            # Always capture attachment URLs and names before media processing (so they survive failures)
+            attachments = enriched_msg.get("attachments") or []
+            files = enriched_msg.get("files") or []
+            all_atts = attachments + files
+            fallback_urls = [
+                a.get("url") or a.get("url_private") or ""
+                for a in all_atts
+                if a.get("url") or a.get("url_private")
+            ]
+            fallback_names = [
+                a.get("name") or a.get("title") or ""
+                for a in all_atts
+                if a.get("url") or a.get("url_private")
+            ]
+            if fallback_urls and not enriched_msg.get("source_media_urls"):
+                enriched_msg["source_media_urls"] = fallback_urls
+                enriched_msg["source_media_names"] = fallback_names
+                # Detect type from first attachment
+                first_att = all_atts[0] if all_atts else {}
+                att_type = first_att.get("type", "")
+                enriched_msg["source_media_type"] = att_type if att_type in ("image", "pdf", "video") else "file"
+
+            try:
+                if media_processor is None:
+                    from beever_atlas.services.media_processor import MediaProcessor
+                    media_processor = MediaProcessor()
+
                 media_result = await media_processor.process_message_media(enriched_msg)
                 if media_result["description"]:
                     enriched_msg["text"] += "\n\n" + media_result["description"]

@@ -4,12 +4,16 @@ import { useGraph } from "@/hooks/useGraph";
 import { GraphFilters } from "./GraphFilters";
 import { GraphCanvas } from "./GraphCanvas";
 import { EntityPanel } from "./EntityPanel";
+import { MediaModal } from "./MediaModal";
+
+const MEDIA_TYPES = new Set(["Link", "Document", "Image", "Media"]);
 
 export function GraphTab() {
   const { id: channelId } = useParams<{ id: string }>();
   const { entities, relationships, loading, error } = useGraph(channelId ?? "");
   const [visibleTypes, setVisibleTypes] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mediaModal, setMediaModal] = useState<{ name: string; url: string; mediaType: string } | null>(null);
 
   // Derive entity types from data; keep all visible when types change
   const entityTypes = [...new Set(entities.map((e) => e.type))].sort();
@@ -22,6 +26,23 @@ export function GraphTab() {
   const selectedEntity = selectedId
     ? entities.find((e) => e.id === selectedId) ?? null
     : null;
+
+  // When a media-type node is selected, open the modal
+  const handleSelectEntity = (id: string | null) => {
+    if (id) {
+      const entity = entities.find((e) => e.id === id);
+      if (entity && MEDIA_TYPES.has(entity.type)) {
+        const props = entity.properties as Record<string, unknown> | undefined;
+        const url = (props?.url as string) || "";
+        const mediaType = (props?.media_type as string) || entity.type.toLowerCase();
+        if (url) {
+          setMediaModal({ name: entity.name, url, mediaType });
+          return;
+        }
+      }
+    }
+    setSelectedId(id);
+  };
 
   if (loading) {
     return (
@@ -48,17 +69,26 @@ export function GraphTab() {
           relationships={relationships}
           visibleTypes={visibleTypes}
           selectedEntityId={selectedId}
-          onSelectEntity={setSelectedId}
+          onSelectEntity={handleSelectEntity}
         />
         {selectedEntity && (
           <EntityPanel
             entity={selectedEntity}
             relationships={relationships}
             allEntities={entities}
+            channelId={channelId ?? ""}
             onClose={() => setSelectedId(null)}
           />
         )}
       </div>
+      {mediaModal && (
+        <MediaModal
+          name={mediaModal.name}
+          url={mediaModal.url}
+          mediaType={mediaModal.mediaType}
+          onClose={() => setMediaModal(null)}
+        />
+      )}
     </div>
   );
 }

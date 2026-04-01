@@ -26,9 +26,20 @@ async def list_relationships(
     channel_id: str | None = Query(default=None),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> list[GraphRelationship]:
-    """List relationships in the knowledge graph."""
+    """List relationships in the knowledge graph, including entity-media links."""
     stores = get_stores()
-    return await stores.neo4j.list_relationships(channel_id=channel_id, limit=limit)
+    entity_rels = await stores.neo4j.list_relationships(channel_id=channel_id, limit=limit)
+
+    # Also fetch entity→media relationships and convert to GraphRelationship
+    media_rels_raw = await stores.neo4j.list_media_relationships(channel_id=channel_id, limit=100)
+    for mr in media_rels_raw:
+        entity_rels.append(GraphRelationship(
+            type=mr["type"],
+            source=mr["source"],
+            target=mr["target"],
+        ))
+
+    return entity_rels
 
 
 @router.get("/entities/{entity_id}/neighbors", response_model=Subgraph)
@@ -40,6 +51,16 @@ async def get_entity_neighbors(
     """Get the N-hop neighborhood subgraph for an entity."""
     stores = get_stores()
     return await stores.neo4j.get_neighbors(entity_id, hops=hops, limit=limit)
+
+
+@router.get("/media", response_model=list[dict])
+async def list_media(
+    channel_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> list[dict]:
+    """List media nodes in the knowledge graph."""
+    stores = get_stores()
+    return await stores.neo4j.list_media(channel_id=channel_id, limit=limit)
 
 
 @router.get("/decisions/{channel_id}", response_model=list[GraphEntity])

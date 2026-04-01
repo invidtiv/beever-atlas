@@ -437,7 +437,7 @@ function MessageRow({ msg, isReply = false, onToggleReplies, isExpanded }: { msg
               const proxyUrl = att.url ? `${API_BASE}/api/files/proxy?url=${encodeURIComponent(att.url)}` : undefined;
 
               if (isImage && proxyUrl) {
-                return <ImageAttachment key={i} url={proxyUrl} name={att.name || "Image"} />;
+                return <ImageAttachment key={proxyUrl} url={proxyUrl} name={att.name || "Image"} />;
               }
 
               if (isVideo && proxyUrl) {
