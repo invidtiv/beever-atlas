@@ -108,6 +108,45 @@ export interface MemoryTier1 {
   topic_tags: string[];
 }
 
+export interface PlatformConnection {
+  id: string;
+  platform: "slack" | "discord" | "teams" | "telegram";
+  display_name: string;
+  status: "connected" | "disconnected" | "error";
+  error_message: string | null;
+  selected_channels: string[];
+  source: "ui" | "env";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformCredentials {
+  platform: "slack" | "discord" | "teams" | "telegram";
+  credentials: Record<string, string>;
+  display_name?: string;
+}
+
+export interface AvailableChannel {
+  channel_id: string;
+  name: string;
+  platform: string;
+  is_member: boolean;
+  member_count: number | null;
+  topic: string | null;
+  purpose: string | null;
+  connection_id: string | null;
+}
+
+export interface FavoriteChannel {
+  channel_id: string;
+  connection_id: string | null;
+}
+
+export interface WorkspaceGroup {
+  connection: PlatformConnection;
+  channels: AvailableChannel[];
+}
+
 export interface MemoryTier2 {
   id: string;
   memory_text: string;

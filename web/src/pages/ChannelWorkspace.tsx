@@ -3,8 +3,8 @@ import { useParams, Outlet, useNavigate, useLocation, Link } from "react-router-
 import { api } from "@/lib/api";
 import { ArrowLeft, ShieldAlert, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useTheme } from "@/hooks/useTheme";
-import { getPlatformBadgeStyle } from "@/lib/platform-badge";
+import { useConnectionMap } from "@/hooks/useConnectionMap";
+import { ChannelBreadcrumb } from "@/components/channel/Breadcrumb";
 import { SyncButton } from "@/components/channel/SyncButton";
 import { SyncProgress } from "@/components/channel/SyncProgress";
 import { useSync } from "@/hooks/useSync";
@@ -15,6 +15,7 @@ interface ChannelInfo {
   platform: string;
   is_member?: boolean;
   member_count?: number | null;
+  connection_id?: string | null;
 }
 
 interface ChannelRouteState {
@@ -22,6 +23,7 @@ interface ChannelRouteState {
   platform?: string;
   is_member?: boolean;
   member_count?: number | null;
+  connection_id?: string | null;
 }
 
 const TAB_PATHS = ["wiki", "ask", "messages", "memories", "graph", "settings"] as const;
@@ -54,11 +56,11 @@ export function ChannelWorkspace() {
       platform: routeState.platform || "slack",
       is_member: routeState.is_member ?? true,
       member_count: routeState.member_count ?? null,
+      connection_id: routeState.connection_id ?? null,
     };
   });
   const [refreshing, setRefreshing] = useState(false);
-  const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme === "dark";
+  const { getWorkspaceName } = useConnectionMap();
 
   const activeTab = getCurrentTab(location.pathname);
 
@@ -71,10 +73,12 @@ export function ChannelWorkspace() {
         platform: routeState.platform || prev?.platform || "slack",
         is_member: routeState.is_member ?? prev?.is_member ?? true,
         member_count: routeState.member_count ?? prev?.member_count ?? null,
+        connection_id: routeState.connection_id ?? prev?.connection_id ?? null,
       }));
     }
+    const connParam = routeState?.connection_id ? `?connection_id=${routeState.connection_id}` : "";
     api
-      .get<ChannelInfo>(`/api/channels/${id}`)
+      .get<ChannelInfo>(`/api/channels/${id}${connParam}`)
       .then(setChannel)
       .catch(() =>
         setChannel((prev) =>
@@ -85,7 +89,7 @@ export function ChannelWorkspace() {
           }
         )
       );
-  }, [id, routeState?.channel_name, routeState?.platform, routeState?.member_count]);
+  }, [id, routeState?.channel_name, routeState?.platform, routeState?.member_count, routeState?.connection_id]);
 
   function handleTabChange(value: string) {
     navigate(`/channels/${id}/${value}`);
@@ -101,8 +105,9 @@ export function ChannelWorkspace() {
   function handleRefreshStatus() {
     if (!id) return;
     setRefreshing(true);
+    const connParam = channel?.connection_id ? `?connection_id=${channel.connection_id}` : "";
     api
-      .get<ChannelInfo>(`/api/channels/${id}`)
+      .get<ChannelInfo>(`/api/channels/${id}${connParam}`)
       .then((data) => setChannel(data))
       .catch(() => {})
       .finally(() => setRefreshing(false));
@@ -151,20 +156,14 @@ export function ChannelWorkspace() {
             >
               <ArrowLeft className="w-4 h-4 text-muted-foreground" />
             </Link>
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-base sm:text-lg font-semibold text-primary">#</span>
-              <h2 className="font-heading text-base sm:text-lg tracking-tight text-foreground truncate">
-                {channel?.name ?? "Loading channel..."}
-              </h2>
-            </div>
-            {channel?.platform && (
-              <span
-                className="inline-flex px-2 py-0.5 rounded-xl text-[11px] sm:text-xs font-medium capitalize shrink-0"
-                style={getPlatformBadgeStyle(channel.platform, isDark)}
-              >
-                {channel.platform}
-              </span>
-            )}
+            <ChannelBreadcrumb
+              workspace={getWorkspaceName(channel?.connection_id ?? null)}
+              platform={channel?.platform ?? ""}
+              channelName={channel?.name ?? "Loading..."}
+              channelId={id ?? ""}
+              activeTab={TAB_LABELS[activeTab]}
+              connectionId={channel?.connection_id ?? null}
+            />
             {!isMember && (
               <span className="inline-flex px-2.5 py-0.5 rounded-xl text-xs font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0">
                 Not Connected
@@ -237,7 +236,7 @@ export function ChannelWorkspace() {
       {/* Content */}
       {isMember ? (
         <div className="overflow-auto flex-1 min-h-0 relative" key={activeTab}>
-          <Outlet context={{ syncState, isSyncing }} />
+          <Outlet context={{ syncState, isSyncing, connectionId: channel?.connection_id ?? null }} />
         </div>
       ) : (
         <div className="flex items-center justify-center flex-1 min-h-0 p-6">

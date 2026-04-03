@@ -149,8 +149,8 @@ export function Dashboard() {
             return (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {connected
-                  .sort((a, b) => a.name.localeCompare(b.name))
-                  .slice(0, 6)
+                  .sort((a, b) => (b.member_count ?? 0) - (a.member_count ?? 0))
+                  .slice(0, 3)
                   .map((ch, idx) => (
                   <Link
                     to={`/channels/${ch.channel_id}/wiki`}

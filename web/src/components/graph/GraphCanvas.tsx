@@ -86,6 +86,15 @@ export function GraphCanvas({
         },
       }));
 
+    // Detect dark mode for edge label theming
+    const isDark = document.documentElement.classList.contains("dark");
+    const edgeLabelColor = isDark ? "#cbd5e1" : "#475569";
+    const edgeLabelBg = isDark ? "#1e293b" : "#f8fafc";
+    const edgeLineColor = isDark ? "#475569" : "#cbd5e1";
+    const edgeHoverColor = isDark ? "#94a3b8" : "#64748b";
+    const edgeHoverLabelColor = isDark ? "#e2e8f0" : "#334155";
+    const edgeHighlightColor = isDark ? "#38bdf8" : "#0B4F6C";
+
     if (cyRef.current) {
       cyRef.current.destroy();
     }
@@ -149,19 +158,18 @@ export function GraphCanvas({
           selector: "edge",
           style: {
             width: 1.5,
-            "line-color": "#cbd5e1",
-            "target-arrow-color": "#cbd5e1",
+            "line-color": edgeLineColor,
+            "target-arrow-color": edgeLineColor,
             "target-arrow-shape": "triangle",
             "arrow-scale": 0.7,
             "curve-style": "bezier",
-            // Always show edge labels (relationship type is important)
             label: "data(label)",
-            "font-size": "7px",
-            color: "#94a3b8",
+            "font-size": "8px",
+            color: edgeLabelColor,
             "text-rotation": "autorotate",
             "text-margin-y": -6,
-            "text-background-color": "#f8fafc",
-            "text-background-opacity": 0.85,
+            "text-background-color": edgeLabelBg,
+            "text-background-opacity": 0.9,
             "text-background-padding": "2px",
             "line-style": "solid",
             opacity: 0.65,
@@ -173,10 +181,10 @@ export function GraphCanvas({
           selector: "edge.hover",
           style: {
             width: 2.5,
-            "line-color": "#64748b",
-            "target-arrow-color": "#64748b",
+            "line-color": edgeHoverColor,
+            "target-arrow-color": edgeHoverColor,
             "font-size": "9px",
-            color: "#334155",
+            color: edgeHoverLabelColor,
           },
         },
         {
@@ -187,10 +195,10 @@ export function GraphCanvas({
           selector: "edge.highlighted",
           style: {
             width: 2.5,
-            "line-color": "#0B4F6C",
-            "target-arrow-color": "#0B4F6C",
+            "line-color": edgeHighlightColor,
+            "target-arrow-color": edgeHighlightColor,
             "font-size": "9px",
-            color: "#0B4F6C",
+            color: edgeHighlightColor,
             opacity: 1,
           },
         },
@@ -224,34 +232,79 @@ export function GraphCanvas({
 
     // Elements start visible (opacity set in styles above).
 
-    // --- Physics: spring pull on connected nodes when dragging ---
+    // --- Physics: spring pull on connected nodes when dragging + momentum ---
     let dragTarget: cytoscape.NodeSingular | null = null;
+    // Track velocity per neighbor for momentum after release
+    const velocities = new Map<string, { vx: number; vy: number }>();
+    let momentumFrame: number | null = null;
 
     cy.on("grab", "node", (evt) => {
       dragTarget = evt.target;
+      velocities.clear();
+      if (momentumFrame) {
+        cancelAnimationFrame(momentumFrame);
+        momentumFrame = null;
+      }
     });
 
     cy.on("drag", "node", () => {
       if (!dragTarget) return;
       const pos = dragTarget.position();
-      // Gently pull connected neighbors toward the dragged node
       dragTarget.neighborhood("node").forEach((neighbor) => {
         const nPos = neighbor.position();
         const dx = pos.x - nPos.x;
         const dy = pos.y - nPos.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 40) return; // don't pull if already close
-        const force = Math.min(0.02, 80 / (dist * dist)); // gentle pull, heavily capped
+        if (dist < 40) return;
+        const force = Math.min(0.02, 80 / (dist * dist));
+        const moveX = dx * force;
+        const moveY = dy * force;
         neighbor.position({
-          x: nPos.x + dx * force,
-          y: nPos.y + dy * force,
+          x: nPos.x + moveX,
+          y: nPos.y + moveY,
+        });
+        // Accumulate velocity for momentum
+        const prev = velocities.get(neighbor.id()) || { vx: 0, vy: 0 };
+        velocities.set(neighbor.id(), {
+          vx: prev.vx * 0.5 + moveX * 8,
+          vy: prev.vy * 0.5 + moveY * 8,
         });
       });
     });
 
     cy.on("free", "node", () => {
       dragTarget = null;
-      // Save all current positions (dragged node + pulled neighbors)
+
+      // Apply momentum: neighbors drift with decaying velocity
+      const friction = 0.88;
+      const minSpeed = 0.3;
+
+      const step = () => {
+        let anyMoving = false;
+        velocities.forEach((vel, nodeId) => {
+          if (Math.abs(vel.vx) < minSpeed && Math.abs(vel.vy) < minSpeed) return;
+          const node = cy.getElementById(nodeId);
+          if (!node.length) return;
+          const p = node.position();
+          node.position({ x: p.x + vel.vx, y: p.y + vel.vy });
+          vel.vx *= friction;
+          vel.vy *= friction;
+          anyMoving = true;
+        });
+        if (anyMoving) {
+          momentumFrame = requestAnimationFrame(step);
+        } else {
+          momentumFrame = null;
+          // Save final positions after momentum settles
+          cy.nodes().forEach((n) => {
+            const p = n.position();
+            positionCache.set(n.id(), { x: p.x, y: p.y });
+          });
+        }
+      };
+      momentumFrame = requestAnimationFrame(step);
+
+      // Also save dragged node position immediately
       cy.nodes().forEach((n) => {
         const p = n.position();
         positionCache.set(n.id(), { x: p.x, y: p.y });
@@ -336,6 +389,7 @@ export function GraphCanvas({
     cyRef.current = cy;
 
     return () => {
+      if (momentumFrame) cancelAnimationFrame(momentumFrame);
       if (tooltip) tooltip.remove();
       cy.destroy();
       cyRef.current = null;

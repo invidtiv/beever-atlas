@@ -32,6 +32,7 @@ interface Message {
 interface ChannelSyncContext {
   syncState?: SyncState;
   isSyncing?: boolean;
+  connectionId?: string | null;
 }
 
 // Deterministic color from string — light/dark variants paired
@@ -214,7 +215,7 @@ function MessageSkeleton() {
 
 export function MessagesTab() {
   const { id: channelId } = useParams<{ id: string }>();
-  const { syncState, isSyncing } = useOutletContext<ChannelSyncContext>();
+  const { syncState, isSyncing, connectionId } = useOutletContext<ChannelSyncContext>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -224,12 +225,14 @@ export function MessagesTab() {
     if (!channelId) return;
     setLoading(true);
     setError(null);
+    const params = new URLSearchParams({ limit: "100" });
+    if (connectionId) params.set("connection_id", connectionId);
     api
-      .get<Message[]>(`/api/channels/${channelId}/messages?limit=100`)
+      .get<Message[]>(`/api/channels/${channelId}/messages?${params}`)
       .then(setMessages)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [channelId]);
+  }, [channelId, connectionId]);
 
   useEffect(() => {
     fetchMessages();
@@ -301,7 +304,7 @@ export function MessagesTab() {
             {displayMessages.length} messages
           </h2>
           {topLevel.map((msg) => (
-            <MessageThreadCard key={msg.message_id} msg={msg} channelId={channelId!} />
+            <MessageThreadCard key={msg.message_id} msg={msg} channelId={channelId!} connectionId={connectionId} />
           ))}
         </div>
       </div>
@@ -309,7 +312,7 @@ export function MessagesTab() {
   );
 }
 
-function MessageThreadCard({ msg, channelId }: { msg: Message; channelId: string }) {
+function MessageThreadCard({ msg, channelId, connectionId }: { msg: Message; channelId: string; connectionId?: string | null }) {
   const [expanded, setExpanded] = useState(false);
   const [replies, setReplies] = useState<Message[]>([]);
   const [loadingReplies, setLoadingReplies] = useState(false);
@@ -318,8 +321,9 @@ function MessageThreadCard({ msg, channelId }: { msg: Message; channelId: string
   const toggleReplies = useCallback(() => {
     if (!expanded && replies.length === 0 && hasReplies) {
       setLoadingReplies(true);
+      const params = connectionId ? `?connection_id=${connectionId}` : "";
       api
-        .get<Message[]>(`/api/channels/${channelId}/threads/${msg.message_id}/messages`)
+        .get<Message[]>(`/api/channels/${channelId}/threads/${msg.message_id}/messages${params}`)
         .then((data) => {
           // Filter out the parent message (first reply is the parent in Slack's API)
           setReplies(data.filter((m) => m.message_id !== msg.message_id));
@@ -328,7 +332,7 @@ function MessageThreadCard({ msg, channelId }: { msg: Message; channelId: string
         .finally(() => setLoadingReplies(false));
     }
     setExpanded(!expanded);
-  }, [expanded, replies.length, hasReplies, channelId, msg.message_id]);
+  }, [expanded, replies.length, hasReplies, channelId, msg.message_id, connectionId]);
 
   return (
     <div className="bg-card border border-border/60 shadow-sm rounded-xl p-5 transition-shadow hover:shadow-md">
