@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from beever_atlas.adapters import close_adapter
 from beever_atlas.api.ask import router as ask_router
 from beever_atlas.api.channels import router as channels_router
+from beever_atlas.api.connections import router as connections_router
 from beever_atlas.api.sync import shutdown_sync_runner
 from beever_atlas.api.sync import router as sync_router
 from beever_atlas.api.memories import router as memories_router
@@ -53,6 +54,49 @@ class _QuietPollFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(_QuietPollFilter())
 
 
+async def _migrate_env_connection(stores: StoreClients, settings) -> None:
+    """Create a source='env' PlatformConnection if SLACK_BOT_TOKEN is set in env
+    and no env-sourced connection already exists in the database."""
+    import os
+
+    slack_token = os.environ.get("SLACK_BOT_TOKEN", "")
+    if not slack_token:
+        return
+
+    existing = await stores.platform.get_connections_by_platform_and_source("slack", "env")
+    if existing:
+        return
+
+    # Credential encryption requires CREDENTIAL_MASTER_KEY — skip silently if unset
+    if not settings.credential_master_key:
+        logging.getLogger(__name__).warning(
+            "SLACK_BOT_TOKEN is set but CREDENTIAL_MASTER_KEY is missing; "
+            "skipping env-to-DB migration for platform connection."
+        )
+        return
+
+    slack_signing_secret = os.environ.get("SLACK_SIGNING_SECRET", "")
+    credentials: dict = {"botToken": slack_token}
+    if slack_signing_secret:
+        credentials["signingSecret"] = slack_signing_secret
+
+    try:
+        conn = await stores.platform.create_connection(
+            platform="slack",
+            display_name="Slack (env)",
+            credentials=credentials,
+            status="connected",
+            source="env",
+        )
+        logging.getLogger(__name__).info(
+            "Env-to-DB migration: created source='env' platform connection id=%s", conn.id
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Env-to-DB migration failed (non-fatal): %s", exc
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage store connections and background tasks."""
@@ -61,6 +105,7 @@ async def lifespan(app: FastAPI):
     await stores.startup()
     init_stores(stores)
     init_llm_provider(settings)
+    await _migrate_env_connection(stores, settings)
     try:
         yield
     finally:
@@ -88,6 +133,7 @@ app.add_middleware(
 # Include API routers
 app.include_router(ask_router)
 app.include_router(channels_router)
+app.include_router(connections_router)
 app.include_router(sync_router)
 app.include_router(memories_router)
 app.include_router(graph_router)

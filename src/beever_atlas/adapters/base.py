@@ -39,6 +39,7 @@ class ChannelInfo:
     member_count: int | None = None
     topic: str | None = None
     purpose: str | None = None
+    connection_id: str | None = None
 
 
 class ConfigurationError(Exception):

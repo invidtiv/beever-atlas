@@ -26,6 +26,11 @@ class MongoDBStore:
         self._write_intents = self._db["write_intents"]
         self._activity_events = self._db["activity_events"]
 
+    @property
+    def db(self):
+        """Expose the underlying AsyncIOMotorDatabase for stores that need it."""
+        return self._db
+
     async def startup(self) -> None:
         """Ping MongoDB to verify the connection is alive."""
         await self._client.admin.command("ping")

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+import logging
+from datetime import datetime
 from typing import Any
 
 import httpx as _httpx
@@ -12,8 +14,21 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from beever_atlas.adapters import ChannelInfo, get_adapter
+from beever_atlas.adapters.bridge import ChatBridgeAdapter
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _get_adapter_for_connection(connection_id: str | None = None) -> ChatBridgeAdapter:
+    """Return a connection-scoped adapter if connection_id is given, else the default."""
+    if connection_id:
+        return ChatBridgeAdapter(connection_id=connection_id)
+    base = get_adapter()
+    if isinstance(base, ChatBridgeAdapter):
+        return base
+    return ChatBridgeAdapter()
 
 
 class ChannelResponse(BaseModel):
@@ -24,6 +39,7 @@ class ChannelResponse(BaseModel):
     member_count: int | None = None
     topic: str | None = None
     purpose: str | None = None
+    connection_id: str | None = None
 
 
 class MessageResponse(BaseModel):
@@ -53,26 +69,106 @@ def _channel_to_response(info: ChannelInfo) -> ChannelResponse:
         member_count=info.member_count,
         topic=info.topic,
         purpose=info.purpose,
+        connection_id=info.connection_id,
     )
+
+
+async def _fetch_connection_channels(
+    conn_id: str, selected: list[str],
+) -> list[ChannelInfo]:
+    """Fetch channels for a single connection, filtering by selected_channels.
+
+    Each call creates a short-lived adapter that is closed after use to avoid
+    leaking httpx connections.
+    """
+    adapter = ChatBridgeAdapter(connection_id=conn_id)
+    try:
+        channels = await adapter.list_channels()
+        # If selected_channels configured, filter to only those
+        if selected:
+            selected_set = set(selected)
+            channels = [ch for ch in channels if ch.channel_id in selected_set]
+        return channels
+    finally:
+        await adapter.close()
 
 
 @router.get("/api/channels", response_model=list[ChannelResponse])
 async def list_channels() -> list[ChannelResponse]:
-    """List all accessible channels."""
-    adapter = get_adapter()
-    channels = await adapter.list_channels()
-    return [_channel_to_response(ch) for ch in channels]
+    """List channels from all connected platform connections.
+
+    Iterates every PlatformConnection with status='connected', fetches
+    channels per-connection in parallel, and filters by each connection's
+    selected_channels list.  One failing connection does not block the others.
+    """
+    from beever_atlas.stores import get_stores
+
+    stores = get_stores()
+    connections = await stores.platform.list_connections()
+    connected = [c for c in connections if c.status == "connected"]
+
+    if not connected:
+        return []
+
+    tasks = [
+        _fetch_connection_channels(conn.id, conn.selected_channels)
+        for conn in connected
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_channels: list[ChannelInfo] = []
+    for conn, result in zip(connected, results):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Failed to fetch channels for connection %s (%s): %s",
+                conn.id, conn.display_name, result,
+            )
+            continue
+        all_channels.extend(result)
+
+    return [_channel_to_response(ch) for ch in all_channels]
 
 
 @router.get("/api/channels/{channel_id}", response_model=ChannelResponse)
-async def get_channel(channel_id: str) -> ChannelResponse:
-    """Get metadata for a specific channel."""
-    adapter = get_adapter()
-    try:
-        info = await adapter.get_channel_info(channel_id)
-    except (KeyError, Exception) as e:
-        raise HTTPException(status_code=404, detail=f"Channel {channel_id} not found") from e
-    return _channel_to_response(info)
+async def get_channel(
+    channel_id: str,
+    connection_id: str | None = Query(default=None),
+) -> ChannelResponse:
+    """Get metadata for a specific channel.
+
+    When *connection_id* is provided, fetches directly from that connection.
+    Otherwise, iterates all connected PlatformConnections until the channel is
+    found — this supports direct URL navigation and page refreshes where no
+    route state (and therefore no connection_id) is available.
+    """
+    if connection_id:
+        adapter = ChatBridgeAdapter(connection_id=connection_id)
+        try:
+            info = await adapter.get_channel_info(channel_id)
+        except (KeyError, Exception) as e:
+            raise HTTPException(status_code=404, detail=f"Channel {channel_id} not found") from e
+        finally:
+            await adapter.close()
+        return _channel_to_response(info)
+
+    # No connection_id — search across all connected connections
+    from beever_atlas.stores import get_stores
+
+    stores = get_stores()
+    connections = await stores.platform.list_connections()
+    connected = [c for c in connections if c.status == "connected"]
+
+    for conn in connected:
+        adapter = ChatBridgeAdapter(connection_id=conn.id)
+        try:
+            info = await adapter.get_channel_info(channel_id)
+            return _channel_to_response(info)
+        except (KeyError, Exception):
+            continue
+        finally:
+            await adapter.close()
+
+    raise HTTPException(status_code=404, detail=f"Channel {channel_id} not found")
 
 
 @router.get("/api/channels/{channel_id}/messages", response_model=list[MessageResponse])
@@ -80,9 +176,10 @@ async def get_channel_messages(
     channel_id: str,
     limit: int = Query(default=50, ge=1, le=500),
     since: str | None = Query(default=None, description="ISO 8601 datetime filter"),
+    connection_id: str | None = Query(default=None),
 ) -> list[MessageResponse]:
     """Get paginated messages for a channel."""
-    adapter = get_adapter()
+    adapter = _get_adapter_for_connection(connection_id)
 
     since_dt = None
     if since:
@@ -119,9 +216,10 @@ async def get_channel_messages(
 async def get_thread_messages(
     channel_id: str,
     thread_id: str,
+    connection_id: str | None = Query(default=None),
 ) -> list[MessageResponse]:
     """Get all messages in a thread (parent + replies)."""
-    adapter = get_adapter()
+    adapter = _get_adapter_for_connection(connection_id)
     try:
         messages = await adapter.fetch_thread(channel_id, thread_id)
     except (KeyError, Exception) as e:

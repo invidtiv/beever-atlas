@@ -42,8 +42,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new ApiError(
       response.status,
       error.code || "UNKNOWN",
-      error.message || response.statusText,
+      error.message || body?.detail || response.statusText,
     );
+  }
+
+  // 204 No Content has no body — return undefined instead of parsing JSON
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
@@ -55,6 +60,15 @@ export const api = {
     request<T>(path, {
       method: "POST",
       body: body ? JSON.stringify(body) : undefined,
+    }),
+  put: <T>(path: string, body?: unknown) =>
+    request<T>(path, {
+      method: "PUT",
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  delete: <T>(path: string) =>
+    request<T>(path, {
+      method: "DELETE",
     }),
 };
 

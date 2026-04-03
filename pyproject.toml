@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.28.0",
     "sse-starlette>=2.1.0",
     "pypdf>=4.0.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]

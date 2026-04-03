@@ -11,8 +11,11 @@
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@chat-adapter/discord": "^4.23.0",
     "@chat-adapter/slack": "^4.23.0",
     "@chat-adapter/state-redis": "^4.23.0",
+    "@chat-adapter/teams": "^4.23.0",
+    "@chat-adapter/telegram": "^4.23.0",
     "chat": "^4.23.0",
     "dotenv": "^17.3.1",
     "ioredis": "^5.4.0"

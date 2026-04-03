@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     bridge_url: str = Field(default="http://localhost:3001")
     bridge_api_key: str = Field(default="")
 
+    # Credential encryption
+    credential_master_key: str = Field(default="")
+
     @property
     def neo4j_user(self) -> str:
         return self.neo4j_auth.split("/")[0]

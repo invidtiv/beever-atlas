@@ -46,7 +46,9 @@ class ChatBridgeAdapter(BaseAdapter):
         self,
         bridge_url: str | None = None,
         api_key: str | None = None,
+        connection_id: str | None = None,
     ) -> None:
+        self._connection_id = connection_id
         from beever_atlas.infra.config import get_settings
         _settings = get_settings()
         self._bridge_url = bridge_url or _settings.bridge_url
@@ -115,6 +117,18 @@ class ChatBridgeAdapter(BaseAdapter):
             code="CONNECTION_ERROR",
         )
 
+    def _channel_path(self, channel_id: str) -> str:
+        """Return the bridge path prefix for a channel, scoped by connection if set."""
+        if self._connection_id:
+            return f"/bridge/connections/{self._connection_id}/channels/{channel_id}"
+        return f"/bridge/channels/{channel_id}"
+
+    def _channels_path(self) -> str:
+        """Return the bridge path for listing channels, scoped by connection if set."""
+        if self._connection_id:
+            return f"/bridge/connections/{self._connection_id}/channels"
+        return "/bridge/channels"
+
     def normalize_message(self, raw: dict[str, Any]) -> NormalizedMessage:
         """Convert bridge JSON to NormalizedMessage.
 
@@ -156,7 +170,7 @@ class ChatBridgeAdapter(BaseAdapter):
 
         data = await self._request(
             "GET",
-            f"/bridge/channels/{channel_id}/messages",
+            f"{self._channel_path(channel_id)}/messages",
             params=params,
         )
 
@@ -170,14 +184,14 @@ class ChatBridgeAdapter(BaseAdapter):
         """Fetch thread messages via bridge."""
         data = await self._request(
             "GET",
-            f"/bridge/channels/{channel_id}/threads/{thread_id}/messages",
+            f"{self._channel_path(channel_id)}/threads/{thread_id}/messages",
         )
 
         return [self.normalize_message(m) for m in data.get("messages", [])]
 
     async def get_channel_info(self, channel_id: str) -> ChannelInfo:
         """Get channel metadata via bridge."""
-        data = await self._request("GET", f"/bridge/channels/{channel_id}")
+        data = await self._request("GET", self._channel_path(channel_id))
 
         return ChannelInfo(
             channel_id=data.get("channel_id", channel_id),
@@ -187,11 +201,12 @@ class ChatBridgeAdapter(BaseAdapter):
             member_count=data.get("member_count"),
             topic=data.get("topic"),
             purpose=data.get("purpose"),
+            connection_id=data.get("connection_id") or self._connection_id,
         )
 
     async def list_channels(self) -> list[ChannelInfo]:
         """List all accessible channels via bridge."""
-        data = await self._request("GET", "/bridge/channels")
+        data = await self._request("GET", self._channels_path())
 
         return [
             ChannelInfo(
@@ -202,6 +217,7 @@ class ChatBridgeAdapter(BaseAdapter):
                 member_count=ch.get("member_count"),
                 topic=ch.get("topic"),
                 purpose=ch.get("purpose"),
+                connection_id=ch.get("connection_id") or self._connection_id,
             )
             for ch in data.get("channels", [])
         ]
