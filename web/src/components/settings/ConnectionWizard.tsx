@@ -28,10 +28,12 @@ const SLACK_INSTRUCTIONS = [
 const DISCORD_INSTRUCTIONS = [
   { text: "Go to", link: "https://discord.com/developers/applications", linkText: "discord.com/developers" },
   { text: "Click New Application and give it a name" },
-  { text: "Go to the Bot tab and click Reset Token" },
-  { text: "Copy the Bot Token" },
-  { text: "Enable Message Content Intent under Privileged Gateway Intents" },
-  { text: "Invite the bot to your server with the bot and applications.commands scopes" },
+  { text: "Copy the Application ID and Public Key from the General Information page" },
+  { text: "Go to the Bot tab, click Reset Token, and copy the Bot Token" },
+  { text: "Enable Message Content Intent and Server Members Intent under Privileged Gateway Intents" },
+  { text: "Go to OAuth2 → URL Generator, select bot and applications.commands scopes" },
+  { text: "Under Bot Permissions, enable: Send Messages, Read Message History, Add Reactions, Attach Files" },
+  { text: "Copy the generated URL and open it to invite the bot to your server" },
 ];
 
 const TEAMS_INSTRUCTIONS = [
@@ -58,6 +60,9 @@ const CREDENTIAL_FIELDS: Record<Platform, { key: string; label: string; placehol
   ],
   discord: [
     { key: "bot_token", label: "Bot Token", placeholder: "Your bot token", type: "password" },
+    { key: "public_key", label: "Public Key", placeholder: "64-character hex string from General Information" },
+    { key: "application_id", label: "Application ID", placeholder: "Your Discord application ID" },
+    { key: "mention_role_ids", label: "Mention Role IDs (optional)", placeholder: "Comma-separated role IDs, e.g. 1234567890,9876543210" },
   ],
   teams: [
     { key: "app_id", label: "Microsoft App ID", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },

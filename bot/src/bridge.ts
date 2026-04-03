@@ -875,7 +875,11 @@ async function handleValidateAdapter(
       jsonResponse(res, 200, { valid: true });
     } else if (platform === "discord") {
       const { createDiscordAdapter } = await import("@chat-adapter/discord" as any);
-      const tempAdapter = createDiscordAdapter({ token: credentials.token });
+      const tempAdapter = createDiscordAdapter({
+        botToken: credentials.botToken,
+        publicKey: credentials.publicKey,
+        applicationId: credentials.applicationId,
+      });
       // Discord.js REST — fetch current user to validate token
       const rest = (tempAdapter as any).rest || (tempAdapter as any).client?.rest;
       if (rest) {

@@ -126,9 +126,15 @@ export class ChatManager {
           });
         } else if (entry.platform === "discord") {
           const { createDiscordAdapter } = require("@chat-adapter/discord");
-          adapterInstances[key] = createDiscordAdapter({
-            token: entry.config.token,
-          });
+          const discordOpts: Record<string, unknown> = {
+            botToken: entry.config.botToken,
+            publicKey: entry.config.publicKey,
+            applicationId: entry.config.applicationId,
+          };
+          if (entry.config.mentionRoleIds) {
+            discordOpts.mentionRoleIds = String(entry.config.mentionRoleIds).split(",").map((s: string) => s.trim()).filter(Boolean);
+          }
+          adapterInstances[key] = createDiscordAdapter(discordOpts);
         } else if (entry.platform === "teams") {
           const { createTeamsAdapter } = require("@chat-adapter/teams");
           adapterInstances[key] = createTeamsAdapter({
