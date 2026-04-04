@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     bridge_url: str = Field(default="http://localhost:3001")
     bridge_api_key: str = Field(default="")
 
+    # Graph database backend
+    graph_backend: str = Field(default="neo4j")  # "neo4j" or "nebula"
+    nebula_hosts: str = Field(default="127.0.0.1:9669")
+    nebula_user: str = Field(default="root")
+    nebula_password: str = Field(default="nebula")
+    nebula_space: str = Field(default="beever_atlas")
+
     # Credential encryption
     credential_master_key: str = Field(default="")
 

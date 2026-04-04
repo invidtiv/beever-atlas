@@ -85,13 +85,13 @@ class TestSemanticEntityDedup:
     async def test_find_similar_by_embedding(self):
         from beever_atlas.stores.entity_registry import EntityRegistry
 
-        mock_neo4j = AsyncMock()
-        mock_neo4j.execute_query = AsyncMock(return_value=[
+        mock_graph = AsyncMock()
+        mock_graph.get_entities_with_name_vectors = AsyncMock(return_value=[
             {"name": "Beever Atlas", "vec": [0.9, 0.1, 0.0]},
             {"name": "Redis Cache", "vec": [0.1, 0.9, 0.0]},
         ])
 
-        registry = EntityRegistry(mock_neo4j)
+        registry = EntityRegistry(mock_graph)
         results = await registry.find_similar_by_embedding(
             name="Atlas",
             name_vector=[0.85, 0.15, 0.0],

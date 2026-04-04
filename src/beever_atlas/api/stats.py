@@ -14,8 +14,8 @@ async def get_stats() -> dict:
     """Return aggregate stats across all stores."""
     stores = get_stores()
     total_memories = await stores.weaviate.count_facts()
-    total_entities = await stores.neo4j.count_entities()
-    total_relationships = await stores.neo4j.count_relationships()
+    total_entities = await stores.graph.count_entities()
+    total_relationships = await stores.graph.count_relationships()
     channels_synced = await stores.mongodb.count_synced_channels()
     last_sync_at = await stores.mongodb.get_last_sync_timestamp()
     return {

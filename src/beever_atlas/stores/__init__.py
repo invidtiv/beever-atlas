@@ -9,6 +9,7 @@ from __future__ import annotations
 from beever_atlas.stores.mongodb_store import MongoDBStore
 from beever_atlas.stores.weaviate_store import WeaviateStore
 from beever_atlas.stores.neo4j_store import Neo4jStore
+from beever_atlas.stores.graph_protocol import GraphStore
 from beever_atlas.stores.entity_registry import EntityRegistry
 from beever_atlas.stores.platform_store import PlatformStore
 from beever_atlas.infra.config import Settings
@@ -21,13 +22,13 @@ class StoreClients:
         self,
         mongodb: MongoDBStore,
         weaviate: WeaviateStore,
-        neo4j: Neo4jStore,
+        graph: GraphStore,
         entity_registry: EntityRegistry,
         platform: PlatformStore,
     ):
         self.mongodb = mongodb
         self.weaviate = weaviate
-        self.neo4j = neo4j
+        self.graph = graph
         self.entity_registry = entity_registry
         self.platform = platform
 
@@ -35,14 +36,33 @@ class StoreClients:
     def from_settings(cls, settings: Settings) -> StoreClients:
         mongodb = MongoDBStore(settings.mongodb_uri)
         weaviate = WeaviateStore(settings.weaviate_url, settings.weaviate_api_key)
-        neo4j = Neo4jStore(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password)
-        entity_registry = EntityRegistry(neo4j)
+
+        if settings.graph_backend == "neo4j":
+            graph: GraphStore = Neo4jStore(
+                settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password
+            )
+        elif settings.graph_backend == "nebula":
+            from beever_atlas.stores.nebula_store import NebulaStore
+
+            graph = NebulaStore(
+                settings.nebula_hosts,
+                settings.nebula_user,
+                settings.nebula_password,
+                settings.nebula_space,
+            )
+        else:
+            raise ValueError(
+                f"Unknown graph backend: {settings.graph_backend!r}. "
+                "Expected 'neo4j' or 'nebula'."
+            )
+
+        entity_registry = EntityRegistry(graph)
         # Reuse the same MongoDB connection as MongoDBStore
         platform = PlatformStore(mongodb.db["platform_connections"])
         return cls(
             mongodb=mongodb,
             weaviate=weaviate,
-            neo4j=neo4j,
+            graph=graph,
             entity_registry=entity_registry,
             platform=platform,
         )
@@ -50,11 +70,11 @@ class StoreClients:
     async def startup(self) -> None:
         await self.mongodb.startup()
         await self.weaviate.startup()
-        await self.neo4j.startup()
+        await self.graph.startup()
         await self.platform.startup()
 
     async def shutdown(self) -> None:
-        await self.neo4j.shutdown()
+        await self.graph.shutdown()
         await self.weaviate.shutdown()
         await self.mongodb.shutdown()
 

@@ -23,7 +23,7 @@ async def prune_expired_orphans() -> int:
     stores = get_stores()
 
     try:
-        count = await stores.neo4j.prune_expired_pending(
+        count = await stores.graph.prune_expired_pending(
             grace_period_days=settings.orphan_grace_period_days,
         )
         if count > 0:

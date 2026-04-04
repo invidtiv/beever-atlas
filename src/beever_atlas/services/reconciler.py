@@ -92,9 +92,9 @@ class WriteReconciler:
 
         if not wi.neo4j_done:
             if entities:
-                await stores.neo4j.batch_upsert_entities(entities)  # type: ignore[attr-defined]
+                await stores.graph.batch_upsert_entities(entities)  # type: ignore[attr-defined]
             if relationships:
-                await stores.neo4j.batch_upsert_relationships(relationships)  # type: ignore[attr-defined]
+                await stores.graph.batch_upsert_relationships(relationships)  # type: ignore[attr-defined]
             logger.info(
                 "WriteReconciler: retried %d entities, %d relationships for intent %s.",
                 len(entities),

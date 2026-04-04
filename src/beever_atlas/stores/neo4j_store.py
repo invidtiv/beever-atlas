@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from neo4j import AsyncGraphDatabase
 
 from beever_atlas.models import GraphEntity, GraphRelationship, Subgraph
+
+if TYPE_CHECKING:
+    from beever_atlas.stores.graph_protocol import GraphStore
 
 
 class Neo4jStore:
@@ -24,8 +27,12 @@ class Neo4jStore:
     # ------------------------------------------------------------------
 
     async def startup(self) -> None:
-        """Verify connectivity and create required indexes."""
+        """Verify connectivity and create required indexes/schema."""
         await self._driver.verify_connectivity()
+        await self.ensure_schema()
+
+    async def ensure_schema(self) -> None:
+        """Create indexes and backfill optional fields.  Idempotent."""
         async with self._driver.session() as session:
             await session.run(
                 "CREATE INDEX entity_name IF NOT EXISTS "
@@ -43,12 +50,9 @@ class Neo4jStore:
                 "CREATE INDEX media_url IF NOT EXISTS "
                 "FOR (m:Media) ON (m.url)"
             )
-            # Backfill optional fields to avoid noisy "property key does not exist"
-            # notifications in read queries that project aliases.
             await session.run(
                 "MATCH (e:Entity) WHERE e.aliases IS NULL SET e.aliases = []"
             )
-            # Backfill status field for soft orphan handling
             await session.run(
                 "MATCH (e:Entity) WHERE e.status IS NULL SET e.status = 'active'"
             )
@@ -462,6 +466,18 @@ class Neo4jStore:
             return None
         return self._entity_from_record(record["e"])
 
+    async def find_entity_by_name(self, name: str) -> GraphEntity | None:
+        """Return an entity by its name, or None if not found."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                "MATCH (e:Entity {name: $name}) RETURN e LIMIT 1",
+                name=name,
+            )
+            record = await result.single()
+        if record is None:
+            return None
+        return self._entity_from_record(record["e"])
+
     async def get_neighbors(
         self, entity_id: str, hops: int = 1, limit: int = 50
     ) -> Subgraph:
@@ -713,7 +729,11 @@ class Neo4jStore:
     async def fuzzy_match_entity(
         self, name: str, threshold: float = 0.8
     ) -> list[GraphEntity]:
-        """Find entities whose name is similar to `name` using Jaro-Winkler distance."""
+        """Find entities whose name is similar to `name` using Jaro-Winkler distance.
+
+        Internal method kept for backwards compatibility.  The protocol-level
+        method is :meth:`fuzzy_match_entities`.
+        """
         async with self._driver.session() as session:
             result = await session.run(
                 """
@@ -728,3 +748,105 @@ class Neo4jStore:
             )
             records = await result.data()
         return [self._entity_from_record(r["e"]) for r in records]
+
+    # ------------------------------------------------------------------
+    # Entity-registry support (protocol methods)
+    # ------------------------------------------------------------------
+
+    async def find_entity_by_name_or_alias(self, name: str) -> str | None:
+        """Find an entity by exact name or alias.  Returns canonical name."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                "MATCH (e:Entity) "
+                "WHERE e.name = $name OR $name IN coalesce(e.aliases, []) "
+                "RETURN e.name AS canonical LIMIT 1",
+                name=name,
+            )
+            record = await result.single()
+        if record is None:
+            return None
+        return record["canonical"]
+
+    async def get_all_entities_summary(self) -> list[dict[str, Any]]:
+        """Return all entities as dicts with name, type, aliases."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                "MATCH (e:Entity) "
+                "RETURN e.name AS name, e.type AS type, "
+                "coalesce(e.aliases, []) AS aliases "
+                "ORDER BY e.name"
+            )
+            records = await result.data()
+        return [
+            {"name": r["name"], "type": r["type"], "aliases": list(r["aliases"])}
+            for r in records
+        ]
+
+    async def register_alias(
+        self, canonical: str, alias: str, entity_type: str
+    ) -> None:
+        """Append alias to the aliases list of the named entity."""
+        async with self._driver.session() as session:
+            await session.run(
+                "MATCH (e:Entity {name: $canonical, type: $entity_type}) "
+                "SET e.aliases = CASE "
+                "  WHEN $alias IN coalesce(e.aliases, []) THEN e.aliases "
+                "  ELSE coalesce(e.aliases, []) + [$alias] "
+                "END",
+                canonical=canonical,
+                entity_type=entity_type,
+                alias=alias,
+            )
+
+    async def fuzzy_match_entities(
+        self, name: str, threshold: float = 0.8
+    ) -> list[tuple[str, float]]:
+        """Return (canonical_name, score) pairs using jellyfish Jaro-Winkler."""
+        import jellyfish  # lazy import — optional dependency
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                "MATCH (e:Entity) RETURN e.name AS name"
+            )
+            records = await result.data()
+        matches: list[tuple[str, float]] = []
+        for r in records:
+            entity_name = r["name"]
+            if not entity_name:
+                continue
+            score = jellyfish.jaro_winkler_similarity(name, entity_name)
+            if score >= threshold:
+                matches.append((entity_name, score))
+        matches.sort(key=lambda x: x[1], reverse=True)
+        return matches
+
+    async def get_entities_with_name_vectors(self) -> list[dict[str, Any]]:
+        """Return dicts with name and vec for entities that have name_vector."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                "MATCH (e:Entity) WHERE e.name_vector IS NOT NULL "
+                "RETURN e.name AS name, e.name_vector AS vec"
+            )
+            records = await result.data()
+        return [{"name": r["name"], "vec": r["vec"]} for r in records]
+
+    async def get_entities_missing_name_vectors(self) -> list[str]:
+        """Return entity names that do not have a name_vector."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                "MATCH (e:Entity) WHERE e.name_vector IS NULL "
+                "RETURN e.name AS name"
+            )
+            records = await result.data()
+        return [r["name"] for r in records if r.get("name")]
+
+    async def store_name_vector(
+        self, entity_name: str, vector: list[float]
+    ) -> None:
+        """Persist a name-embedding vector on an entity node."""
+        async with self._driver.session() as session:
+            await session.run(
+                "MATCH (e:Entity {name: $name}) SET e.name_vector = $vector",
+                name=entity_name,
+                vector=vector,
+            )

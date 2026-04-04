@@ -18,7 +18,7 @@ async def list_entities(
 ) -> list[GraphEntity]:
     """List entities in the knowledge graph."""
     stores = get_stores()
-    return await stores.neo4j.list_entities(channel_id=channel_id, entity_type=entity_type, limit=limit)
+    return await stores.graph.list_entities(channel_id=channel_id, entity_type=entity_type, limit=limit)
 
 
 @router.get("/relationships", response_model=list[GraphRelationship])
@@ -28,10 +28,10 @@ async def list_relationships(
 ) -> list[GraphRelationship]:
     """List relationships in the knowledge graph, including entity-media links."""
     stores = get_stores()
-    entity_rels = await stores.neo4j.list_relationships(channel_id=channel_id, limit=limit)
+    entity_rels = await stores.graph.list_relationships(channel_id=channel_id, limit=limit)
 
     # Also fetch entity→media relationships and convert to GraphRelationship
-    media_rels_raw = await stores.neo4j.list_media_relationships(channel_id=channel_id, limit=100)
+    media_rels_raw = await stores.graph.list_media_relationships(channel_id=channel_id, limit=100)
     for mr in media_rels_raw:
         entity_rels.append(GraphRelationship(
             type=mr["type"],
@@ -50,7 +50,7 @@ async def get_entity_neighbors(
 ) -> Subgraph:
     """Get the N-hop neighborhood subgraph for an entity."""
     stores = get_stores()
-    return await stores.neo4j.get_neighbors(entity_id, hops=hops, limit=limit)
+    return await stores.graph.get_neighbors(entity_id, hops=hops, limit=limit)
 
 
 @router.get("/media", response_model=list[dict])
@@ -60,7 +60,7 @@ async def list_media(
 ) -> list[dict]:
     """List media nodes in the knowledge graph."""
     stores = get_stores()
-    return await stores.neo4j.list_media(channel_id=channel_id, limit=limit)
+    return await stores.graph.list_media(channel_id=channel_id, limit=limit)
 
 
 @router.get("/decisions/{channel_id}", response_model=list[GraphEntity])
@@ -70,4 +70,4 @@ async def get_decisions(
 ) -> list[GraphEntity]:
     """Get the decision timeline for a channel."""
     stores = get_stores()
-    return await stores.neo4j.get_decisions(channel_id, limit=limit)
+    return await stores.graph.get_decisions(channel_id, limit=limit)

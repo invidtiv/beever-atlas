@@ -1,28 +1,29 @@
-"""Entity registry backed by Neo4jStore for canonical name resolution."""
+"""Entity registry backed by GraphStore for canonical name resolution."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
-from beever_atlas.stores.neo4j_store import Neo4jStore
+if TYPE_CHECKING:
+    from beever_atlas.stores.graph_protocol import GraphStore
 
 logger = logging.getLogger(__name__)
 
 
 class EntityRegistry:
-    """Resolves and registers entity aliases using the Neo4j knowledge graph
-    as the backing store. Entities in Neo4j ARE the registry."""
+    """Resolves and registers entity aliases using the graph knowledge store
+    as the backing store. Entities in the graph ARE the registry."""
 
-    def __init__(self, neo4j: Neo4jStore) -> None:
-        self._neo4j = neo4j
+    def __init__(self, graph: GraphStore) -> None:
+        self._graph = graph
         self._rejection_cache: dict[tuple[str, str], bool] = {}
 
     async def resolve_alias(
         self,
         name: str,
-        entity_type: str,
-        channel_id: str | None = None,
+        _entity_type: str,
+        _channel_id: str | None = None,
     ) -> str:
         """Return the canonical entity name for `name`, or `name` itself if
         no entity or alias match is found.
@@ -45,76 +46,30 @@ class EntityRegistry:
 
         No-op if the entity does not exist.
         """
-        await self._neo4j.execute_query(
-            """
-            MATCH (e:Entity {name: $canonical, type: $entity_type})
-            SET e.aliases = CASE
-                WHEN $alias IN coalesce(e.aliases, []) THEN e.aliases
-                ELSE coalesce(e.aliases, []) + [$alias]
-            END
-            """,
-            canonical=canonical,
-            entity_type=entity_type,
-            alias=alias,
+        await self._graph.register_alias(
+            canonical=canonical, alias=alias, entity_type=entity_type
         )
 
     async def get_canonical(self, name: str) -> str | None:
         """Find an entity by exact name or by alias. Returns the canonical
         (node) name, or None if no match is found."""
-        records = await self._neo4j.execute_query(
-            """
-            MATCH (e:Entity)
-            WHERE e.name = $name OR $name IN coalesce(e.aliases, [])
-            RETURN e.name AS canonical
-            LIMIT 1
-            """,
-            name=name,
-        )
-        if not records:
-            return None
-        return records[0]["canonical"]
+        return await self._graph.find_entity_by_name_or_alias(name)
 
     async def get_all_canonical(self) -> list[dict]:
         """Return all entities as dicts with name, type, and aliases.
 
         Intended for pipeline state injection.
         """
-        records = await self._neo4j.execute_query(
-            """
-            MATCH (e:Entity)
-            RETURN e.name AS name, e.type AS type,
-                   coalesce(e.aliases, []) AS aliases
-            ORDER BY e.name
-            """
-        )
-        return [
-            {
-                "name": r["name"],
-                "type": r["type"],
-                "aliases": list(r["aliases"]),
-            }
-            for r in records
-        ]
+        return await self._graph.get_all_entities_summary()
 
     async def fuzzy_match(
         self, name: str, threshold: float = 0.8
     ) -> list[tuple[str, float]]:
         """Return (canonical_name, score) pairs for entities similar to `name`.
 
-        Delegates to Neo4jStore.fuzzy_match_entity via APOC Jaro-Winkler.
+        Delegates to the graph store's portable Jaro-Winkler implementation.
         """
-        records = await self._neo4j.execute_query(
-            """
-            MATCH (e:Entity)
-            WITH e, apoc.text.jaroWinklerDistance(e.name, $name) AS score
-            WHERE score >= $threshold
-            RETURN e.name AS name, score
-            ORDER BY score DESC
-            """,
-            name=name,
-            threshold=threshold,
-        )
-        return [(r["name"], float(r["score"])) for r in records]
+        return await self._graph.fuzzy_match_entities(name, threshold)
 
     # ------------------------------------------------------------------
     # Embedding-based semantic similarity (Group 2)
@@ -191,22 +146,18 @@ class EntityRegistry:
         """Find entities similar to `name` using cached name_vector embeddings.
 
         Computes cosine similarity against all entities that have a name_vector
-        stored in Neo4j. Returns (canonical_name, similarity_score) pairs above
-        the threshold.
+        stored in the graph. Returns (canonical_name, similarity_score) pairs
+        above the threshold.
         """
         import math
 
-        records = await self._neo4j.execute_query(
-            "MATCH (e:Entity) WHERE e.name_vector IS NOT NULL "
-            "RETURN e.name AS name, e.name_vector AS vec"
-        )
+        records = await self._graph.get_entities_with_name_vectors()
 
         results: list[tuple[str, float]] = []
         for r in records:
             vec = r.get("vec")
             if not vec or not isinstance(vec, list):
                 continue
-            # Cosine similarity
             dot = sum(a * b for a, b in zip(name_vector, vec))
             norm_a = math.sqrt(sum(a * a for a in name_vector))
             norm_b = math.sqrt(sum(b * b for b in vec))
@@ -222,12 +173,8 @@ class EntityRegistry:
     async def store_name_vector(
         self, entity_name: str, vector: list[float]
     ) -> None:
-        """Cache a name embedding vector on a Neo4j Entity node."""
-        await self._neo4j.execute_query(
-            "MATCH (e:Entity {name: $name}) SET e.name_vector = $vector",
-            name=entity_name,
-            vector=vector,
-        )
+        """Cache a name embedding vector on a graph Entity node."""
+        await self._graph.store_name_vector(entity_name, vector)
 
     def is_merge_rejected(self, name_a: str, name_b: str) -> bool:
         """Check if a merge pair was previously rejected."""

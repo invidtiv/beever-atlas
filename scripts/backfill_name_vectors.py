@@ -26,11 +26,7 @@ async def main() -> None:
     await stores.startup()
 
     # Find entities without name_vector
-    records = await stores.neo4j.execute_query(
-        "MATCH (e:Entity) WHERE e.name_vector IS NULL "
-        "RETURN e.name AS name"
-    )
-    names = [r["name"] for r in records if r.get("name")]
+    names = await stores.graph.get_entities_missing_name_vectors()
     logger.info("Found %d entities without name_vector", len(names))
 
     if not names:

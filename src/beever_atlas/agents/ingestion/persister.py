@@ -180,7 +180,7 @@ class PersisterAgent(BaseAgent):
         # --- 4. Batch upsert entities and relationships to Neo4j ---
         try:
             if entities:
-                await stores.neo4j.batch_upsert_entities(entities)
+                await stores.graph.batch_upsert_entities(entities)
                 logger.info(
                     "PersisterAgent: neo4j entity upsert job_id=%s channel=%s batch=%s entities=%d",
                     sync_job_id,
@@ -189,7 +189,7 @@ class PersisterAgent(BaseAgent):
                     len(entities),
                 )
             if relationships:
-                await stores.neo4j.batch_upsert_relationships(relationships)
+                await stores.graph.batch_upsert_relationships(relationships)
                 logger.info(
                     "PersisterAgent: neo4j relationship upsert job_id=%s channel=%s batch=%s relationships=%d",
                     sync_job_id,
@@ -213,7 +213,7 @@ class PersisterAgent(BaseAgent):
                     rel_entity_names.add(rel.target)
                 for name in rel_entity_names:
                     try:
-                        await stores.neo4j.promote_pending_entity(name)
+                        await stores.graph.promote_pending_entity(name)
                     except Exception:  # noqa: BLE001
                         pass  # Best effort — entity may not be pending
         except Exception as exc:  # noqa: BLE001
@@ -240,13 +240,10 @@ class PersisterAgent(BaseAgent):
         extracted_names: set[str] = {e.name for e in entities}
         missing_names = all_tag_names - extracted_names
         if missing_names:
-            # Check which of these already exist in Neo4j from prior batches
+            # Check which of these already exist in the graph from prior batches
             for name in list(missing_names):
-                existing = await stores.neo4j.execute_query(
-                    "MATCH (e:Entity {name: $name}) RETURN e.name AS name LIMIT 1",
-                    name=name,
-                )
-                if existing:
+                existing = await stores.graph.find_entity_by_name(name)
+                if existing is not None:
                     missing_names.discard(name)
             # Create stub entities for truly missing names
             for name in missing_names:
@@ -258,7 +255,7 @@ class PersisterAgent(BaseAgent):
                     source_message_id=facts[0].source_message_id if facts else "",
                     message_ts=facts[0].message_ts if facts else "",
                 )
-                await stores.neo4j.upsert_entity(stub)
+                await stores.graph.upsert_entity(stub)
             if missing_names:
                 logger.info(
                     "PersisterAgent: created %d stub entities job_id=%s channel=%s batch=%s names=%s",
@@ -272,7 +269,7 @@ class PersisterAgent(BaseAgent):
         # --- 5. Create episodic links (entity → Event → weaviate_fact_id) ---
         for fact, weaviate_id in zip(facts, weaviate_ids, strict=True):
             for entity_name in fact.entity_tags:
-                await stores.neo4j.create_episodic_link(
+                await stores.graph.create_episodic_link(
                     entity_name=entity_name,
                     weaviate_fact_id=weaviate_id,
                     message_ts=fact.message_ts,
@@ -311,7 +308,7 @@ class PersisterAgent(BaseAgent):
                         idx = media_urls.index(url)
                         if idx < len(media_names) and media_names[idx]:
                             title = media_names[idx]
-                await stores.neo4j.upsert_media(
+                await stores.graph.upsert_media(
                     url=url,
                     media_type=mtype,
                     title=title,
@@ -319,7 +316,7 @@ class PersisterAgent(BaseAgent):
                     message_ts=fact.message_ts,
                 )
                 for entity_name in fact.entity_tags:
-                    await stores.neo4j.link_entity_to_media(
+                    await stores.graph.link_entity_to_media(
                         entity_name=entity_name,
                         media_url=url,
                     )

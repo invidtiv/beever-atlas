@@ -328,7 +328,7 @@ async def clear_channel_data(channel_id: str):
 
     # Clear Neo4j entities, events, media
     try:
-        neo4j_results = await stores.neo4j.delete_channel_data(channel_id)
+        neo4j_results = await stores.graph.delete_channel_data(channel_id)
         results.update(neo4j_results)
     except Exception as exc:
         results["neo4j_error"] = str(exc)
