@@ -38,6 +38,9 @@ class AtomicFact(BaseModel):
     source_link_descriptions: list[str] = Field(default_factory=list)
     valid_at: datetime | None = None
     invalid_at: datetime | None = None
+    superseded_by: str | None = None
+    supersedes: str | None = None
+    potential_contradiction: bool = False
     text_vector: list[float] | None = None
 
     @staticmethod
@@ -57,6 +60,9 @@ class GraphEntity(BaseModel):
     channel_id: str | None = None
     properties: dict[str, Any] = Field(default_factory=dict)
     aliases: list[str] = Field(default_factory=list)
+    status: str = "active"  # "active" or "pending"
+    pending_since: datetime | None = None
+    name_vector: list[float] | None = None
     source_fact_ids: list[str] = Field(default_factory=list)
     source_message_id: str = ""
     message_ts: str = ""

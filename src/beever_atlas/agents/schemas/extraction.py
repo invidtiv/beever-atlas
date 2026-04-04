@@ -86,6 +86,9 @@ class ExtractedEntity(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     """Alternative names or spellings observed in messages."""
 
+    status: str = "active"
+    """Entity lifecycle status: "active" or "pending" (orphan with no relationships)."""
+
     source_message_id: str = ""
     """Slack message ``ts`` where this entity was first identified in the batch."""
 

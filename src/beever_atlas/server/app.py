@@ -20,6 +20,7 @@ from beever_atlas.api.sync import shutdown_sync_runner
 from beever_atlas.api.sync import router as sync_router
 from beever_atlas.api.memories import router as memories_router
 from beever_atlas.api.graph import router as graph_router
+from beever_atlas.api.search import router as search_router
 from beever_atlas.api.stats import router as stats_router
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
@@ -137,6 +138,7 @@ app.include_router(connections_router)
 app.include_router(sync_router)
 app.include_router(memories_router)
 app.include_router(graph_router)
+app.include_router(search_router)
 app.include_router(stats_router)
 
 register_health_checks()

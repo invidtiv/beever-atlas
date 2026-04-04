@@ -193,6 +193,37 @@ class BatchProcessor:
                     m if isinstance(m, dict) else vars(m) for m in batch
                 ]
 
+                # Pre-compute embedding similarity candidates for the validator.
+                # This injects semantic dedup hints alongside string-based known_entities.
+                embedding_similarity_candidates: list[dict[str, Any]] = []
+                try:
+                    entity_names_in_batch: list[str] = []
+                    for m in messages_as_dicts:
+                        for tag in (m.get("entity_tags") or []):
+                            if tag and tag not in entity_names_in_batch:
+                                entity_names_in_batch.append(tag)
+                    if entity_names_in_batch:
+                        for name in entity_names_in_batch[:20]:  # Cap to avoid excessive API calls
+                            try:
+                                vec = await stores.entity_registry.compute_name_embedding(name)
+                                similar = await stores.entity_registry.find_similar_by_embedding(
+                                    name, vec, threshold=settings.entity_similarity_threshold
+                                )
+                                for canonical, score in similar:
+                                    if not stores.entity_registry.is_merge_rejected(name, canonical):
+                                        embedding_similarity_candidates.append({
+                                            "extracted": name,
+                                            "similar_to": canonical,
+                                            "score": score,
+                                        })
+                            except Exception:
+                                pass  # Graceful: embedding failure doesn't block validation
+                except Exception:
+                    logger.debug(
+                        "BatchProcessor: embedding similarity pre-processing failed, continuing with string matching",
+                        exc_info=True,
+                    )
+
                 initial_state: dict[str, Any] = {
                     "messages": messages_as_dicts,
                     "channel_id": channel_id,
@@ -200,6 +231,7 @@ class BatchProcessor:
                     "batch_num": batch_index,
                     "max_facts_per_message": settings.max_facts_per_message,
                     "known_entities": known_entities,
+                    "embedding_similarity_candidates": embedding_similarity_candidates,
                     "sync_job_id": sync_job_id,
                 }
 
@@ -370,6 +402,36 @@ class BatchProcessor:
 
                 batch_facts = len(persist_result.get("weaviate_ids") or [])
                 batch_entities = persist_result.get("entity_count") or 0
+
+                # --- Post-pipeline: contradiction detection ---
+                # Runs AFTER persistence completes, outside the outbox transaction.
+                try:
+                    from beever_atlas.services.contradiction_detector import check_and_supersede
+                    embedded_facts_raw = final_state.get("embedded_facts") or []
+                    if embedded_facts_raw:
+                        from beever_atlas.models import AtomicFact
+                        persisted_facts: list[AtomicFact] = []
+                        weaviate_ids = persist_result.get("weaviate_ids") or []
+                        for idx, fd in enumerate(embedded_facts_raw):
+                            fact_channel = fd.get("channel_id") or channel_id
+                            msg_ts = fd.get("message_ts", "")
+                            fact_id = (
+                                weaviate_ids[idx] if idx < len(weaviate_ids)
+                                else AtomicFact.deterministic_id("slack", fact_channel, msg_ts, idx)
+                            )
+                            persisted_facts.append(AtomicFact(
+                                id=fact_id,
+                                memory_text=fd.get("memory_text", ""),
+                                topic_tags=fd.get("topic_tags") or [],
+                                entity_tags=fd.get("entity_tags") or [],
+                                channel_id=fact_channel,
+                            ))
+                        await check_and_supersede(persisted_facts, channel_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "BatchProcessor: contradiction detection failed job_id=%s batch=%d, continuing",
+                        sync_job_id, batch_index, exc_info=True,
+                    )
 
                 # Extract sample data for sync history.
                 raw_facts = final_state.get("extracted_facts") or {}

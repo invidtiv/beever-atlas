@@ -129,6 +129,21 @@ class PersisterAgent(BaseAgent):
             entity = GraphEntity(**cleaned)
             entities.append(entity)
 
+        # --- Batch compute name_vector for all entities ---
+        try:
+            entity_names = [e.name for e in entities if e.name]
+            if entity_names:
+                name_vectors = await stores.entity_registry.compute_name_embeddings_batch(entity_names)
+                for entity in entities:
+                    if entity.name in name_vectors:
+                        entity.name_vector = name_vectors[entity.name]
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "PersisterAgent: name_vector batch computation failed job_id=%s, continuing without vectors",
+                sync_job_id,
+                exc_info=True,
+            )
+
         relationships: list[GraphRelationship] = []
         for rd in relationship_dicts:
             rel = GraphRelationship(**{k: v for k, v in rd.items() if k != "id"})
@@ -182,6 +197,25 @@ class PersisterAgent(BaseAgent):
                     batch_num,
                     len(relationships),
                 )
+                # Store name_vectors on Neo4j entity nodes
+                for entity in entities:
+                    if entity.name_vector:
+                        try:
+                            await stores.entity_registry.store_name_vector(
+                                entity.name, entity.name_vector
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass  # Best effort
+                # Promote pending entities that now have relationships
+                rel_entity_names: set[str] = set()
+                for rel in relationships:
+                    rel_entity_names.add(rel.source)
+                    rel_entity_names.add(rel.target)
+                for name in rel_entity_names:
+                    try:
+                        await stores.neo4j.promote_pending_entity(name)
+                    except Exception:  # noqa: BLE001
+                        pass  # Best effort — entity may not be pending
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "PersisterAgent: neo4j failed job_id=%s channel=%s batch=%s: %s",

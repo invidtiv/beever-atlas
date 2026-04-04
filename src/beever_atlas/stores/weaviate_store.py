@@ -84,6 +84,9 @@ class WeaviateStore:
         ("source_link_descriptions", DataType.TEXT_ARRAY),
         ("valid_at", DataType.DATE),
         ("invalid_at", DataType.DATE),
+        ("superseded_by", DataType.TEXT),
+        ("supersedes", DataType.TEXT),
+        ("potential_contradiction", DataType.BOOL),
     ]
 
     async def ensure_schema(self) -> None:
@@ -213,6 +216,12 @@ class WeaviateStore:
             "source_link_titles": fact.source_link_titles,
             "source_link_descriptions": fact.source_link_descriptions,
         }
+        # Supersession fields
+        if fact.superseded_by:
+            props["superseded_by"] = fact.superseded_by
+        if fact.supersedes:
+            props["supersedes"] = fact.supersedes
+        props["potential_contradiction"] = fact.potential_contradiction
         # Weaviate DATE fields require proper datetime objects or must be omitted.
         valid_at = WeaviateStore._coerce_date(fact.valid_at)
         if valid_at is not None:
@@ -252,6 +261,9 @@ class WeaviateStore:
             source_link_descriptions=props.get("source_link_descriptions") or [],
             valid_at=props.get("valid_at"),
             invalid_at=props.get("invalid_at"),
+            superseded_by=props.get("superseded_by") or None,
+            supersedes=props.get("supersedes") or None,
+            potential_contradiction=bool(props.get("potential_contradiction")),
         )
 
     # ------------------------------------------------------------------
@@ -479,6 +491,173 @@ class WeaviateStore:
             return len(ids)
 
         return await asyncio.to_thread(_delete)
+
+    # ------------------------------------------------------------------
+    # Semantic search
+    # ------------------------------------------------------------------
+
+    async def semantic_search(
+        self,
+        query_vector: list[float],
+        channel_id: str | None = None,
+        filters: Any = None,
+        limit: int = 20,
+        threshold: float = 0.7,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Search facts by vector similarity using Weaviate near_vector.
+
+        Returns list of dicts with ``fact`` (AtomicFact) and ``similarity_score``.
+        """
+        from weaviate.classes.query import MetadataQuery
+
+        def _search() -> list[dict[str, Any]]:
+            collection = self._collection()
+
+            # Build filter
+            weaviate_filter = None
+            if channel_id:
+                weaviate_filter = Filter.by_property("channel_id").equal(channel_id)
+            if not include_superseded:
+                no_superseded = Filter.by_property("invalid_at").is_none(True)
+                weaviate_filter = (
+                    weaviate_filter & no_superseded if weaviate_filter else no_superseded
+                )
+
+            result = collection.query.near_vector(
+                near_vector=query_vector,
+                limit=limit,
+                filters=weaviate_filter,
+                return_metadata=MetadataQuery(distance=True),
+            )
+
+            results: list[dict[str, Any]] = []
+            for obj in result.objects:
+                # Weaviate returns distance (lower = more similar).
+                # Convert to similarity score: 1 - distance (for cosine).
+                distance = getattr(obj.metadata, "distance", None)
+                similarity = 1.0 - (distance if distance is not None else 1.0)
+                if similarity < threshold:
+                    continue
+                fact = self._obj_to_fact(obj)
+                results.append({
+                    "fact": fact,
+                    "similarity_score": round(similarity, 4),
+                })
+            return results
+
+        return await asyncio.to_thread(_search)
+
+    async def hybrid_search(
+        self,
+        query_vector: list[float],
+        channel_id: str,
+        filters: Any = None,
+        limit: int = 20,
+        threshold: float = 0.7,
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Merge semantic vector results with field-filter results, deduplicated.
+
+        Returns list of dicts with ``fact`` and ``similarity_score``.
+        Overlapping facts (found by both methods) are ranked highest.
+        """
+        # Run both searches
+        vector_results = await self.semantic_search(
+            query_vector=query_vector,
+            channel_id=channel_id,
+            limit=limit,
+            threshold=threshold,
+            include_superseded=include_superseded,
+        )
+
+        # Field-filter results (existing exact search)
+        from beever_atlas.models import MemoryFilters
+        field_result = await self.list_facts(
+            channel_id=channel_id,
+            filters=filters or MemoryFilters(),
+            page=1,
+            limit=limit,
+        )
+
+        # Merge and deduplicate
+        seen_ids: set[str] = set()
+        merged: list[dict[str, Any]] = []
+
+        # Vector results first (already have similarity scores)
+        vector_ids: set[str] = set()
+        for vr in vector_results:
+            fact = vr["fact"]
+            vector_ids.add(fact.id)
+            seen_ids.add(fact.id)
+            merged.append(vr)
+
+        # Field-filter results — boost score if also found by vector search
+        for fact in field_result.memories:
+            if include_superseded is False and fact.invalid_at is not None:
+                continue
+            if fact.id in seen_ids:
+                # Already in results from vector search — boost it
+                for item in merged:
+                    if item["fact"].id == fact.id:
+                        item["similarity_score"] = min(1.0, item["similarity_score"] + 0.1)
+                        break
+                continue
+            seen_ids.add(fact.id)
+            merged.append({
+                "fact": fact,
+                "similarity_score": 0.5,  # Default score for field-filter matches
+            })
+
+        # Sort by similarity score descending
+        merged.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return merged[:limit]
+
+    async def supersede_fact(
+        self,
+        old_fact_id: str,
+        new_fact_id: str,
+    ) -> None:
+        """Mark an old fact as superseded by a new fact.
+
+        Sets ``invalid_at`` and ``superseded_by`` on the old fact,
+        and ``supersedes`` on the new fact.
+        """
+        from datetime import timezone
+
+        now = datetime.now(tz=timezone.utc)
+
+        def _supersede() -> None:
+            collection = self._collection()
+            # Update old fact
+            collection.data.update(
+                uuid=old_fact_id,
+                properties={
+                    "invalid_at": now,
+                    "superseded_by": new_fact_id,
+                },
+            )
+            # Update new fact
+            collection.data.update(
+                uuid=new_fact_id,
+                properties={
+                    "supersedes": old_fact_id,
+                },
+            )
+
+        await asyncio.to_thread(_supersede)
+
+    async def flag_potential_contradiction(self, fact_id: str) -> None:
+        """Flag a fact as having a potential contradiction."""
+
+        def _flag() -> None:
+            collection = self._collection()
+            collection.data.update(
+                uuid=fact_id,
+                properties={"potential_contradiction": True},
+            )
+
+        await asyncio.to_thread(_flag)
 
     async def fetch_by_ids(self, fact_ids: list[str]) -> list[AtomicFact]:
         """Fetch multiple facts by their ids. Skips ids that are not found."""

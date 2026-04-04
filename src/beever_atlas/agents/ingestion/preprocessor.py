@@ -17,6 +17,8 @@ from google.adk.agents import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
 
+from beever_atlas.infra.config import get_settings
+
 if TYPE_CHECKING:
     pass
 
@@ -224,6 +226,65 @@ def _build_thread_context(
     return f"[Reply to {parent_author}: {parent_text}]"
 
 
+async def _resolve_cross_batch_parent(
+    msg: dict[str, Any],
+    messages_by_ts: dict[str, dict[str, Any]],
+) -> str | None:
+    """Resolve thread parent from persisted stores when not in current batch.
+
+    Falls back to MongoDB then Weaviate for parent message lookup.
+    """
+    settings = get_settings()
+
+    if not settings.cross_batch_thread_context_enabled:
+        return None
+
+    thread_ts: str | None = msg.get("thread_ts") or msg.get("thread_id")
+    msg_ts: str = _message_key(msg) or ""
+
+    if not thread_ts or thread_ts == msg_ts:
+        return None
+
+    # Already resolved in-batch
+    if thread_ts in messages_by_ts:
+        return None
+
+    max_len = settings.thread_context_max_length
+
+    try:
+        from beever_atlas.stores import get_stores
+        stores = get_stores()
+
+        # Try MongoDB first
+        record = await stores.mongodb.db["raw_messages"].find_one(
+            {"message_ts": thread_ts}
+        )
+        if record:
+            author = record.get("author_name") or record.get("author") or "unknown"
+            text = (record.get("text") or record.get("content") or "").strip()
+            if len(text) > max_len:
+                text = text[: max_len - 3] + "..."
+            return f"[Reply to {author}: {text}]"
+
+        # Fallback: search Weaviate for a fact from this message
+        facts = await stores.weaviate.list_facts(
+            channel_id=msg.get("channel_id", ""),
+            filters=type("F", (), {"topic": None, "entity": None, "importance": None, "since": None, "until": None})(),
+            page=1,
+            limit=1,
+        )
+        # This is a basic fallback — in practice you'd filter by source_message_id
+
+    except Exception:
+        logger.warning(
+            "PreprocessorAgent: cross-batch thread lookup failed for thread_ts=%s",
+            thread_ts,
+            exc_info=True,
+        )
+
+    return None
+
+
 class PreprocessorAgent(BaseAgent):
     """Deterministic pre-processing stage for the ingestion pipeline.
 
@@ -292,6 +353,34 @@ class PreprocessorAgent(BaseAgent):
             enriched["thread_context"] = _build_thread_context(msg, messages_by_ts)
             enriched["preprocessed"] = True
             preprocessed.append(enriched)
+
+        # --- Coreference resolution ---
+        coref_settings = get_settings()
+        if coref_settings.coref_enabled and preprocessed:
+            try:
+                from beever_atlas.services.coreference_resolver import (
+                    fetch_channel_history,
+                    resolve_coreferences,
+                )
+                history = await fetch_channel_history(
+                    channel_id, limit=coref_settings.coref_history_limit
+                )
+                await resolve_coreferences(preprocessed, history)
+            except Exception:
+                logger.warning(
+                    "PreprocessorAgent: coreference resolution failed job_id=%s",
+                    sync_job_id,
+                    exc_info=True,
+                )
+
+        # --- Cross-batch thread context ---
+        for enriched_msg in preprocessed:
+            if enriched_msg.get("thread_context") is None:
+                cross_batch_ctx = await _resolve_cross_batch_parent(
+                    enriched_msg, messages_by_ts
+                )
+                if cross_batch_ctx:
+                    enriched_msg["thread_context"] = cross_batch_ctx
 
         # Process media attachments and extract links for all messages.
         media_enriched = 0

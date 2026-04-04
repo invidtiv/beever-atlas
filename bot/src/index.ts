@@ -113,41 +113,87 @@ async function askBackend(channelId: string, question: string): Promise<AskResul
   return consumeSSEStream(response);
 }
 
+// ── Backend health check ────────────────────────────────────────────────────
+
+async function isBackendHealthy(): Promise<boolean> {
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/health`, { signal: AbortSignal.timeout(3000) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 // ── Startup sync with retry ──────────────────────────────────────────────────
+
+/**
+ * Fetches connections from the backend and registers them. Returns true if
+ * at least one connection was synced, false otherwise.
+ */
+async function syncConnectionsFromBackend(chatManager: ChatManager, label: string): Promise<boolean> {
+  const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || "";
+  const headers: Record<string, string> = {};
+  if (BRIDGE_API_KEY) {
+    headers["Authorization"] = `Bearer ${BRIDGE_API_KEY}`;
+  }
+
+  const response = await fetch(`${BACKEND_URL}/api/internal/connections/credentials`, { headers });
+  if (!response.ok) {
+    throw new Error(`Backend returned ${response.status}`);
+  }
+
+  const connections = await response.json() as Array<{
+    connection_id?: string;
+    platform: string;
+    credentials: Record<string, string>;
+    status: string;
+  }>;
+
+  if (connections.length === 0) {
+    console.log(`${label}: no connections found in backend`);
+    return false;
+  }
+
+  // Build a fingerprint from incoming connections to detect changes
+  const incomingKeys = connections
+    .map((c) => `${c.platform}:${c.connection_id || c.platform}`)
+    .sort()
+    .join(",");
+
+  if (incomingKeys === chatManager.adapterFingerprint()) {
+    console.log(`${label}: adapters unchanged, skipping rebuild`);
+    return true;
+  }
+
+  for (const conn of connections) {
+    // Normalize credential keys: backend stores snake_case, ChatSDK expects camelCase
+    const normalizedCreds: Record<string, string> = {};
+    for (const [key, value] of Object.entries(conn.credentials)) {
+      const camelKey = key.replace(/_([a-z])/g, (_: string, c: string) => c.toUpperCase());
+      normalizedCreds[camelKey] = String(value);
+    }
+    console.log(`${label}: registering ${conn.platform} adapter (connection: ${conn.connection_id || "legacy"})`);
+    await chatManager.register(conn.platform, normalizedCreds, conn.connection_id);
+  }
+
+  console.log(`${label}: loaded ${connections.length} connection(s) from backend`);
+  return true;
+}
 
 async function loadConnectionsFromBackend(chatManager: ChatManager): Promise<void> {
   const delays = [1000, 2000, 4000, 8000, 16000];
-  const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || "";
 
   for (let attempt = 0; attempt < delays.length; attempt++) {
     try {
-      const headers: Record<string, string> = {};
-      if (BRIDGE_API_KEY) {
-        headers["Authorization"] = `Bearer ${BRIDGE_API_KEY}`;
-      }
-      const response = await fetch(`${BACKEND_URL}/api/internal/connections/credentials`, { headers });
-      if (!response.ok) {
-        throw new Error(`Backend returned ${response.status}`);
+      // Health-aware: check backend availability before fetching connections
+      const healthy = await isBackendHealthy();
+      if (!healthy) {
+        throw new Error("Backend health check failed");
       }
 
-      const connections = await response.json() as Array<{
-        connection_id?: string;
-        platform: string;
-        credentials: Record<string, string>;
-        status: string;
-      }>;
-
-      if (connections.length === 0) {
-        console.log("Startup sync: no connections found in backend");
-        return;
-      }
-
-      for (const conn of connections) {
-        console.log(`Startup sync: registering ${conn.platform} adapter (connection: ${conn.connection_id || "legacy"})`);
-        await chatManager.register(conn.platform, conn.credentials, conn.connection_id);
-      }
-
-      console.log(`Startup sync: loaded ${connections.length} connection(s) from backend`);
+      const synced = await syncConnectionsFromBackend(chatManager, "Startup sync");
+      if (synced || chatManager.adapterCount() > 0) return;
+      // No connections found — still a successful call, just nothing to load
       return;
     } catch (err) {
       const isLastAttempt = attempt === delays.length - 1;
@@ -164,21 +210,132 @@ async function loadConnectionsFromBackend(chatManager: ChatManager): Promise<voi
 }
 
 async function fallbackToEnvCredentials(chatManager: ChatManager): Promise<void> {
-  const botToken = process.env.SLACK_BOT_TOKEN;
-  const signingSecret = process.env.SLACK_SIGNING_SECRET;
+  let registered = 0;
 
-  if (botToken && signingSecret) {
-    console.log("Startup sync: registering Slack adapter from .env credentials");
-    await chatManager.register("slack", { botToken, signingSecret });
-  } else {
-    console.warn("Startup sync: no .env credentials available — bot starting without adapters");
+  // Slack
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  const slackSecret = process.env.SLACK_SIGNING_SECRET;
+  if (slackToken && slackSecret) {
+    console.log("Env fallback: registering Slack adapter from .env credentials");
+    await chatManager.register("slack", { botToken: slackToken, signingSecret: slackSecret });
+    registered++;
   }
+
+  // Discord
+  const discordToken = process.env.DISCORD_BOT_TOKEN;
+  const discordPublicKey = process.env.DISCORD_PUBLIC_KEY;
+  const discordAppId = process.env.DISCORD_APPLICATION_ID;
+  if (discordToken && discordPublicKey && discordAppId) {
+    console.log("Env fallback: registering Discord adapter from .env credentials");
+    await chatManager.register("discord", {
+      botToken: discordToken,
+      publicKey: discordPublicKey,
+      applicationId: discordAppId,
+    });
+    registered++;
+  }
+
+  // Teams
+  const teamsAppId = process.env.TEAMS_APP_ID;
+  const teamsAppPassword = process.env.TEAMS_APP_PASSWORD;
+  if (teamsAppId && teamsAppPassword) {
+    console.log("Env fallback: registering Teams adapter from .env credentials");
+    await chatManager.register("teams", { appId: teamsAppId, appPassword: teamsAppPassword });
+    registered++;
+  }
+
+  // Telegram
+  const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (telegramToken) {
+    console.log("Env fallback: registering Telegram adapter from .env credentials");
+    await chatManager.register("telegram", { botToken: telegramToken });
+    registered++;
+  }
+
+  if (registered === 0) {
+    console.warn("Env fallback: no .env credentials available — bot starting without adapters");
+  }
+}
+
+// ── Periodic background sync ────────────────────────────────────────────────
+
+const SYNC_INTERVAL_MS = 60_000;
+let backgroundSyncTimer: ReturnType<typeof setInterval> | null = null;
+let backgroundSyncRunning = false;
+
+function startBackgroundSync(chatManager: ChatManager): void {
+  if (backgroundSyncTimer) return;
+
+  backgroundSyncTimer = setInterval(async () => {
+    // Skip if a sync is already in progress
+    if (backgroundSyncRunning) return;
+
+    // Only sync when the bot has no adapters (self-healing) or backend may have
+    // new connections. Always attempt when adapter count is 0.
+    if (chatManager.adapterCount() > 0) {
+      // Still attempt periodically to pick up new connections, but only if
+      // the backend is healthy (cheap check avoids unnecessary errors in logs)
+      const healthy = await isBackendHealthy();
+      if (!healthy) return;
+    }
+
+    backgroundSyncRunning = true;
+    try {
+      await syncConnectionsFromBackend(chatManager, "Background sync");
+    } catch (err) {
+      // Only log when the bot has no adapters (self-healing scenario)
+      if (chatManager.adapterCount() === 0) {
+        console.warn(`Background sync: failed (${err}), will retry in ${SYNC_INTERVAL_MS / 1000}s`);
+      }
+    } finally {
+      backgroundSyncRunning = false;
+    }
+  }, SYNC_INTERVAL_MS);
+
+  // Don't let the timer prevent process exit
+  backgroundSyncTimer.unref();
+  console.log(`Background sync: enabled (every ${SYNC_INTERVAL_MS / 1000}s)`);
+}
+
+// ── Lazy sync (triggered on demand) ─────────────────────────────────────────
+
+let lazySyncPromise: Promise<boolean> | null = null;
+
+/**
+ * Attempts a one-shot sync if the bot currently has no adapters.
+ * Returns true if the bot has adapters after the attempt.
+ * Deduplicates concurrent calls.
+ */
+export async function lazySyncIfNeeded(chatManager: ChatManager): Promise<boolean> {
+  if (chatManager.getCurrentBot() && chatManager.adapterCount() > 0) {
+    return true;
+  }
+
+  // Deduplicate concurrent lazy sync calls
+  if (lazySyncPromise) return lazySyncPromise;
+
+  lazySyncPromise = (async () => {
+    try {
+      const healthy = await isBackendHealthy();
+      if (!healthy) return false;
+
+      await syncConnectionsFromBackend(chatManager, "Lazy sync");
+      return chatManager.adapterCount() > 0;
+    } catch (err) {
+      console.warn(`Lazy sync: failed (${err})`);
+      return false;
+    } finally {
+      lazySyncPromise = null;
+    }
+  })();
+
+  return lazySyncPromise;
 }
 
 // ── HTTP server for webhooks ────────────────────────────────────────────────
 
 function startServer(chatManager: ChatManager): void {
-  const handleBridge = registerBridgeRoutes(chatManager);
+  const handleBridge = registerBridgeRoutes(chatManager, () => lazySyncIfNeeded(chatManager));
   const webhookBuffer = new WebhookBuffer(chatManager);
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -248,6 +405,10 @@ function startServer(chatManager: ChatManager): void {
   // Graceful shutdown
   const shutdown = async () => {
     console.log("Shutting down bot service...");
+    if (backgroundSyncTimer) {
+      clearInterval(backgroundSyncTimer);
+      backgroundSyncTimer = null;
+    }
     server.close();
     const bot = chatManager.getCurrentBot();
     if (bot) {
@@ -271,11 +432,16 @@ async function handleConnectionWebhook(
   connectionId: string,
 ): Promise<void> {
   try {
-    const bot = chatManager.getCurrentBot();
+    let bot = chatManager.getCurrentBot();
     if (!bot) {
-      res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Bot not initialized" }));
-      return;
+      // Lazy sync: attempt to recover adapters before returning 503
+      const recovered = await lazySyncIfNeeded(chatManager);
+      bot = chatManager.getCurrentBot();
+      if (!bot || !recovered) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Bot not initialized — adapter sync in progress" }));
+        return;
+      }
     }
 
     const compositeKey = chatManager.getCompositeKeyForConnection(connectionId);
@@ -325,11 +491,16 @@ async function handlePlatformWebhook(
   platform: string,
 ): Promise<void> {
   try {
-    const bot = chatManager.getCurrentBot();
+    let bot = chatManager.getCurrentBot();
     if (!bot) {
-      res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Bot not initialized" }));
-      return;
+      // Lazy sync: attempt to recover adapters before returning 503
+      const recovered = await lazySyncIfNeeded(chatManager);
+      bot = chatManager.getCurrentBot();
+      if (!bot || !recovered) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Bot not initialized — adapter sync in progress" }));
+        return;
+      }
     }
 
     const adapters = chatManager.getAdaptersByPlatform(platform);
@@ -423,6 +594,9 @@ async function main(): Promise<void> {
 
   // Attempt to load connections from backend with retry + .env fallback
   await loadConnectionsFromBackend(chatManager);
+
+  // Start periodic background sync for self-healing
+  startBackgroundSync(chatManager);
 
   startServer(chatManager);
   console.log("Bot service ready");

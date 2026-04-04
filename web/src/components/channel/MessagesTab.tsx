@@ -1,20 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { useParams, useOutletContext } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle, MessageSquare, ChevronDown, ChevronUp, ImageIcon, Play, FileText } from "lucide-react";
+import {
+  AlertCircle, MessageSquare, ChevronDown, ChevronUp,
+  ImageIcon, Play, FileText, Search, ArrowUpDown, X,
+  Paperclip, Loader2, RefreshCw, Calendar,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { emojify } from "node-emoji";
 import type { SyncState } from "@/hooks/useSync";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const PAGE_SIZE = 50;
+const POLL_INTERVAL_MS = 30_000;
 
 interface Message {
   content: string;
   author: string;
   author_name: string;
-  author_image: string;
+  author_image: string | null;
   platform: string;
   channel_id: string;
   channel_name: string;
@@ -35,7 +42,8 @@ interface ChannelSyncContext {
   connectionId?: string | null;
 }
 
-// Deterministic color from string — light/dark variants paired
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
 const AVATAR_COLORS = [
   "bg-primary/10 text-primary dark:bg-primary/15 dark:text-primary",
   "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300",
@@ -74,11 +82,33 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function fullTimestamp(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    year: "numeric", month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit", second: "2-digit",
+  });
+}
+
+function dateLabel(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function dateKey(iso: string): string {
+  return new Date(iso).toDateString();
+}
+
 function reactionEmoji(name: string): string {
-  // Use node-emoji for comprehensive shortcode→Unicode conversion
+  // Discord sends Unicode emoji directly (e.g. "👶") — return as-is
+  if (/\p{Emoji_Presentation}/u.test(name)) return name;
   const result = emojify(`:${name}:`, { fallback: () => "" });
   if (result && result !== `:${name}:`) return result;
-  // Fallback for Slack-specific shortcodes not in node-emoji
   const slackMap: Record<string, string> = {
     thumbsup: "👍", thumbsdown: "👎", plus1: "👍", minus1: "👎",
     "white_check_mark": "✅", check: "✅",
@@ -86,12 +116,7 @@ function reactionEmoji(name: string): string {
   return slackMap[name] ?? `:${name}:`;
 }
 
-/**
- * Clean any residual Slack mrkdwn that survived bridge cleaning.
- * This is a frontend safety net — the bridge handles primary cleanup.
- */
 function cleanResidualSlackMarkup(text: string): string {
-  // <url|label> → label, <@U123> → @U123, <#C123|name> → #name
   return text.replace(/<([^>]+)>/g, (_m, inner: string) => {
     if (inner.startsWith("@")) {
       const parts = inner.split("|");
@@ -113,10 +138,7 @@ function cleanResidualSlackMarkup(text: string): string {
 
 function renderContent(text: string): React.ReactNode {
   const cleaned = cleanResidualSlackMarkup(text);
-  // Convert Slack emoji shortcodes (:tada:, :rocket:, etc.) to Unicode
   const withEmoji = emojify(cleaned, { fallback: (name) => `:${name}:` });
-  // Split on URLs and @mentions (1-3 capitalized name words only)
-  // Match @FirstName or @FirstName LastName (max 2 words for names)
   const parts = withEmoji.split(/(https?:\/\/[^\s]+|@[A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)?)/g);
   return parts.map((part, i) => {
     if (part.match(/^https?:\/\//)) {
@@ -128,6 +150,75 @@ function renderContent(text: string): React.ReactNode {
     return part;
   });
 }
+
+// ── System message filter ────────────────────────────────────────────────────
+
+const SYSTEM_SUBTYPES = new Set([
+  "channel_join", "channel_leave", "channel_topic", "channel_purpose",
+  "channel_name", "channel_archive", "channel_unarchive",
+  "group_join", "group_leave", "bot_add", "bot_remove",
+  "pinned_item", "unpinned_item",
+]);
+const SYSTEM_CONTENT_PATTERNS = /has joined the channel|has left the channel|set the channel topic|set the channel purpose|was added to the channel|was removed from the channel/i;
+
+function isSystemMessage(m: Message): boolean {
+  if (m.subtype && SYSTEM_SUBTYPES.has(m.subtype)) return true;
+  if (SYSTEM_CONTENT_PATTERNS.test(m.content)) return true;
+  return false;
+}
+
+// ── Sparkline ────────────────────────────────────────────────────────────────
+
+function Sparkline({ messages }: { messages: Message[] }) {
+  const dailyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of messages) {
+      const key = new Date(m.timestamp).toISOString().slice(0, 10);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    const sorted = [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+    return sorted.map(([, count]) => count);
+  }, [messages]);
+
+  if (dailyCounts.length < 2) return null;
+
+  const max = Math.max(...dailyCounts);
+  const w = dailyCounts.length * 8;
+  const h = 24;
+
+  return (
+    <svg width={w} height={h} className="shrink-0 opacity-60" aria-label="Message activity">
+      {dailyCounts.map((count, i) => {
+        const barH = max > 0 ? (count / max) * (h - 2) : 0;
+        return (
+          <rect
+            key={i}
+            x={i * 8}
+            y={h - barH}
+            width={5}
+            height={barH}
+            rx={1}
+            className="fill-primary/50"
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+// ── Date Separator ───────────────────────────────────────────────────────────
+
+function DateSeparator({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <div className="flex-1 h-px bg-border" />
+      <span className="text-xs font-medium text-muted-foreground px-2">{label}</span>
+      <div className="flex-1 h-px bg-border" />
+    </div>
+  );
+}
+
+// ── Sub-components ───────────────────────────────────────────────────────────
 
 function ImageAttachment({ url, name }: { url: string; name: string }) {
   const [failed, setFailed] = useState(false);
@@ -159,7 +250,7 @@ function ImageAttachment({ url, name }: { url: string; name: string }) {
         onClick={() => setLightbox(true)}
         onError={() => setFailed(true)}
       />
-      {lightbox && (
+      {lightbox && createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
           onClick={() => setLightbox(false)}
@@ -170,7 +261,8 @@ function ImageAttachment({ url, name }: { url: string; name: string }) {
             className="max-w-[90vw] max-h-[90vh] rounded-lg object-contain"
             onClick={(e) => e.stopPropagation()}
           />
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );
@@ -213,31 +305,105 @@ function MessageSkeleton() {
   );
 }
 
+// ── Main Component ───────────────────────────────────────────────────────────
+
 export function MessagesTab() {
   const { id: channelId } = useParams<{ id: string }>();
   const { syncState, isSyncing, connectionId } = useOutletContext<ChannelSyncContext>();
+
+  // Core state
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [order, setOrder] = useState<"desc" | "asc">("desc");
+
+  // Filters
+  const [searchQuery, setSearchQuery] = useState("");
+  const [authorFilter, setAuthorFilter] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [attachmentsOnly, setAttachmentsOnly] = useState(false);
+
+  // Auto-refresh
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Jump to date
+  const [jumpDate, setJumpDate] = useState("");
+
   const wasSyncingRef = useRef(false);
 
-  const fetchMessages = useCallback(() => {
-    if (!channelId) return;
-    setLoading(true);
-    setError(null);
-    const params = new URLSearchParams({ limit: "100" });
-    if (connectionId) params.set("connection_id", connectionId);
-    api
-      .get<Message[]>(`/api/channels/${channelId}/messages?${params}`)
-      .then(setMessages)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [channelId, connectionId]);
+  // Use ref for connectionId to avoid recreating fetchMessages on null→value transition
+  const connectionIdRef = useRef(connectionId);
+  connectionIdRef.current = connectionId;
 
+  // Track previous channelId to only clear messages on actual channel change
+  const prevChannelIdRef = useRef(channelId);
+
+  // ── Fetch messages ─────────────────────────────────────────────────────
+
+  const fetchMessages = useCallback(async (opts?: { before?: string; since?: string; replace?: boolean }) => {
+    if (!channelId) return;
+    const isLoadMore = !!opts?.before;
+    if (isLoadMore) setLoadingMore(true);
+    else setLoading(true);
+    setError(null);
+    setErrorStatus(null);
+
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), order });
+    if (connectionIdRef.current) params.set("connection_id", connectionIdRef.current);
+    if (opts?.before) params.set("before", opts.before);
+    if (opts?.since) params.set("since", opts.since);
+
+    try {
+      const data = await api.get<Message[]>(`/api/channels/${channelId}/messages?${params}`);
+      if (opts?.replace || (!isLoadMore && !opts?.since)) {
+        setMessages(data);
+      } else if (isLoadMore) {
+        setMessages((prev) => {
+          const ids = new Set(prev.map((m) => m.message_id));
+          const newMsgs = data.filter((m) => !ids.has(m.message_id));
+          return [...prev, ...newMsgs];
+        });
+      } else if (opts?.since) {
+        // Polling: prepend new messages
+        setMessages((prev) => {
+          const ids = new Set(prev.map((m) => m.message_id));
+          const newMsgs = data.filter((m) => !ids.has(m.message_id));
+          if (newMsgs.length > 0) setNewMessageCount((c) => c + newMsgs.length);
+          return [...newMsgs, ...prev];
+        });
+        return; // Don't update hasMore for poll fetches
+      }
+      setHasMore(data.length >= PAGE_SIZE);
+    } catch (err: any) {
+      if (!isLoadMore) {
+        setError(err.message);
+        setErrorStatus(err.status ?? null);
+      }
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }, [channelId, order]);
+
+  // Initial fetch — only clear messages when channelId actually changes
   useEffect(() => {
+    if (prevChannelIdRef.current !== channelId) {
+      setMessages([]);
+      setHasMore(true);
+      setNewMessageCount(0);
+      setError(null);
+      setErrorStatus(null);
+      prevChannelIdRef.current = channelId;
+    }
     fetchMessages();
   }, [fetchMessages]);
 
+  // Re-fetch after sync completes
   useEffect(() => {
     const currentlySyncing = isSyncing || syncState?.state === "syncing";
     if (wasSyncingRef.current && !currentlySyncing) {
@@ -245,6 +411,137 @@ export function MessagesTab() {
     }
     wasSyncingRef.current = currentlySyncing;
   }, [fetchMessages, isSyncing, syncState?.state, syncState?.job_id]);
+
+  // ── Auto-refresh polling ───────────────────────────────────────────────
+
+  // Stop polling on non-retryable errors (4xx, 501)
+  const shouldPoll = !errorStatus || (errorStatus >= 500 && errorStatus !== 501);
+
+  useEffect(() => {
+    if (messages.length === 0 || !shouldPoll) return;
+
+    const poll = () => {
+      if (document.hidden) return; // Skip when tab not visible
+      const newest = messages[0]; // desc order: first is newest
+      if (newest) {
+        fetchMessages({ since: newest.timestamp });
+      }
+    };
+
+    pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
+
+    const handleVisibility = () => {
+      if (!document.hidden && messages.length > 0) {
+        poll(); // Poll immediately when tab becomes visible
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [messages, fetchMessages, shouldPoll]);
+
+  // ── Load more ──────────────────────────────────────────────────────────
+
+  const handleLoadMore = useCallback(() => {
+    if (messages.length === 0 || loadingMore) return;
+    const oldest = messages[messages.length - 1];
+    fetchMessages({ before: oldest.message_id });
+  }, [messages, loadingMore, fetchMessages]);
+
+  // ── Jump to date ───────────────────────────────────────────────────────
+
+  const handleJumpToDate = useCallback((date: string) => {
+    if (!date) return;
+    setJumpDate(date);
+    setMessages([]);
+    setHasMore(true);
+    setNewMessageCount(0);
+    setSearchQuery("");
+    setAuthorFilter("");
+    setDateFrom("");
+    setDateTo("");
+    setAttachmentsOnly(false);
+    const sinceIso = new Date(date).toISOString();
+    fetchMessages({ since: sinceIso, replace: true });
+  }, [fetchMessages]);
+
+  // ── Sort toggle ────────────────────────────────────────────────────────
+
+  const toggleOrder = useCallback(() => {
+    setOrder((prev) => prev === "desc" ? "asc" : "desc");
+  }, []);
+
+  // ── Filtering ──────────────────────────────────────────────────────────
+
+  const uniqueAuthors = useMemo(() => {
+    const authors = new Map<string, string>();
+    for (const m of messages) {
+      if (!authors.has(m.author)) {
+        authors.set(m.author, m.author_name || m.author);
+      }
+    }
+    return [...authors.entries()].sort(([, a], [, b]) => a.localeCompare(b));
+  }, [messages]);
+
+  const filteredMessages = useMemo(() => {
+    let result = messages.filter((m) => !isSystemMessage(m));
+
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter((m) => m.content.toLowerCase().includes(q));
+    }
+    if (authorFilter) {
+      result = result.filter((m) => m.author === authorFilter);
+    }
+    if (dateFrom) {
+      const from = new Date(dateFrom).getTime();
+      result = result.filter((m) => new Date(m.timestamp).getTime() >= from);
+    }
+    if (dateTo) {
+      const to = new Date(dateTo + "T23:59:59").getTime();
+      result = result.filter((m) => new Date(m.timestamp).getTime() <= to);
+    }
+    if (attachmentsOnly) {
+      result = result.filter((m) => m.attachments && m.attachments.length > 0);
+    }
+
+    return result;
+  }, [messages, searchQuery, authorFilter, dateFrom, dateTo, attachmentsOnly]);
+
+  const topLevel = useMemo(() => filteredMessages.filter((m) => !m.thread_id), [filteredMessages]);
+
+  const hasActiveFilters = searchQuery || authorFilter || dateFrom || dateTo || attachmentsOnly;
+
+  const clearFilters = () => {
+    setSearchQuery("");
+    setAuthorFilter("");
+    setDateFrom("");
+    setDateTo("");
+    setAttachmentsOnly(false);
+  };
+
+  // ── Messages with date separators ──────────────────────────────────────
+
+  const messagesWithSeparators = useMemo(() => {
+    const items: Array<{ type: "separator"; label: string } | { type: "message"; msg: Message }> = [];
+    let lastDateKey = "";
+
+    for (const msg of topLevel) {
+      const dk = dateKey(msg.timestamp);
+      if (dk !== lastDateKey) {
+        items.push({ type: "separator", label: dateLabel(msg.timestamp) });
+        lastDateKey = dk;
+      }
+      items.push({ type: "message", msg });
+    }
+
+    return items;
+  }, [topLevel]);
+
+  // ── Render ─────────────────────────────────────────────────────────────
 
   if (loading) {
     return (
@@ -257,6 +554,18 @@ export function MessagesTab() {
   }
 
   if (error) {
+    // 501: platform doesn't support message history (Teams, Telegram)
+    if (errorStatus === 501) {
+      return (
+        <div className="flex flex-col items-center justify-center h-64 text-center px-6 animate-fade-in">
+          <MessageSquare size={24} className="text-muted-foreground/30 mb-3" />
+          <p className="text-sm font-medium text-foreground">Message history not available</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            This platform does not support browsing past messages. Messages sent while connected will appear in real time.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="p-6 animate-fade-in">
         <div className="flex items-start gap-2 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 rounded-lg p-3">
@@ -279,38 +588,163 @@ export function MessagesTab() {
     );
   }
 
-  // Filter out system messages (channel_join, channel_leave, etc.)
-  const SYSTEM_SUBTYPES = new Set([
-    "channel_join", "channel_leave", "channel_topic", "channel_purpose",
-    "channel_name", "channel_archive", "channel_unarchive",
-    "group_join", "group_leave", "bot_add", "bot_remove",
-    "pinned_item", "unpinned_item",
-  ]);
-  // Content-based fallback: Chat SDK history may not expose subtype
-  const SYSTEM_CONTENT_PATTERNS = /has joined the channel|has left the channel|set the channel topic|set the channel purpose|was added to the channel|was removed from the channel/i;
-  const displayMessages = messages.filter((m) => {
-    if (m.subtype && SYSTEM_SUBTYPES.has(m.subtype)) return false;
-    if (SYSTEM_CONTENT_PATTERNS.test(m.content)) return false;
-    return true;
-  });
-
-  const topLevel = displayMessages.filter((m) => !m.thread_id);
-
   return (
     <div className="animate-fade-in bg-muted/10 min-h-full">
       <div className="p-4 sm:p-6 py-6">
-        <div className="max-w-4xl mx-auto space-y-5">
-          <h2 className="text-base font-semibold tracking-tight text-foreground mb-1">
-            {displayMessages.length} messages
-          </h2>
-          {topLevel.map((msg) => (
-            <MessageThreadCard key={msg.message_id} msg={msg} channelId={channelId!} connectionId={connectionId} />
-          ))}
+        <div className="max-w-4xl mx-auto space-y-4">
+
+          {/* ── Header ─────────────────────────────────────── */}
+          <div className="flex flex-wrap items-center gap-3 mb-2">
+            <h2 className="text-base font-semibold tracking-tight text-foreground">
+              {messages.length} messages loaded
+            </h2>
+            <Sparkline messages={messages} />
+            <div className="flex-1" />
+            <button
+              onClick={toggleOrder}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-muted/60 border border-border/50 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+            >
+              <ArrowUpDown size={13} />
+              {order === "desc" ? "Newest first" : "Oldest first"}
+            </button>
+          </div>
+
+          {/* ── New messages banner ────────────────────────── */}
+          {newMessageCount > 0 && (
+            <button
+              onClick={() => {
+                setNewMessageCount(0);
+                window.scrollTo({ top: 0, behavior: "smooth" });
+              }}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-primary/10 border border-primary/20 text-sm font-medium text-primary hover:bg-primary/15 transition-colors"
+            >
+              <RefreshCw size={14} />
+              {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}
+            </button>
+          )}
+
+          {/* ── Filters ────────────────────────────────────── */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="Search messages..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full h-8 pl-9 pr-3 rounded-lg bg-muted/40 border border-border/50 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
+              />
+            </div>
+            <select
+              value={authorFilter}
+              onChange={(e) => setAuthorFilter(e.target.value)}
+              className="h-8 px-2 rounded-lg bg-muted/40 border border-border/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
+            >
+              <option value="">All authors</option>
+              {uniqueAuthors.map(([id, name]) => (
+                <option key={id} value={id}>{name}</option>
+              ))}
+            </select>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="h-8 px-2 rounded-lg bg-muted/40 border border-border/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
+              title="From date"
+            />
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="h-8 px-2 rounded-lg bg-muted/40 border border-border/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
+              title="To date"
+            />
+            <button
+              onClick={() => setAttachmentsOnly(!attachmentsOnly)}
+              className={cn(
+                "inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border text-xs font-medium transition-colors",
+                attachmentsOnly
+                  ? "bg-primary/10 border-primary/30 text-primary"
+                  : "bg-muted/40 border-border/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+              )}
+            >
+              <Paperclip size={13} />
+              Attachments
+            </button>
+
+            {/* Jump to date */}
+            <div className="relative">
+              <Calendar size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+              <input
+                type="date"
+                value={jumpDate}
+                onChange={(e) => handleJumpToDate(e.target.value)}
+                className="h-8 pl-8 pr-2 rounded-lg bg-muted/40 border border-border/50 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
+                title="Jump to date"
+              />
+            </div>
+
+            {hasActiveFilters && (
+              <button
+                onClick={clearFilters}
+                className="inline-flex items-center gap-1 h-8 px-2 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <X size={13} />
+                Clear
+              </button>
+            )}
+          </div>
+
+          {/* ── Filter result count ────────────────────────── */}
+          {hasActiveFilters && (
+            <p className="text-xs text-muted-foreground">
+              Showing {topLevel.length} of {messages.filter((m) => !isSystemMessage(m)).length} messages
+            </p>
+          )}
+
+          {/* ── Message list with date separators ──────────── */}
+          <div className="space-y-5">
+            {messagesWithSeparators.map((item, i) => {
+              if (item.type === "separator") {
+                return <DateSeparator key={`sep-${item.label}-${i}`} label={item.label} />;
+              }
+              return (
+                <MessageThreadCard
+                  key={item.msg.message_id}
+                  msg={item.msg}
+                  channelId={channelId!}
+                  connectionId={connectionId}
+                />
+              );
+            })}
+          </div>
+
+          {/* ── Load more ──────────────────────────────────── */}
+          {hasMore && !hasActiveFilters && (
+            <div className="flex justify-center pt-4">
+              <button
+                onClick={handleLoadMore}
+                disabled={loadingMore}
+                className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-muted/60 border border-border/50 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors disabled:opacity-50"
+              >
+                {loadingMore ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  "Load more messages"
+                )}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
+
+// ── Message Thread Card ──────────────────────────────────────────────────────
 
 function MessageThreadCard({ msg, channelId, connectionId }: { msg: Message; channelId: string; connectionId?: string | null }) {
   const [expanded, setExpanded] = useState(false);
@@ -325,7 +759,6 @@ function MessageThreadCard({ msg, channelId, connectionId }: { msg: Message; cha
       api
         .get<Message[]>(`/api/channels/${channelId}/threads/${msg.message_id}/messages${params}`)
         .then((data) => {
-          // Filter out the parent message (first reply is the parent in Slack's API)
           setReplies(data.filter((m) => m.message_id !== msg.message_id));
         })
         .catch((err) => console.error("Failed to fetch thread replies:", err))
@@ -367,6 +800,8 @@ function MessageThreadCard({ msg, channelId, connectionId }: { msg: Message; cha
   );
 }
 
+// ── Message Row ──────────────────────────────────────────────────────────────
+
 function MessageRow({ msg, isReply = false, onToggleReplies, isExpanded }: { msg: Message; isReply?: boolean; onToggleReplies?: () => void; isExpanded?: boolean }) {
   const displayName = msg.author_name || msg.author;
   const color = avatarColor(displayName);
@@ -374,7 +809,6 @@ function MessageRow({ msg, isReply = false, onToggleReplies, isExpanded }: { msg
 
   return (
     <div className={cn("group relative flex gap-4 sm:gap-5 transition-colors", isReply && "hover:bg-muted/40 p-2.5 -mx-2.5 rounded-xl mt-1")}>
-      {/* Avatar */}
       <Avatar className={cn("shrink-0", isReply ? "w-8 h-8 mt-0.5" : "w-11 h-11")}>
         {msg.author_image && <AvatarImage src={msg.author_image} alt={displayName} />}
         <AvatarFallback className={cn("font-medium", isReply ? "text-xs" : "text-[15px]", color)}>
@@ -382,7 +816,6 @@ function MessageRow({ msg, isReply = false, onToggleReplies, isExpanded }: { msg
         </AvatarFallback>
       </Avatar>
 
-      {/* Content Container */}
       <div className="flex-1 min-w-0 flex flex-col pt-0.5">
         <div className="flex items-start justify-between gap-4 mb-1">
           <div className="flex flex-wrap items-baseline gap-2">
@@ -394,12 +827,14 @@ function MessageRow({ msg, isReply = false, onToggleReplies, isExpanded }: { msg
                 Bot
               </span>
             )}
-            <span className="text-sm font-medium text-muted-foreground/80">
+            <span
+              className="text-sm font-medium text-muted-foreground/80 cursor-default"
+              title={fullTimestamp(msg.timestamp)}
+            >
               {relativeTime(msg.timestamp)}
             </span>
           </div>
 
-          {/* Reply badge aligned to far right */}
           {msg.reply_count > 0 && !isReply && (
             <button
               onClick={onToggleReplies}
@@ -465,7 +900,6 @@ function MessageRow({ msg, isReply = false, onToggleReplies, isExpanded }: { msg
           </div>
         )}
 
-        {/* Reactions */}
         {msg.reactions.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mt-2.5">
             {msg.reactions.map((r, i) => (

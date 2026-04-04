@@ -48,6 +48,10 @@ class Neo4jStore:
             await session.run(
                 "MATCH (e:Entity) WHERE e.aliases IS NULL SET e.aliases = []"
             )
+            # Backfill status field for soft orphan handling
+            await session.run(
+                "MATCH (e:Entity) WHERE e.status IS NULL SET e.status = 'active'"
+            )
 
     async def shutdown(self) -> None:
         """Close the Neo4j driver."""
@@ -142,6 +146,8 @@ class Neo4jStore:
                         e.aliases        = $aliases,
                         e.source_message_id = $source_message_id,
                         e.message_ts     = $message_ts,
+                        e.status         = $status,
+                        e.pending_since  = $pending_since,
                         e.created_at     = $now,
                         e.updated_at     = $now
                     ON MATCH SET
@@ -161,6 +167,8 @@ class Neo4jStore:
                     aliases=entity.aliases,
                     source_message_id=entity.source_message_id,
                     message_ts=entity.message_ts,
+                    status=entity.status,
+                    pending_since=entity.pending_since.isoformat() if entity.pending_since else None,
                     now=now_iso,
                 )
             else:
@@ -173,6 +181,8 @@ class Neo4jStore:
                         e.aliases        = $aliases,
                         e.source_message_id = $source_message_id,
                         e.message_ts     = $message_ts,
+                        e.status         = $status,
+                        e.pending_since  = $pending_since,
                         e.created_at     = $now,
                         e.updated_at     = $now
                     ON MATCH SET
@@ -189,6 +199,8 @@ class Neo4jStore:
                     aliases=entity.aliases,
                     source_message_id=entity.source_message_id,
                     message_ts=entity.message_ts,
+                    status=entity.status,
+                    pending_since=entity.pending_since.isoformat() if entity.pending_since else None,
                     now=now_iso,
                 )
             record = await result.single()
@@ -398,6 +410,7 @@ class Neo4jStore:
         channel_id: str | None = None,
         entity_type: str | None = None,
         limit: int = 50,
+        include_pending: bool = False,
     ) -> list[GraphEntity]:
         """Return entities, optionally filtered by channel and/or type.
 
@@ -405,6 +418,8 @@ class Neo4jStore:
         - Have channel_id matching directly, OR
         - Have at least one episodic link (MENTIONED_IN) to an Event in that channel
         This ensures only entities actually referenced in the channel appear.
+
+        By default excludes pending entities. Set include_pending=True to include them.
         """
         params: dict[str, Any] = {"limit": limit}
 
@@ -412,12 +427,17 @@ class Neo4jStore:
             # Use episodic links to scope entities to the channel
             match_clause = (
                 "MATCH (e:Entity) "
-                "WHERE e.channel_id = $channel_id "
-                "OR EXISTS { MATCH (e)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }"
+                "WHERE (e.channel_id = $channel_id "
+                "OR EXISTS { MATCH (e)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id })"
             )
             params["channel_id"] = channel_id
         else:
             match_clause = "MATCH (e:Entity)"
+
+        # Filter out pending entities by default
+        if not include_pending:
+            pending_filter = "(e.status = 'active' OR e.status IS NULL)"
+            match_clause += f" AND {pending_filter}" if "WHERE" in match_clause else f" WHERE {pending_filter}"
 
         if entity_type is not None:
             match_clause += " AND e.type = $entity_type" if "WHERE" in match_clause else " WHERE e.type = $entity_type"
@@ -657,6 +677,38 @@ class Neo4jStore:
     # ------------------------------------------------------------------
     # Fuzzy match
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Soft orphan handling
+    # ------------------------------------------------------------------
+
+    async def promote_pending_entity(self, entity_name: str) -> None:
+        """Promote a pending entity to active status."""
+        async with self._driver.session() as session:
+            await session.run(
+                "MATCH (e:Entity {name: $name}) "
+                "WHERE e.status = 'pending' "
+                "SET e.status = 'active', e.pending_since = null",
+                name=entity_name,
+            )
+
+    async def prune_expired_pending(self, grace_period_days: int = 7) -> int:
+        """Delete pending entities older than the grace period.
+
+        Returns count of pruned entities.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(tz=UTC) - timedelta(days=grace_period_days)).isoformat()
+        async with self._driver.session() as session:
+            result = await session.run(
+                "MATCH (e:Entity) "
+                "WHERE e.status = 'pending' AND e.pending_since IS NOT NULL "
+                "AND e.pending_since < $cutoff "
+                "DETACH DELETE e RETURN count(e) AS n",
+                cutoff=cutoff,
+            )
+            record = await result.single()
+        return int(record["n"]) if record else 0
 
     async def fuzzy_match_entity(
         self, name: str, threshold: float = 0.8

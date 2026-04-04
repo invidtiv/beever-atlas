@@ -50,6 +50,14 @@ class MediaProcessor:
         )
         self._max_bytes = self._settings.media_max_file_size_mb * 1024 * 1024
 
+    @staticmethod
+    def get_registry():
+        """Get the singleton media extractor registry."""
+        from beever_atlas.services.media_extractors import create_default_registry
+        if not hasattr(MediaProcessor, '_registry'):
+            MediaProcessor._registry = create_default_registry()
+        return MediaProcessor._registry
+
     # ── Public API ──────────────────────────────────────────────────────
 
     async def process_message_media(
@@ -133,10 +141,33 @@ class MediaProcessor:
         if not url:
             return {"description": "", "media_url": "", "media_type": ""}
 
+        # Try registry-based extraction for new formats (office, video, audio)
+        registry = self.get_registry()
+        extractor = registry.get_extractor(mimetype, name)
+
+        # For backward compatibility, use existing handlers for PDF and image
         if is_pdf:
             return await self._handle_pdf(url, name)
         elif is_image:
             return await self._handle_image(url, name, message_text)
+        elif extractor is not None:
+            # New format handled by registry (office, video, audio)
+            async with self._sem:
+                data = await self._download_file(url)
+            if not data:
+                return {
+                    "description": f"[Attachment: {name} ({att_type or ext})]",
+                    "media_url": url,
+                    "media_type": att_type or ext,
+                }
+            content = await extractor.extract(
+                data, name, metadata={"message_text": message_text}
+            )
+            return {
+                "description": content.text,
+                "media_url": url,
+                "media_type": content.media_type or att_type or ext,
+            }
         else:
             # Unsupported type — return metadata only
             return {

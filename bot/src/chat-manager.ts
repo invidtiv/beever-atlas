@@ -12,6 +12,9 @@
 
 import { Chat } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
+import { createDiscordAdapter } from "@chat-adapter/discord";
+import { createTeamsAdapter } from "@chat-adapter/teams";
+import { createTelegramAdapter } from "@chat-adapter/telegram";
 import { createRedisState } from "@chat-adapter/state-redis";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -42,6 +45,7 @@ export class ChatManager {
   private registerHandlers: (bot: Chat) => void;
   private redisUrl: string;
   private transitioning: boolean = false;
+  private rebuildListeners: Array<() => void> = [];
 
   constructor(redisUrl: string, registerHandlers: (bot: Chat) => void) {
     this.redisUrl = redisUrl;
@@ -94,8 +98,20 @@ export class ChatManager {
    * Awaits shutdown of the old instance, creates fresh adapter instances,
    * then re-registers all event handlers.
    */
+  /** Register a callback invoked whenever adapters are rebuilt (for cache invalidation). */
+  onRebuild(listener: () => void): void {
+    this.rebuildListeners.push(listener);
+  }
+
+  private notifyRebuildListeners(): void {
+    for (const fn of this.rebuildListeners) {
+      try { fn(); } catch { /* listener errors must not break rebuild */ }
+    }
+  }
+
   async rebuild(): Promise<void> {
     this.transitioning = true;
+    this.notifyRebuildListeners();
 
     if (this.currentBot) {
       try {
@@ -115,9 +131,27 @@ export class ChatManager {
     // Build fresh adapter instances from stored configs.
     // The composite key is used as the Chat SDK adapter key.
     // Platform is extracted from the entry for factory selection.
+    // Required credential keys per platform — entries missing any of these are
+    // skipped so a single broken connection cannot take down the entire bot.
+    const REQUIRED_CREDENTIALS: Record<string, string[]> = {
+      slack: ["botToken", "signingSecret"],
+      discord: ["botToken", "publicKey", "applicationId"],
+      teams: ["appId", "appPassword"],
+      telegram: ["botToken"],
+    };
+
     const adapterInstances: Record<string, unknown> = {};
 
     for (const [key, entry] of this.adapters.entries()) {
+      const required = REQUIRED_CREDENTIALS[entry.platform];
+      if (required) {
+        const missing = required.filter((k) => !entry.config[k]);
+        if (missing.length > 0) {
+          console.warn(`ChatManager: skipping "${key}" — missing required credentials: ${missing.join(", ")}`);
+          continue;
+        }
+      }
+
       try {
         if (entry.platform === "slack") {
           adapterInstances[key] = createSlackAdapter({
@@ -125,7 +159,6 @@ export class ChatManager {
             signingSecret: entry.config.signingSecret,
           });
         } else if (entry.platform === "discord") {
-          const { createDiscordAdapter } = require("@chat-adapter/discord");
           const discordOpts: Record<string, unknown> = {
             botToken: entry.config.botToken,
             publicKey: entry.config.publicKey,
@@ -136,15 +169,13 @@ export class ChatManager {
           }
           adapterInstances[key] = createDiscordAdapter(discordOpts);
         } else if (entry.platform === "teams") {
-          const { createTeamsAdapter } = require("@chat-adapter/teams");
           adapterInstances[key] = createTeamsAdapter({
             appId: entry.config.appId,
             appPassword: entry.config.appPassword,
             appTenantId: entry.config.appTenantId,
-            appType: entry.config.appType,
+            appType: entry.config.appType as "MultiTenant" | "SingleTenant" | undefined,
           });
         } else if (entry.platform === "telegram") {
-          const { createTelegramAdapter } = require("@chat-adapter/telegram");
           adapterInstances[key] = createTelegramAdapter({
             botToken: entry.config.botToken,
             secretToken: entry.config.secretToken,
@@ -267,5 +298,20 @@ export class ChatManager {
 
   isTransitioning(): boolean {
     return this.transitioning;
+  }
+
+  /**
+   * Returns the number of registered adapters.
+   */
+  adapterCount(): number {
+    return this.adapters.size;
+  }
+
+  /**
+   * Returns a stable fingerprint of the current adapter set (for change detection).
+   * The fingerprint is a sorted, joined string of composite keys.
+   */
+  adapterFingerprint(): string {
+    return [...this.adapters.keys()].sort().join(",");
   }
 }

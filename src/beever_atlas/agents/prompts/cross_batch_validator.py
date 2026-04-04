@@ -35,11 +35,14 @@ When merging entities, prefer the more specific or more recent property value.
 
 ---
 
-## Step 2: Orphan Removal
+## Step 2: Orphan Handling (Soft Pending)
 
-Remove any entity that has zero relationships to any other entity — in this batch
-OR in known_entities. Orphan entities provide no traversal or retrieval value in a
-knowledge graph. This applies even if the entity name looks real and significant.
+For any entity that has zero relationships to any other entity — in this batch
+OR in known_entities — set its `status` field to `"pending"`. Do NOT remove it.
+Pending entities are retained with a grace period; they may gain relationships
+in future batches and be promoted to active.
+
+Entities WITH at least one relationship should have `status: "active"` (the default).
 
 ---
 
@@ -75,6 +78,7 @@ Return a single JSON object with exactly three keys:
       "scope": "<global|channel>",
       "properties": {{}},
       "aliases": ["<all known variant names>"],
+      "status": "<active|pending>",
       "source_message_id": "<ts>"
     }}
   ],

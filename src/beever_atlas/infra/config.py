@@ -44,6 +44,37 @@ class Settings(BaseSettings):
     jina_model: str = Field(default="jina-embeddings-v4")
     jina_dimensions: int = Field(default=2048)
 
+    # Coreference resolution
+    coref_enabled: bool = Field(default=True)
+    coref_history_limit: int = Field(default=20)
+    coref_model: str = Field(default="gemini-2.5-flash")
+
+    # Semantic entity deduplication
+    entity_similarity_threshold: float = Field(default=0.85)
+    merge_rejection_ttl_days: int = Field(default=30)
+
+    # Multimodal expansion
+    media_video_max_duration_minutes: int = Field(default=10)
+    media_video_max_size_mb: int = Field(default=100)
+    media_audio_max_duration_minutes: int = Field(default=30)
+    media_office_max_chars: int = Field(default=10000)
+    whisper_api_url: str = Field(default="https://api.openai.com/v1/audio/transcriptions")
+    openai_api_key: str = Field(default="")
+
+    # Semantic search
+    semantic_search_min_similarity: float = Field(default=0.7)
+
+    # Temporal fact lifecycle
+    contradiction_confidence_threshold: float = Field(default=0.8)
+    contradiction_flag_threshold: float = Field(default=0.5)
+
+    # Cross-batch thread context
+    cross_batch_thread_context_enabled: bool = Field(default=True)
+    thread_context_max_length: int = Field(default=200)
+
+    # Soft orphan handling
+    orphan_grace_period_days: int = Field(default=7)
+
     # Reconciler
     reconciler_interval_minutes: int = Field(default=15)
 

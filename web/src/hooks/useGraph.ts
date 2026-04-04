@@ -8,6 +8,7 @@ export interface GraphEntity {
   scope?: string;
   properties?: Record<string, unknown>;
   aliases?: string[];
+  status?: "active" | "pending" | string;
 }
 
 export interface GraphRelationship {

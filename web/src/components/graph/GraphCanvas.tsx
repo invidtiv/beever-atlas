@@ -59,6 +59,7 @@ export function GraphCanvas({
       const size = Math.min(116, 58 + conns * 9);
       const cached = positionCache.get(e.id);
       const visualDesc = (e.properties as Record<string, unknown>)?.visual_description as string | undefined;
+      const isPending = e.status === "pending";
       return {
         data: {
           id: e.id,
@@ -70,6 +71,7 @@ export function GraphCanvas({
           fontSize: Math.max(10, Math.min(14, 10 + conns)),
           hasMedia: !!visualDesc,
           visualDesc: visualDesc || "",
+          pending: isPending,
         },
         ...(cached ? { position: cached } : {}),
       };
@@ -148,6 +150,13 @@ export function GraphCanvas({
           style: {
             "border-style": "double" as const,
             "border-width": 4,
+          },
+        },
+        {
+          selector: "node[?pending]",
+          style: {
+            "border-style": "dashed" as const,
+            opacity: 0.5,
           },
         },
         {

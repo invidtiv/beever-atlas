@@ -72,11 +72,36 @@ class ChatBridgeAdapter(BaseAdapter):
             try:
                 response = await self._client.request(method, path, **kwargs)
 
+                # 404: not found — raise immediately, no retry
                 if response.status_code == 404:
                     data = response.json()
                     raise KeyError(data.get("error", f"Not found: {path}"))
 
+                # 501: not supported (e.g. Teams/Telegram stubs) — raise immediately
+                if response.status_code == 501:
+                    data = response.json()
+                    raise BridgeError(
+                        data.get("error", "Operation not supported by this platform"),
+                        status_code=501,
+                        code=data.get("code", "NOT_SUPPORTED"),
+                    )
+
+                # 502: upstream platform error — raise immediately, no retry
+                if response.status_code == 502:
+                    data = response.json()
+                    raise BridgeError(
+                        data.get("error", f"Platform error: {response.status_code}"),
+                        status_code=502,
+                        code=data.get("code", "PLATFORM_ERROR"),
+                    )
+
+                # 429 or 503+: transient — retry with backoff
                 if response.status_code == 429 or response.status_code >= 500:
+                    last_exc = BridgeError(
+                        f"HTTP {response.status_code} on {path}",
+                        status_code=response.status_code,
+                        code="TRANSIENT_ERROR",
+                    )
                     wait = _BASE_BACKOFF_SECONDS * (2**attempt)
                     logger.warning(
                         "Bridge returned %d on %s, retrying in %.1fs (attempt %d/%d)",
@@ -89,6 +114,7 @@ class ChatBridgeAdapter(BaseAdapter):
                     await asyncio.sleep(wait)
                     continue
 
+                # Other 4xx: client error — raise immediately
                 if response.status_code >= 400:
                     data = response.json()
                     raise BridgeError(
@@ -162,11 +188,15 @@ class ChatBridgeAdapter(BaseAdapter):
         channel_id: str,
         since: datetime | None = None,
         limit: int = 100,
+        before: str | None = None,
+        order: str = "desc",
     ) -> list[NormalizedMessage]:
         """Fetch channel message history via bridge."""
-        params: dict[str, str] = {"limit": str(limit)}
+        params: dict[str, str] = {"limit": str(limit), "order": order}
         if since:
             params["since"] = since.isoformat()
+        if before:
+            params["before"] = before
 
         data = await self._request(
             "GET",

@@ -54,7 +54,7 @@ const TELEGRAM_INSTRUCTIONS = [
   { text: "Add the bot to your group chat and grant it admin permissions to read messages" },
 ];
 
-const CREDENTIAL_FIELDS: Record<Platform, { key: string; label: string; placeholder: string; type?: string }[]> = {
+const CREDENTIAL_FIELDS: Record<Platform, { key: string; label: string; placeholder: string; type?: string; optional?: boolean }[]> = {
   slack: [
     { key: "bot_token", label: "Bot Token", placeholder: "xoxb-...", type: "password" },
     { key: "signing_secret", label: "Signing Secret", placeholder: "Your app's signing secret", type: "password" },
@@ -63,7 +63,7 @@ const CREDENTIAL_FIELDS: Record<Platform, { key: string; label: string; placehol
     { key: "bot_token", label: "Bot Token", placeholder: "Your bot token", type: "password" },
     { key: "public_key", label: "Public Key", placeholder: "64-character hex string from General Information" },
     { key: "application_id", label: "Application ID", placeholder: "Your Discord application ID" },
-    { key: "mention_role_ids", label: "Mention Role IDs (optional)", placeholder: "Comma-separated role IDs, e.g. 1234567890,9876543210" },
+    { key: "mention_role_ids", label: "Mention Role IDs (optional)", placeholder: "Comma-separated role IDs, e.g. 1234567890,9876543210", optional: true },
   ],
   teams: [
     { key: "app_id", label: "Microsoft App ID", placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" },
@@ -131,7 +131,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
     }
   }
 
-  const credentialsFilled = fields.every((f) => (credentials[f.key] ?? "").trim().length > 0);
+  const credentialsFilled = fields.every((f) => f.optional || (credentials[f.key] ?? "").trim().length > 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">

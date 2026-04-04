@@ -47,6 +47,8 @@ export interface NormalizedChannel {
 interface GetMessagesOpts {
   limit: number;
   since?: string;
+  before?: string;
+  order?: string;
 }
 
 interface PlatformBridge {
@@ -84,6 +86,61 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
 function parseQuery(url: string): URLSearchParams {
   const idx = url.indexOf("?");
   return new URLSearchParams(idx >= 0 ? url.slice(idx + 1) : "");
+}
+
+/** Classify a platform SDK error into an appropriate HTTP status code. */
+function classifyPlatformError(err: unknown): { status: number; code: string } {
+  const msg = String(err).toLowerCase();
+  const errData = (err as any)?.data?.error || "";
+  const errCode = (err as any)?.code || "";
+
+  // Not-found errors (Slack: channel_not_found, file_not_found; Discord: 404; generic)
+  if (
+    errData === "channel_not_found" ||
+    errData === "file_not_found" ||
+    errData === "thread_not_found" ||
+    errData === "not_found" ||
+    msg.includes("not found") ||
+    msg.includes("not_found") ||
+    msg.includes(": 404")
+  ) {
+    return { status: 404, code: "NOT_FOUND" };
+  }
+
+  // Permission / auth errors
+  if (
+    errData === "not_authed" ||
+    errData === "invalid_auth" ||
+    errData === "token_revoked" ||
+    errData === "missing_scope" ||
+    errData === "not_allowed_token_type" ||
+    errCode === "slack_webapi_platform_error" && errData === "not_in_channel" ||
+    msg.includes("forbidden") ||
+    msg.includes(": 403")
+  ) {
+    return { status: 403, code: "FORBIDDEN" };
+  }
+
+  // Rate limiting (shouldn't normally reach here, but just in case)
+  if (
+    errData === "ratelimited" ||
+    msg.includes("rate limit") ||
+    msg.includes(": 429")
+  ) {
+    return { status: 429, code: "RATE_LIMITED" };
+  }
+
+  // Not supported (Teams/Telegram stubs)
+  if (
+    errData === "not_supported" ||
+    (err as any)?.code === "NOT_SUPPORTED" ||
+    msg.includes("not supported")
+  ) {
+    return { status: 501, code: "NOT_SUPPORTED" };
+  }
+
+  // Default: upstream platform error — use 502 (bad gateway)
+  return { status: 502, code: "PLATFORM_ERROR" };
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -180,6 +237,9 @@ class SlackBridge implements PlatformBridge {
       const sinceEpoch = new Date(opts.since).getTime() / 1000;
       historyParams.oldest = String(sinceEpoch);
     }
+    if (opts.before) {
+      historyParams.latest = opts.before;
+    }
 
     const result = await (this.adapter as any).client.conversations.history(historyParams);
     const rawMessages = result.messages || [];
@@ -262,7 +322,9 @@ class SlackBridge implements PlatformBridge {
       };
     });
 
-    messages.reverse();
+    if (opts.order === "asc") {
+      messages.reverse();
+    }
     return messages;
   }
 
@@ -368,106 +430,210 @@ class SlackBridge implements PlatformBridge {
 
 class DiscordBridge implements PlatformBridge {
   private adapter: unknown;
+  private botToken: string;
+
+  // ── Request queue: serializes Discord API calls to avoid bursts ──
+  private requestQueue: Promise<void> = Promise.resolve();
+  private static readonly REQUEST_SPACING_MS = 100; // minimum ms between requests
+
+  // ── Caches ──
+  private channelCache: { data: NormalizedChannel[]; expiresAt: number } | null = null;
+  private static readonly CHANNEL_CACHE_TTL_MS = 300_000; // 5 minutes — reduces Discord API rate limit pressure
+  private channelFetchInFlight: Promise<NormalizedChannel[]> | null = null; // dedup concurrent calls
 
   constructor(adapter: unknown) {
     this.adapter = adapter;
+    this.botToken = (adapter as any).botToken;
+  }
+
+  /**
+   * Convenience wrapper for Discord REST API calls.
+   * Requests are serialized through a queue with spacing to prevent bursts,
+   * and rate-limit 429 responses are retried with the server-provided delay.
+   */
+  private discordApi(path: string, retries = 3): Promise<any> {
+    return new Promise((resolve, reject) => {
+      this.requestQueue = this.requestQueue
+        .then(() => this.executeDiscordRequest(path, retries))
+        .then(resolve, reject);
+    });
+  }
+
+  private async executeDiscordRequest(path: string, retries: number): Promise<any> {
+    const res = await fetch(`https://discord.com/api/v10${path}`, {
+      headers: { Authorization: `Bot ${this.botToken}` },
+    });
+
+    if (res.status === 429 && retries > 0) {
+      const rawRetryAfter = parseFloat(res.headers.get("retry-after") || "2") * 1000;
+      // Cap wait at 5s — longer waits block the request pipeline and cause frontend timeouts
+      const retryAfter = Math.min(rawRetryAfter, 5000);
+      console.warn(`DiscordBridge: rate limited on ${path}, retrying in ${retryAfter}ms (server asked ${rawRetryAfter}ms)`);
+      await new Promise((r) => setTimeout(r, retryAfter));
+      return this.executeDiscordRequest(path, retries - 1);
+    }
+
+    if (!res.ok) {
+      throw new Error(`Discord API ${path}: ${res.status} ${res.statusText}`);
+    }
+
+    // Space out requests to stay under Discord's rate limits
+    await new Promise((r) => setTimeout(r, DiscordBridge.REQUEST_SPACING_MS));
+
+    return res.json();
   }
 
   async resolveUser(userId: string): Promise<{ name: string; image: string | null }> {
+    if (userProfileCache.has(userId)) return userProfileCache.get(userId)!;
     try {
-      const client = (this.adapter as any).client;
-      const user = await client.users.fetch(userId);
-      return {
-        name: user.globalName || user.username || userId,
-        image: user.displayAvatarURL?.() || null,
+      const user = await this.discordApi(`/users/${userId}`);
+      const avatarUrl = user.avatar
+        ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png`
+        : null;
+      const resolved = {
+        name: user.global_name || user.username || userId,
+        image: avatarUrl,
       };
+      userProfileCache.set(userId, resolved);
+      return resolved;
     } catch {
-      return { name: userId, image: null };
+      const fallback = { name: userId, image: null };
+      userProfileCache.set(userId, fallback);
+      return fallback;
     }
   }
 
   async listChannels(): Promise<NormalizedChannel[]> {
+    // Return cached result if still fresh
+    if (this.channelCache && Date.now() < this.channelCache.expiresAt) {
+      return this.channelCache.data;
+    }
+
+    // Deduplicate: if a fetch is already in flight, share the same promise
+    if (this.channelFetchInFlight) {
+      return this.channelFetchInFlight;
+    }
+
+    this.channelFetchInFlight = this._fetchChannelsFromDiscord();
     try {
-      const client = (this.adapter as any).client;
-      const guilds = client.guilds?.cache ?? new Map();
+      return await this.channelFetchInFlight;
+    } finally {
+      this.channelFetchInFlight = null;
+    }
+  }
+
+  private async _fetchChannelsFromDiscord(): Promise<NormalizedChannel[]> {
+    try {
+      const guilds: any[] = await this.discordApi("/users/@me/guilds");
       const channels: NormalizedChannel[] = [];
 
-      for (const guild of guilds.values()) {
-        const guildChannels = guild.channels?.cache ?? new Map();
-        for (const ch of guildChannels.values()) {
-          if ((ch as any).isTextBased?.()) {
-            channels.push({
-              channel_id: (ch as any).id,
-              name: (ch as any).name || "",
-              platform: "discord",
-              is_member: true,
-              member_count: (ch as any).members?.size ?? null,
-              topic: (ch as any).topic ?? null,
-              purpose: null,
-            });
+      for (const guild of guilds) {
+        try {
+          const guildChannels: any[] = await this.discordApi(`/guilds/${guild.id}/channels`);
+          const textTypes = new Set([0, 5, 15]);
+          for (const ch of guildChannels) {
+            if (textTypes.has(ch.type)) {
+              channels.push({
+                channel_id: ch.id,
+                name: ch.name || "",
+                platform: "discord",
+                is_member: true,
+                member_count: ch.member_count ?? null,
+                topic: ch.topic ?? null,
+                purpose: null,
+              });
+            }
           }
+        } catch (err) {
+          console.warn(`DiscordBridge: failed to list channels for guild ${guild.id}:`, err);
         }
       }
 
+      this.channelCache = {
+        data: channels,
+        expiresAt: Date.now() + DiscordBridge.CHANNEL_CACHE_TTL_MS,
+      };
       return channels;
     } catch (err) {
-      console.error("DiscordBridge: listChannels error:", err);
+      // If we have stale cached data, return it instead of empty
+      if (this.channelCache) {
+        console.warn("DiscordBridge: listChannels failed, returning stale cache:", String(err).slice(0, 100));
+        return this.channelCache.data;
+      }
+      console.error("DiscordBridge: listChannels error (no cache):", err);
       return [];
     }
   }
 
   async getChannel(id: string): Promise<NormalizedChannel> {
-    const client = (this.adapter as any).client;
-    const ch = await client.channels.fetch(id);
+    const ch = await this.discordApi(`/channels/${id}`);
     return {
       channel_id: id,
-      name: (ch as any).name || "",
+      name: ch.name || "",
       platform: "discord",
       is_member: true,
-      member_count: (ch as any).members?.size ?? null,
-      topic: (ch as any).topic ?? null,
+      member_count: ch.member_count ?? null,
+      topic: ch.topic ?? null,
       purpose: null,
     };
   }
 
   async getMessages(channelId: string, opts: GetMessagesOpts): Promise<NormalizedMessage[]> {
-    const client = (this.adapter as any).client;
-    const channel = await client.channels.fetch(channelId);
-    const fetchOpts: Record<string, unknown> = { limit: Math.min(opts.limit, 100) };
-
-    const rawMessages = await (channel as any).messages.fetch(fetchOpts);
+    const limit = Math.min(opts.limit, 100);
+    const ch = await this.discordApi(`/channels/${channelId}`);
+    let messagesUrl = `/channels/${channelId}/messages?limit=${limit}`;
+    if (opts.before) {
+      messagesUrl += `&before=${opts.before}`;
+    }
+    const rawMessages: any[] = await this.discordApi(messagesUrl);
     const messages: NormalizedMessage[] = [];
 
-    for (const msg of rawMessages.values()) {
-      const m = msg as any;
+    for (const m of rawMessages) {
+      const avatarUrl = m.author?.avatar
+        ? `https://cdn.discordapp.com/avatars/${m.author.id}/${m.author.avatar}.png`
+        : null;
       messages.push({
         content: m.content || "",
         author: m.author?.id || "unknown",
-        author_name: m.author?.globalName || m.author?.username || "unknown",
-        author_image: m.author?.displayAvatarURL?.() || null,
+        author_name: m.author?.global_name || m.author?.username || "unknown",
+        author_image: avatarUrl,
         platform: "discord",
         channel_id: channelId,
-        channel_name: (channel as any).name || "",
+        channel_name: ch.name || "",
         message_id: m.id,
-        timestamp: m.createdAt?.toISOString() || new Date().toISOString(),
-        thread_id: m.reference?.messageId ?? null,
-        attachments: (m.attachments ? [...m.attachments.values()] : []).map((a: any) => ({
-          type: a.contentType?.startsWith("image/") ? "image" : "file",
+        timestamp: m.timestamp || new Date().toISOString(),
+        thread_id: m.message_reference?.message_id ?? null,
+        attachments: (m.attachments ?? []).map((a: any) => ({
+          type: a.content_type?.startsWith("image/") ? "image"
+              : a.content_type?.startsWith("video/") ? "video"
+              : "file",
           url: a.url,
-          name: a.name,
+          name: a.filename,
         })),
-        reactions: (m.reactions ? [...m.reactions.cache.values()] : []).map((r: any) => ({
-          name: r.emoji?.name || "",
-          count: r.count || 0,
+        reactions: (m.reactions ?? []).map((r: any) => ({
+          name: r.emoji?.name || r.emoji?.id || "?",
+          count: r.count ?? 0,
         })),
         reply_count: 0,
         is_bot: m.author?.bot ?? false,
         subtype: null,
-        links: [],
+        links: (m.embeds ?? [])
+          .filter((e: any) => e.url || e.type === "link" || e.type === "article" || e.type === "video")
+          .map((e: any) => ({
+            url: e.url || "",
+            title: e.title,
+            description: e.description,
+            imageUrl: e.thumbnail?.url || e.image?.url,
+            siteName: e.provider?.name,
+          })),
       });
     }
 
-    messages.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    if (opts.order === "asc") {
+      messages.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    } else {
+      messages.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    }
     return messages;
   }
 
@@ -477,8 +643,36 @@ class DiscordBridge implements PlatformBridge {
   }
 
   async proxyFile(url: string): Promise<{ contentType: string; buffer: Buffer }> {
-    // Discord CDN URLs are public (time-limited), no auth needed
-    const response = await fetch(decodeURIComponent(url));
+    const decodedUrl = decodeURIComponent(url);
+
+    // Discord CDN signed URLs expire. Try the URL as-is first.
+    let response = await fetch(decodedUrl);
+
+    // If expired/404, try to refresh the attachment URL via the API.
+    // Extract channel ID and message ID from the CDN URL pattern:
+    // https://cdn.discordapp.com/attachments/{channel_id}/{attachment_id}/...
+    if (!response.ok && decodedUrl.includes("cdn.discordapp.com/attachments/")) {
+      const match = decodedUrl.match(/attachments\/(\d+)\/(\d+)\//);
+      if (match) {
+        const [, channelId, attachmentId] = match;
+        try {
+          // Fetch recent messages to find one with this attachment
+          const msgs: any[] = await this.discordApi(`/channels/${channelId}/messages?limit=50`);
+          for (const msg of msgs) {
+            for (const att of msg.attachments ?? []) {
+              if (att.id === attachmentId || att.url?.includes(attachmentId)) {
+                response = await fetch(att.url);
+                if (response.ok) break;
+              }
+            }
+            if (response.ok) break;
+          }
+        } catch {
+          // Fall through to error below
+        }
+      }
+    }
+
     if (!response.ok) {
       throw new Error(`Failed to fetch Discord file: ${response.status}`);
     }
@@ -505,8 +699,10 @@ class TeamsBridge implements PlatformBridge {
   }
 
   async listChannels(): Promise<NormalizedChannel[]> {
-    console.warn("TeamsBridge: listChannels() is not supported — Teams channel listing requires Microsoft Graph API setup");
-    return [];
+    throw Object.assign(
+      new Error("Teams channel listing requires Microsoft Graph API setup"),
+      { data: { error: "not_supported" }, code: "NOT_SUPPORTED" },
+    );
   }
 
   async getChannel(id: string): Promise<NormalizedChannel> {
@@ -522,12 +718,17 @@ class TeamsBridge implements PlatformBridge {
   }
 
   async getMessages(_channelId: string, _opts: GetMessagesOpts): Promise<NormalizedMessage[]> {
-    console.warn("TeamsBridge: getMessages() is not supported — Teams message history access requires Microsoft Graph API setup");
-    return [];
+    throw Object.assign(
+      new Error("Teams message history requires Microsoft Graph API setup"),
+      { data: { error: "not_supported" }, code: "NOT_SUPPORTED" },
+    );
   }
 
   async getThreadMessages(_channelId: string, _threadId: string): Promise<NormalizedMessage[]> {
-    return [];
+    throw Object.assign(
+      new Error("Teams thread messages require Microsoft Graph API setup"),
+      { data: { error: "not_supported" }, code: "NOT_SUPPORTED" },
+    );
   }
 
   async proxyFile(url: string): Promise<{ contentType: string; buffer: Buffer }> {
@@ -557,8 +758,10 @@ class TelegramBridge implements PlatformBridge {
   }
 
   async listChannels(): Promise<NormalizedChannel[]> {
-    console.warn("TelegramBridge: listChannels() is not supported — Telegram bots have no channel listing API");
-    return [];
+    throw Object.assign(
+      new Error("Telegram bots have no channel listing API"),
+      { data: { error: "not_supported" }, code: "NOT_SUPPORTED" },
+    );
   }
 
   async getChannel(id: string): Promise<NormalizedChannel> {
@@ -574,12 +777,17 @@ class TelegramBridge implements PlatformBridge {
   }
 
   async getMessages(_channelId: string, _opts: GetMessagesOpts): Promise<NormalizedMessage[]> {
-    console.warn("TelegramBridge: getMessages() is not supported — Telegram bots cannot fetch message history");
-    return [];
+    throw Object.assign(
+      new Error("Telegram bots cannot fetch message history"),
+      { data: { error: "not_supported" }, code: "NOT_SUPPORTED" },
+    );
   }
 
   async getThreadMessages(_channelId: string, _threadId: string): Promise<NormalizedMessage[]> {
-    return [];
+    throw Object.assign(
+      new Error("Telegram bots cannot fetch thread messages"),
+      { data: { error: "not_supported" }, code: "NOT_SUPPORTED" },
+    );
   }
 
   async proxyFile(url: string): Promise<{ contentType: string; buffer: Buffer }> {
@@ -593,9 +801,17 @@ class TelegramBridge implements PlatformBridge {
   }
 }
 
-// ── Bridge factory ───────────────────────────────────────────────────────────
+// ── Bridge factory (singleton per connection) ────────────────────────────────
 
-function createBridgeForPlatform(platform: string, adapter: unknown): PlatformBridge | null {
+/** Persistent bridge instances keyed by "{platform}:{connectionId}".
+ *  Cleared when ChatManager rebuilds adapters. */
+const bridgeCache = new Map<string, PlatformBridge>();
+
+function clearBridgeCache(): void {
+  bridgeCache.clear();
+}
+
+function newBridgeForPlatform(platform: string, adapter: unknown): PlatformBridge | null {
   if (platform === "slack") return new SlackBridge(adapter as SlackAdapter);
   if (platform === "discord") return new DiscordBridge(adapter);
   if (platform === "teams") return new TeamsBridge(adapter);
@@ -603,21 +819,30 @@ function createBridgeForPlatform(platform: string, adapter: unknown): PlatformBr
   return null;
 }
 
+function getOrCreateBridge(platform: string, connectionId: string, adapter: unknown): PlatformBridge | null {
+  const key = `${platform}:${connectionId}`;
+  const cached = bridgeCache.get(key);
+  if (cached) return cached;
+  const bridge = newBridgeForPlatform(platform, adapter);
+  if (bridge) bridgeCache.set(key, bridge);
+  return bridge;
+}
+
 function getBridge(chatManager: ChatManager, platform: string, connectionId?: string): PlatformBridge | null {
   if (connectionId) {
     const entry = chatManager.getAdapterByConnectionId(connectionId);
     if (!entry) return null;
-    return createBridgeForPlatform(entry.platform, entry.adapter);
+    return getOrCreateBridge(entry.platform, entry.connectionId, entry.adapter);
   }
   const adapter = chatManager.getAdapter(platform);
   if (!adapter) return null;
-  return createBridgeForPlatform(platform, adapter);
+  return getOrCreateBridge(platform, platform, adapter);
 }
 
 function getBridgeByConnectionId(chatManager: ChatManager, connectionId: string): { platform: string; bridge: PlatformBridge } | null {
   const entry = chatManager.getAdapterByConnectionId(connectionId);
   if (!entry) return null;
-  const bridge = createBridgeForPlatform(entry.platform, entry.adapter);
+  const bridge = getOrCreateBridge(entry.platform, entry.connectionId, entry.adapter);
   if (!bridge) return null;
   return { platform: entry.platform, bridge };
 }
@@ -628,6 +853,24 @@ function getFirstBridge(chatManager: ChatManager): { platform: string; bridge: P
     const bridge = getBridge(chatManager, platform, connectionId);
     if (bridge) return { platform, bridge };
   }
+  return null;
+}
+
+/** Infer platform from a file URL pattern. */
+function detectPlatformFromUrl(url: string): string | null {
+  if (url.includes("files.slack.com") || url.includes("slack-files.com")) return "slack";
+  if (url.includes("cdn.discordapp.com") || url.includes("media.discordapp.net")) return "discord";
+  if (url.includes("graph.microsoft.com") || url.includes("sharepoint.com")) return "teams";
+  if (url.includes("api.telegram.org")) return "telegram";
+  return null;
+}
+
+/** Try to detect platform from a channel ID format. */
+function detectPlatformFromChannelId(channelId: string): string | null {
+  // Slack: starts with C, D, or G followed by alphanumeric (e.g., C0AMY9QSPB2)
+  if (/^[CDG][A-Z0-9]{8,}$/.test(channelId)) return "slack";
+  // Discord: pure numeric snowflake IDs (e.g., 680671916943605760)
+  if (/^\d{17,20}$/.test(channelId)) return "discord";
   return null;
 }
 
@@ -666,7 +909,8 @@ async function handleListChannels(
     }
   } catch (err) {
     console.error("Bridge: listChannels error:", err);
-    jsonResponse(res, 500, { error: String(err), code: "FETCH_ERROR" });
+    const classified = classifyPlatformError(err);
+    jsonResponse(res, classified.status, { error: String(err), code: classified.code });
   }
 }
 
@@ -678,10 +922,12 @@ async function handleGetChannel(
   platform?: string,
 ): Promise<void> {
   try {
+    const resolvedPlatform = platform || detectPlatformFromChannelId(channelId);
     let bridge: PlatformBridge | null = null;
-    if (platform) {
-      bridge = getBridge(chatManager, platform);
-    } else {
+    if (resolvedPlatform) {
+      bridge = getBridge(chatManager, resolvedPlatform);
+    }
+    if (!bridge) {
       const first = getFirstBridge(chatManager);
       bridge = first?.bridge ?? null;
     }
@@ -710,11 +956,15 @@ async function handleGetMessages(
     const query = parseQuery(req.url || "");
     const limit = Math.min(parseInt(query.get("limit") || "100", 10), 500);
     const since = query.get("since") ?? undefined;
+    const before = query.get("before") ?? undefined;
+    const order = query.get("order") ?? "desc";
 
+    const resolvedPlatform = platform || detectPlatformFromChannelId(channelId);
     let bridge: PlatformBridge | null = null;
-    if (platform) {
-      bridge = getBridge(chatManager, platform);
-    } else {
+    if (resolvedPlatform) {
+      bridge = getBridge(chatManager, resolvedPlatform);
+    }
+    if (!bridge) {
       const first = getFirstBridge(chatManager);
       bridge = first?.bridge ?? null;
     }
@@ -724,11 +974,12 @@ async function handleGetMessages(
       return;
     }
 
-    const messages = await bridge.getMessages(channelId, { limit, since });
+    const messages = await bridge.getMessages(channelId, { limit, since, before, order });
     jsonResponse(res, 200, { messages });
   } catch (err) {
     console.error("Bridge: getMessages error:", err);
-    jsonResponse(res, 500, { error: String(err), code: "FETCH_ERROR" });
+    const classified = classifyPlatformError(err);
+    jsonResponse(res, classified.status, { error: String(err), code: classified.code });
   }
 }
 
@@ -741,10 +992,12 @@ async function handleGetThreadMessages(
   platform?: string,
 ): Promise<void> {
   try {
+    const resolvedPlatform = platform || detectPlatformFromChannelId(channelId);
     let bridge: PlatformBridge | null = null;
-    if (platform) {
-      bridge = getBridge(chatManager, platform);
-    } else {
+    if (resolvedPlatform) {
+      bridge = getBridge(chatManager, resolvedPlatform);
+    }
+    if (!bridge) {
       const first = getFirstBridge(chatManager);
       bridge = first?.bridge ?? null;
     }
@@ -758,7 +1011,8 @@ async function handleGetThreadMessages(
     jsonResponse(res, 200, { messages });
   } catch (err) {
     console.error("Bridge: getThreadMessages error:", err);
-    jsonResponse(res, 500, { error: String(err), code: "FETCH_ERROR" });
+    const classified = classifyPlatformError(err);
+    jsonResponse(res, classified.status, { error: String(err), code: classified.code });
   }
 }
 
@@ -770,10 +1024,12 @@ async function handleFileProxy(
   platform?: string,
 ): Promise<void> {
   try {
+    const resolvedPlatform = platform || detectPlatformFromUrl(fileUrl);
     let bridge: PlatformBridge | null = null;
-    if (platform) {
-      bridge = getBridge(chatManager, platform);
-    } else {
+    if (resolvedPlatform) {
+      bridge = getBridge(chatManager, resolvedPlatform);
+    }
+    if (!bridge) {
       const first = getFirstBridge(chatManager);
       bridge = first?.bridge ?? null;
     }
@@ -791,7 +1047,8 @@ async function handleFileProxy(
     res.end(buffer);
   } catch (err) {
     console.error("Bridge: fileProxy error:", err);
-    jsonResponse(res, 500, { error: String(err), code: "FETCH_ERROR" });
+    const classified = classifyPlatformError(err);
+    jsonResponse(res, classified.status, { error: String(err), code: classified.code });
   }
 }
 
@@ -874,19 +1131,14 @@ async function handleValidateAdapter(
       await (tempAdapter as any).client.auth.test();
       jsonResponse(res, 200, { valid: true });
     } else if (platform === "discord") {
-      const { createDiscordAdapter } = await import("@chat-adapter/discord" as any);
-      const tempAdapter = createDiscordAdapter({
-        botToken: credentials.botToken,
-        publicKey: credentials.publicKey,
-        applicationId: credentials.applicationId,
+      // Validate token via Discord REST API directly
+      const discordRes = await fetch("https://discord.com/api/v10/users/@me", {
+        headers: { Authorization: `Bot ${credentials.botToken}` },
       });
-      // Discord.js REST — fetch current user to validate token
-      const rest = (tempAdapter as any).rest || (tempAdapter as any).client?.rest;
-      if (rest) {
-        await rest.get("/users/@me");
-        jsonResponse(res, 200, { valid: true });
+      if (!discordRes.ok) {
+        jsonResponse(res, 200, { valid: false, error: `Discord API returned ${discordRes.status}` });
       } else {
-        jsonResponse(res, 200, { valid: true }); // Adapter created without error
+        jsonResponse(res, 200, { valid: true });
       }
     } else if (platform === "teams") {
       const { createTeamsAdapter } = await import("@chat-adapter/teams" as any);
@@ -940,7 +1192,8 @@ async function handleConnectionRoute(
     await handler(result.bridge);
   } catch (err) {
     console.error(`Bridge: connection route error (${connectionId}):`, err);
-    jsonResponse(res, 500, { error: String(err), code: "FETCH_ERROR" });
+    const classified = classifyPlatformError(err);
+    jsonResponse(res, classified.status, { error: String(err), code: classified.code });
   }
 }
 
@@ -960,7 +1213,8 @@ async function handleConnectionChannels(
     jsonResponse(res, 200, { channels });
   } catch (err) {
     console.error(`Bridge: listChannels error (connection ${connectionId}):`, err);
-    jsonResponse(res, 500, { error: String(err), code: "FETCH_ERROR" });
+    const classified = classifyPlatformError(err);
+    jsonResponse(res, classified.status, { error: String(err), code: classified.code });
   }
 }
 
@@ -979,7 +1233,7 @@ async function handlePlatformChannelsAggregated(
 
     const allChannels: (NormalizedChannel & { connection_id: string })[] = [];
     for (const { connectionId, adapter } of adapters) {
-      const bridge = createBridgeForPlatform(platform, adapter);
+      const bridge = getOrCreateBridge(platform, connectionId, adapter);
       if (!bridge) continue;
       try {
         const channels = await bridge.listChannels();
@@ -993,7 +1247,8 @@ async function handlePlatformChannelsAggregated(
     jsonResponse(res, 200, { channels: allChannels });
   } catch (err) {
     console.error(`Bridge: aggregated listChannels error for ${platform}:`, err);
-    jsonResponse(res, 500, { error: String(err), code: "FETCH_ERROR" });
+    const classified = classifyPlatformError(err);
+    jsonResponse(res, classified.status, { error: String(err), code: classified.code });
   }
 }
 
@@ -1001,12 +1256,24 @@ async function handlePlatformChannelsAggregated(
 
 export function registerBridgeRoutes(
   chatManager: ChatManager,
+  lazySyncFn?: () => Promise<boolean>,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
+  // Subscribe to adapter rebuilds to clear the bridge singleton cache.
+  // This ensures stale adapter references are never reused after unregister/reregister.
+  chatManager.onRebuild(() => {
+    clearBridgeCache();
+  });
+
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const url = req.url || "";
 
     if (!url.startsWith("/bridge/")) return false;
     if (!checkAuth(req, res)) return true;
+
+    // Lazy sync: if the bot has no adapters, attempt recovery before handling
+    if (lazySyncFn && chatManager.adapterCount() === 0) {
+      await lazySyncFn();
+    }
 
     // POST /bridge/adapters — register adapter
     if (req.method === "POST" && url === "/bridge/adapters") {
@@ -1062,7 +1329,9 @@ export function registerBridgeRoutes(
         const query = parseQuery(req.url || "");
         const limit = Math.min(parseInt(query.get("limit") || "100", 10), 500);
         const since = query.get("since") ?? undefined;
-        const messages = await bridge.getMessages(connMessagesMatch[2], { limit, since });
+        const before = query.get("before") ?? undefined;
+        const order = query.get("order") ?? "desc";
+        const messages = await bridge.getMessages(connMessagesMatch[2], { limit, since, before, order });
         jsonResponse(res, 200, { messages });
       });
       return true;
