@@ -33,11 +33,79 @@ export interface AskResponse {
   cost_usd: number;
 }
 
-export interface WikiResponse {
+export interface WikiCitation {
+  id: string;
+  author: string;
+  channel: string;
+  timestamp: string;
+  text_excerpt: string;
+  permalink: string;
+  media_type?: "pdf" | "image" | "link" | "video" | "audio";
+  media_name?: string;
+}
+
+export interface WikiPageRef {
+  id: string;
+  title: string;
+  slug: string;
+  section_number: string;
+  memory_count: number;
+}
+
+export interface WikiPage {
+  id: string;
+  slug: string;
+  title: string;
+  page_type: "fixed" | "topic" | "sub-topic";
+  parent_id: string | null;
+  section_number: string;
   content: string;
+  summary: string;
+  memory_count: number;
+  last_updated: string;
+  citations: WikiCitation[];
+  children: WikiPageRef[];
+}
+
+export interface WikiPageNode {
+  id: string;
+  title: string;
+  slug: string;
+  section_number: string;
+  page_type: "fixed" | "topic" | "sub-topic";
+  memory_count: number;
+  children: WikiPageNode[];
+}
+
+export interface WikiStructure {
+  channel_id: string;
+  channel_name: string;
+  platform: string;
   generated_at: string;
   is_stale: boolean;
+  pages: WikiPageNode[];
+}
+
+export interface WikiMetadata {
+  member_count: number;
+  message_count: number;
+  memory_count: number;
+  entity_count: number;
+  media_count: number;
+  page_count: number;
+  generation_cost_usd: number;
+  generation_duration_ms: number;
+}
+
+export interface WikiResponse {
   channel_id: string;
+  channel_name: string;
+  platform: string;
+  generated_at: string;
+  is_stale: boolean;
+  structure: WikiStructure;
+  overview: WikiPage;
+  metadata: WikiMetadata;
 }
 
 export interface SyncResponse {

@@ -27,6 +27,7 @@ Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** and add:
 | `chat:write` | Post responses in channels/threads |
 | `channels:history` | Fetch message history (batch ingestion) |
 | `channels:read` | List channels and get channel info |
+| `files:read` | Read files shared in channels and conversations the app is added to |
 | `groups:history` | Fetch private channel history |
 | `groups:read` | List private channels |
 | `im:history` | Fetch DM history |
@@ -39,7 +40,6 @@ Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** and add:
 | Scope | Purpose |
 |-------|---------|
 | `reactions:write` | Add reactions to acknowledge messages |
-| `files:read` | Read file attachments (M3 multimodal) |
 | `mpim:history` | Multi-party DM history |
 | `mpim:read` | List multi-party DMs |
 

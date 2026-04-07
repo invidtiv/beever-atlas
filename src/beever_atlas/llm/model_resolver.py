@@ -23,6 +23,7 @@ AGENT_NAMES: list[str] = [
     "summarizer",
     "document_digester",
     "echo",
+    "wiki_compiler",
 ]
 
 # Default model assignments — Flash for complex, Lite for simple, Gemma 4 E4B for media
@@ -38,6 +39,7 @@ DEFAULT_AGENT_MODELS: dict[str, str] = {
     "image_describer": "ollama_chat/gemma4:e4b",
     "video_analyzer": "gemini-2.5-flash-lite",
     "audio_transcriber": "gemini-2.5-flash-lite",
+    "wiki_compiler": "gemini-2.5-flash",
 }
 
 # Known Gemini models available via Google AI API

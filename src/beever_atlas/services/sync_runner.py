@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from beever_atlas.adapters import get_adapter
+from beever_atlas.adapters.bridge import ChatBridgeAdapter
 from beever_atlas.infra.config import get_settings
 from beever_atlas.services.batch_processor import BatchProcessor
 from beever_atlas.stores import get_stores
@@ -66,6 +67,7 @@ class SyncRunner:
         channel_id: str,
         sync_type: str = "auto",
         use_batch_api: bool = False,
+        connection_id: str | None = None,
     ) -> str:
         """Kick off a sync for *channel_id* and return the new job_id.
 
@@ -151,41 +153,47 @@ class SyncRunner:
         effective_policy = await resolve_effective_policy(channel_id)
         _max_messages = effective_policy.sync.max_messages
 
-        # 3. Fetch all messages via cursor-based pagination.
-        logger.info(
-            "SyncRunner: fetch start channel=%s resolved_type=%s since=%s max_messages=%s",
-            channel_id,
-            resolved_type,
-            since,
-            _max_messages,
-        )
-        messages = await self._fetch_all_messages(channel_id, since=since, max_messages=_max_messages)
-
-        # If incremental sync found nothing, auto-fallback to full sync
-        if not messages and resolved_type == "incremental":
+        # 3. Resolve connection and fetch all messages via cursor-based pagination.
+        resolved_connection_id = await self._resolve_connection_id(channel_id, connection_id)
+        adapter = ChatBridgeAdapter(connection_id=resolved_connection_id) if resolved_connection_id else get_adapter()
+        try:
             logger.info(
-                "SyncRunner: incremental sync found no new messages for channel %s, falling back to full sync.",
+                "SyncRunner: fetch start channel=%s connection_id=%s resolved_type=%s since=%s max_messages=%s",
                 channel_id,
-            )
-            resolved_type = "full"
-            since = None
-            messages = await self._fetch_all_messages(channel_id, since=None, max_messages=_max_messages)
-
-        if not messages:
-            logger.info(
-                "SyncRunner: no messages for channel %s (%s sync).",
-                channel_id,
+                resolved_connection_id,
                 resolved_type,
+                since,
+                _max_messages,
             )
+            messages = await self._fetch_all_messages(channel_id, adapter=adapter, since=since, max_messages=_max_messages)
 
-        # 4. Fetch thread replies for messages with reply_count > 0.
-        parent_count = len(messages)
-        messages = await self._fetch_thread_replies(channel_id, messages)
+            # If incremental sync found nothing, auto-fallback to full sync
+            if not messages and resolved_type == "incremental":
+                logger.info(
+                    "SyncRunner: incremental sync found no new messages for channel %s, falling back to full sync.",
+                    channel_id,
+                )
+                resolved_type = "full"
+                since = None
+                messages = await self._fetch_all_messages(channel_id, adapter=adapter, since=None, max_messages=_max_messages)
 
-        # 5. Get channel info for the human-readable name.
-        adapter = get_adapter()
-        channel_info = await adapter.get_channel_info(channel_id)
-        channel_name = channel_info.name
+            if not messages:
+                logger.info(
+                    "SyncRunner: no messages for channel %s (%s sync).",
+                    channel_id,
+                    resolved_type,
+                )
+
+            # 4. Fetch thread replies for messages with reply_count > 0.
+            parent_count = len(messages)
+            messages = await self._fetch_thread_replies(channel_id, messages, adapter=adapter)
+
+            # 5. Get channel info for the human-readable name.
+            channel_info = await adapter.get_channel_info(channel_id)
+            channel_name = channel_info.name
+        finally:
+            if isinstance(adapter, ChatBridgeAdapter):
+                await adapter.close()
 
         # 6. Create sync job in MongoDB.
         job = await stores.mongodb.create_sync_job(
@@ -224,6 +232,7 @@ class SyncRunner:
     async def _fetch_all_messages(
         self,
         channel_id: str,
+        adapter: Any,
         since: datetime | str | None = None,
         max_messages: int | None = None,
     ) -> list[Any]:
@@ -241,7 +250,6 @@ class SyncRunner:
         """
         settings = get_settings()
         msg_limit = max_messages or settings.sync_max_messages
-        adapter = get_adapter()
         all_messages: list[Any] = []
         seen_ids: set[str] = set()
         cursor = _coerce_since_timestamp(since)
@@ -319,6 +327,7 @@ class SyncRunner:
         self,
         channel_id: str,
         messages: list[Any],
+        adapter: Any,
     ) -> list[Any]:
         """Fetch thread replies for messages with reply_count > 0.
 
@@ -327,7 +336,6 @@ class SyncRunner:
 
         Uses a semaphore to respect Slack API rate limits (Tier 3).
         """
-        adapter = get_adapter()
         sem = asyncio.Semaphore(3)
 
         # Identify thread parents
@@ -402,6 +410,36 @@ class SyncRunner:
             logger.info("SyncRunner: removed %d duplicate messages after thread merge", removed)
 
         return deduped
+
+    async def _resolve_connection_id(
+        self,
+        channel_id: str,
+        explicit_connection_id: str | None,
+    ) -> str | None:
+        """Resolve which platform connection should be used for channel fetches."""
+        if explicit_connection_id:
+            return explicit_connection_id
+
+        stores = get_stores()
+        connections = await stores.platform.list_connections()
+        candidates = [
+            c for c in connections
+            if c.status == "connected" and channel_id in (c.selected_channels or [])
+        ]
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0].id
+
+        # Deterministic fallback for duplicate channel IDs across connections.
+        selected = sorted(candidates, key=lambda c: c.id)[0]
+        logger.warning(
+            "SyncRunner: channel %s is selected in %d connections; defaulting to connection %s",
+            channel_id,
+            len(candidates),
+            selected.id,
+        )
+        return selected.id
 
     async def _run_sync(
         self,

@@ -19,7 +19,17 @@ type Step = 1 | 2 | 3 | 4 | 5;
 const SLACK_INSTRUCTIONS = [
   { text: "Go to", link: "https://api.slack.com/apps", linkText: "api.slack.com/apps" },
   { text: "Click Create New App → From scratch" },
-  { text: "Under OAuth & Permissions, add Bot Token Scopes: channels:history, channels:read, groups:history, groups:read, users:read" },
+  {
+    text: "Under OAuth & Permissions → Scopes → Bot Token Scopes, turn on all required scopes:",
+    details: [
+      "channels:history",
+      "channels:read",
+      "files:read",
+      "groups:history",
+      "groups:read",
+      "users:read",
+    ],
+  },
   { text: "Click Install to Workspace and authorize" },
   { text: "Copy the Bot User OAuth Token (starts with xoxb-)" },
   { text: "Under Basic Information, copy the Signing Secret" },
@@ -89,7 +99,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
   const { channels, loading: channelsLoading } = useConnectionChannels(connection?.id ?? null);
   const { updateChannels, loading: updatingChannels } = useUpdateChannels(connection?.id ?? null);
 
-  const INSTRUCTIONS_MAP: Record<Platform, { text: string; link?: string; linkText?: string }[]> = {
+  const INSTRUCTIONS_MAP: Record<Platform, { text: string; link?: string; linkText?: string; details?: string[] }[]> = {
     slack: SLACK_INSTRUCTIONS,
     discord: DISCORD_INSTRUCTIONS,
     teams: TEAMS_INSTRUCTIONS,
@@ -347,7 +357,7 @@ function StepInstructions({
   onDisplayNameChange,
 }: {
   platform: Platform;
-  instructions: { text: string; link?: string; linkText?: string }[];
+  instructions: { text: string; link?: string; linkText?: string; details?: string[] }[];
   displayName: string;
   onDisplayNameChange: (v: string) => void;
 }) {
@@ -365,20 +375,31 @@ function StepInstructions({
             <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/10 text-primary text-[11px] font-bold shrink-0 mt-0.5">
               {i + 1}
             </span>
-            <span className="text-sm text-foreground/80 leading-relaxed">
-              {instruction.text}{" "}
-              {instruction.link && (
-                <a
-                  href={instruction.link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-0.5 text-primary hover:underline font-medium"
-                >
-                  {instruction.linkText}
-                  <ExternalLink className="w-3 h-3" />
-                </a>
+            <div className="text-sm text-foreground/80 leading-relaxed">
+              <span>
+                {instruction.text}{" "}
+                {instruction.link && (
+                  <a
+                    href={instruction.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-0.5 text-primary hover:underline font-medium"
+                  >
+                    {instruction.linkText}
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </span>
+              {instruction.details && instruction.details.length > 0 && (
+                <ul className="mt-1.5 space-y-1 text-xs text-foreground/75">
+                  {instruction.details.map((detail) => (
+                    <li key={detail} className="font-mono">
+                      • {detail}
+                    </li>
+                  ))}
+                </ul>
               )}
-            </span>
+            </div>
           </div>
         ))}
       </div>

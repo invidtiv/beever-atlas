@@ -25,6 +25,7 @@ from beever_atlas.api.graph import router as graph_router
 from beever_atlas.api.search import router as search_router
 from beever_atlas.api.stats import router as stats_router
 from beever_atlas.api.topics import router as topics_router
+from beever_atlas.api.wiki import router as wiki_router
 from beever_atlas.api.policies import router as policies_router
 from beever_atlas.api.models import router as models_router
 from beever_atlas.api.dev import router as dev_router
@@ -164,6 +165,7 @@ app.include_router(topics_router)
 app.include_router(policies_router)
 app.include_router(models_router)
 app.include_router(dev_router)
+app.include_router(wiki_router)
 
 register_health_checks()
 

@@ -393,7 +393,7 @@ async def update_selected_channels(
     # Trigger sync for newly selected channels
     new_channels = set(body.selected_channels) - set(conn.selected_channels)
     if new_channels:
-        await _trigger_sync_for_channels(list(new_channels))
+        await _trigger_sync_for_channels(list(new_channels), connection_id=connection_id)
 
     logger.info(
         "Updated channels for connection id=%s: %d selected, %d new",
@@ -404,14 +404,14 @@ async def update_selected_channels(
     return _to_response(updated)
 
 
-async def _trigger_sync_for_channels(channel_ids: list[str]) -> None:
+async def _trigger_sync_for_channels(channel_ids: list[str], connection_id: str | None = None) -> None:
     """Fire-and-forget sync for newly selected channels."""
     from beever_atlas.api.sync import get_sync_runner
 
     runner = get_sync_runner()
     for channel_id in channel_ids:
         try:
-            await runner.start_sync(channel_id, sync_type="full")
+            await runner.start_sync(channel_id, sync_type="full", connection_id=connection_id)
             logger.info("Triggered sync for newly selected channel %s", channel_id)
         except ValueError:
             # Sync already running — that's fine

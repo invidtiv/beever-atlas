@@ -1223,6 +1223,73 @@ class WeaviateStore:
 
         return await asyncio.to_thread(_list)
 
+    async def fetch_all_cluster_members(
+        self, channel_id: str, cluster_id: str, limit: int = 500,
+    ) -> list[AtomicFact]:
+        """Fetch ALL Tier 2 AtomicFacts for a specific cluster in a channel."""
+
+        def _fetch() -> list[AtomicFact]:
+            collection = self._collection()
+            result = collection.query.fetch_objects(
+                filters=(
+                    Filter.by_property("channel_id").equal(channel_id)
+                    & Filter.by_property("cluster_id").equal(cluster_id)
+                    & Filter.by_property("tier").equal("atomic")
+                ),
+                limit=limit,
+            )
+            return [self._obj_to_fact(obj) for obj in result.objects]
+
+        return await asyncio.to_thread(_fetch)
+
+    async def fetch_media_facts(
+        self, channel_id: str, limit: int = 500,
+    ) -> list[AtomicFact]:
+        """Fetch facts with non-empty source_media_urls or source_link_urls."""
+
+        def _fetch() -> list[AtomicFact]:
+            collection = self._collection()
+            # Weaviate doesn't support "array is not empty" directly,
+            # so we fetch all channel facts and filter in Python.
+            result = collection.query.fetch_objects(
+                filters=(
+                    Filter.by_property("channel_id").equal(channel_id)
+                    & Filter.by_property("tier").equal("atomic")
+                ),
+                limit=limit,
+            )
+            facts: list[AtomicFact] = []
+            for obj in result.objects:
+                fact = self._obj_to_fact(obj)
+                if fact.source_media_urls or fact.source_link_urls:
+                    facts.append(fact)
+            return facts
+
+        return await asyncio.to_thread(_fetch)
+
+    async def fetch_recent_facts(
+        self, channel_id: str, days: int = 7, limit: int = 500,
+    ) -> list[AtomicFact]:
+        """Fetch Tier 2 facts from the last N days for a channel."""
+        from datetime import timedelta, timezone
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+
+        def _fetch() -> list[AtomicFact]:
+            collection = self._collection()
+            weaviate_filter = (
+                Filter.by_property("channel_id").equal(channel_id)
+                & Filter.by_property("tier").equal("atomic")
+                & Filter.by_property("valid_at").greater_or_equal(cutoff)
+            )
+            result = collection.query.fetch_objects(
+                filters=weaviate_filter,
+                limit=limit,
+            )
+            return [self._obj_to_fact(obj) for obj in result.objects]
+
+        return await asyncio.to_thread(_fetch)
+
     async def batch_update_fact_clusters(
         self, updates: list[tuple[str, str]],
     ) -> None:

@@ -260,8 +260,8 @@ class MediaProcessor:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
 
-    async def _download_file(self, url: str) -> bytes | None:
-        """Download a file via the bridge file proxy."""
+    async def _download_file(self, url: str, _retries: int = 3) -> bytes | None:
+        """Download a file via the bridge file proxy with retry on 429."""
         settings = self._settings
         proxy_url = f"{settings.bridge_url}/bridge/files?url={url}"
         headers: dict[str, str] = {}
@@ -271,6 +271,19 @@ class MediaProcessor:
         try:
             client = await self._get_http_client()
             resp = await client.get(proxy_url, headers=headers)
+
+            # Retry on 429 (rate limited) with exponential backoff
+            if resp.status_code == 429 and _retries > 0:
+                retry_after = int(resp.headers.get("retry-after", "3"))
+                wait = max(retry_after, 2)
+                logger.info(
+                    "MediaProcessor: rate limited (429), retrying in %ds url=%s",
+                    wait,
+                    url[:80],
+                )
+                await asyncio.sleep(wait)
+                return await self._download_file(url, _retries - 1)
+
             if resp.status_code != 200:
                 logger.warning(
                     "MediaProcessor: download failed status=%d url=%s",

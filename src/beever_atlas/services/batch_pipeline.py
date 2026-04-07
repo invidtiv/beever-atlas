@@ -327,6 +327,7 @@ class BatchPipelineRunner:
                     "content": f"{snippet}…",
                     "model": provider.get_model_string("image_describer"),
                 })
+            img_meta = None
             if not img_match:
                 img_meta = _re.search(r'\[Attachment:.*?\(image', full_text)
                 if img_meta:
@@ -363,7 +364,8 @@ class BatchPipelineRunner:
 
             # Detect failed media agents (timeout or other errors)
             if m.get("modality") == "mixed":
-                has_media_output = bool(doc_match or img_match or vid_match or vid_vis or aud_match)
+                # img_meta covers [Attachment: ...] fallbacks when download failed but metadata was preserved
+                has_media_output = bool(doc_match or img_match or img_meta or vid_match or vid_vis or aud_match)
                 if not has_media_output:
                     media_type = m.get("source_media_type", "")
                     agent_map = {"pdf": "document_digester", "image": "image_describer", "video": "video_analyzer", "audio": "audio_transcriber"}

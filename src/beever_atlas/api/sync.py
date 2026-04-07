@@ -38,6 +38,7 @@ async def trigger_sync(
     channel_id: str,
     sync_type: Literal["auto", "full", "incremental"] = Query(default="auto"),
     use_batch_api: bool = Query(default=False),
+    connection_id: str | None = Query(default=None),
 ) -> dict:
     """Trigger a sync job for the given channel."""
     logger.info("Sync API: trigger requested for channel=%s sync_type=%s", channel_id, sync_type)
@@ -84,7 +85,12 @@ async def trigger_sync(
 
     sync_runner = get_sync_runner()
     try:
-        job_id = await sync_runner.start_sync(channel_id, sync_type=resolved_sync_type, use_batch_api=use_batch_api)
+        job_id = await sync_runner.start_sync(
+            channel_id,
+            sync_type=resolved_sync_type,
+            use_batch_api=use_batch_api,
+            connection_id=connection_id,
+        )
     except ValueError as exc:
         logger.info(
             "Sync API: trigger rejected for channel=%s: %s",

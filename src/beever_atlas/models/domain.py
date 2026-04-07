@@ -184,6 +184,95 @@ class ChannelSummary(BaseModel):
     # [{"source_cluster_id", "target_cluster_id", "source_title", "target_title", "shared_entities"}]
 
 
+class WikiCitation(BaseModel):
+    """A source citation for a wiki page fact."""
+
+    id: str  # "[1]", "[2]", etc.
+    author: str = ""
+    channel: str = ""
+    timestamp: str = ""
+    text_excerpt: str = ""  # First 100 chars of original message
+    permalink: str = ""
+    media_type: str | None = None  # "pdf", "image", "link", "video", "audio"
+    media_name: str | None = None  # Filename or domain for media-sourced citations
+
+
+class WikiPageRef(BaseModel):
+    """Lightweight reference to a sub-page (used in children lists)."""
+
+    id: str
+    title: str
+    slug: str
+    section_number: str
+    memory_count: int = 0
+
+
+class WikiPage(BaseModel):
+    """A single wiki page with enhanced Markdown content."""
+
+    id: str  # "overview", "people", "topic-authentication", "topic-auth--jwt-migration"
+    slug: str
+    title: str
+    page_type: str = "fixed"  # "fixed" | "topic" | "sub-topic"
+    parent_id: str | None = None
+    section_number: str = ""  # "1", "2.1", "2.1.1"
+    content: str = ""  # Enhanced Markdown (mermaid/chart/callout/media blocks)
+    summary: str = ""  # 1-2 sentence summary for cards/tooltips
+    memory_count: int = 0
+    last_updated: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    citations: list[WikiCitation] = Field(default_factory=list)
+    children: list[WikiPageRef] = Field(default_factory=list)
+
+
+class WikiPageNode(BaseModel):
+    """A node in the sidebar navigation tree (recursive)."""
+
+    id: str
+    title: str
+    slug: str
+    section_number: str
+    page_type: str = "fixed"  # "fixed" | "topic" | "sub-topic"
+    memory_count: int = 0
+    children: list["WikiPageNode"] = Field(default_factory=list)
+
+
+class WikiStructure(BaseModel):
+    """Sidebar navigation tree — lightweight, no page content."""
+
+    channel_id: str
+    channel_name: str = ""
+    platform: str = ""
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    is_stale: bool = False
+    pages: list[WikiPageNode] = Field(default_factory=list)
+
+
+class WikiMetadata(BaseModel):
+    """Metadata about the wiki generation."""
+
+    member_count: int = 0
+    message_count: int = 0
+    memory_count: int = 0
+    entity_count: int = 0
+    media_count: int = 0
+    page_count: int = 0
+    generation_cost_usd: float = 0.0
+    generation_duration_ms: int = 0
+
+
+class WikiResponse(BaseModel):
+    """Full response from GET /wiki — structure + overview page."""
+
+    channel_id: str
+    channel_name: str = ""
+    platform: str = ""
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    is_stale: bool = False
+    structure: WikiStructure
+    overview: WikiPage
+    metadata: WikiMetadata
+
+
 class EntityKnowledgeCard(BaseModel):
     """Cross-channel aggregation of all knowledge about a single graph entity."""
 

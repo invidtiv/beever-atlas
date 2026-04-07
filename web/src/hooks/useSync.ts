@@ -29,7 +29,7 @@ export interface UseSyncReturn {
   error: string | null;
 }
 
-export function useSync(channelId: string): UseSyncReturn {
+export function useSync(channelId: string, connectionId?: string | null): UseSyncReturn {
   const [syncState, setSyncState] = useState<SyncState>({ state: "idle" });
   const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,8 +106,12 @@ export function useSync(channelId: string): UseSyncReturn {
         syncState.state === "idle" &&
         !!syncState.job_id &&
         (syncState.total_messages ?? 0) === 0;
-      const syncUrl = shouldForceFullResync
-        ? `/api/channels/${channelId}/sync?sync_type=full`
+      const params = new URLSearchParams();
+      if (shouldForceFullResync) params.set("sync_type", "full");
+      if (connectionId) params.set("connection_id", connectionId);
+      const query = params.toString();
+      const syncUrl = query
+        ? `/api/channels/${channelId}/sync?${query}`
         : `/api/channels/${channelId}/sync`;
       const response = await api.post<SyncResponse>(
         syncUrl,
@@ -132,7 +136,7 @@ export function useSync(channelId: string): UseSyncReturn {
       setIsSyncing(false);
       setSyncState({ state: "error" });
     }
-  }, [channelId, isSyncing, startPolling, syncState.state, syncState.job_id, syncState.total_messages]);
+  }, [channelId, connectionId, isSyncing, startPolling, syncState.state, syncState.job_id, syncState.total_messages]);
 
   useEffect(() => {
     if (!channelId) return;

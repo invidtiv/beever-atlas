@@ -1,0 +1,329 @@
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { type ReactNode, useState } from "react";
+import { FileText, ExternalLink, Link2, Image as ImageIcon, Film, X, Maximize2 } from "lucide-react";
+import { MermaidBlock } from "./MermaidBlock";
+import { ChartBlock } from "./ChartBlock";
+import { CalloutBox } from "./CalloutBox";
+import { CitationLink } from "./CitationLink";
+import type { WikiCitation } from "@/lib/types";
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+function proxyUrl(url: string): string {
+  if (url.includes("files.slack.com")) {
+    return `${API_BASE}/api/files/proxy?url=${encodeURIComponent(url)}`;
+  }
+  return url;
+}
+
+function detectMediaType(url: string, alt?: string): "image" | "pdf" | "video" | "link" {
+  const lower = (url + (alt || "")).toLowerCase();
+  if (lower.match(/\.(png|jpg|jpeg|gif|webp|svg)(\?|$)/)) return "image";
+  if (lower.match(/\.(pdf)(\?|$)/) || lower.includes("pdf")) return "pdf";
+  if (lower.match(/\.(mp4|mov|webm|avi)(\?|$)/) || lower.includes("video")) return "video";
+  return "link";
+}
+
+interface WikiMarkdownProps {
+  content: string;
+  citations?: WikiCitation[];
+  onNavigate?: (pageId: string) => void;
+}
+
+/**
+ * Pre-process content: replace [N] citations with markers that survive markdown parsing.
+ * Entity chips ($tech, @person) are removed — rendered as plain text for readability.
+ */
+function preprocessContent(content: string): string {
+  // Replace [N] citations with zero-width-space delimited markers
+  return content.replace(/\[(\d+)\]/g, "\u200Bcite:$1\u200B");
+}
+
+/**
+ * Process text to render citation markers as interactive CitationLink components.
+ */
+function processText(
+  text: string,
+  citations: WikiCitation[],
+  keyPrefix: string,
+): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const pattern = /\u200Bcite:(\d+)\u200B/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const idx = parseInt(match[1], 10);
+    parts.push(
+      <CitationLink key={`${keyPrefix}-${match.index}`} index={idx} citation={citations[idx - 1]} />,
+    );
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts;
+}
+
+/**
+ * Walk React children tree and process all text nodes for citations.
+ */
+function processChildren(
+  children: ReactNode,
+  citations: WikiCitation[],
+  keyPrefix = "c",
+): ReactNode {
+  if (typeof children === "string") {
+    const parts = processText(children, citations, keyPrefix);
+    return parts.length === 1 && typeof parts[0] === "string" ? parts[0] : <>{parts}</>;
+  }
+  if (Array.isArray(children)) {
+    return <>{children.map((child, i) => processChildren(child, citations, `${keyPrefix}-${i}`))}</>;
+  }
+  if (children && typeof children === "object" && "props" in (children as object)) {
+    const el = children as React.ReactElement<{ children?: ReactNode }>;
+    if (el.props?.children != null) {
+      const processed = processChildren(el.props.children, citations, `${keyPrefix}-el`);
+      const { children: _, ...rest } = el.props;
+      return { ...el, props: { ...rest, children: processed } };
+    }
+  }
+  return children;
+}
+
+/**
+ * Check if a ReactNode tree contains only CitationLink components and whitespace.
+ */
+function isCitationOnlyNode(node: ReactNode): boolean {
+  if (node == null || node === false || node === true) return true;
+  if (typeof node === "string") return node.trim() === "";
+  if (typeof node === "number") return false;
+  if (Array.isArray(node)) return node.every(isCitationOnlyNode);
+  if (typeof node === "object" && "props" in (node as object)) {
+    const el = node as React.ReactElement<{ children?: ReactNode }>;
+    const type = (el as unknown as { type: unknown }).type;
+    // CitationLink component — this is a citation
+    if (type === CitationLink) return true;
+    // Fragment or span wrapper — check children
+    if (typeof type === "string" || typeof type === "symbol" || type === undefined) {
+      return el.props?.children != null ? isCitationOnlyNode(el.props.children) : true;
+    }
+  }
+  return false;
+}
+
+function extractText(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (typeof children === "number") return String(children);
+  if (Array.isArray(children)) return children.map(extractText).join("");
+  if (children && typeof children === "object" && "props" in (children as object)) {
+    const el = children as React.ReactElement<{ children?: ReactNode }>;
+    return extractText(el.props?.children);
+  }
+  return "";
+}
+
+function WikiImage({ src, alt }: { src: string; alt: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <span className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-muted-foreground my-2">
+        <ImageIcon className="h-4 w-4 text-blue-400" />
+        {alt}
+      </span>
+    );
+  }
+
+  return (
+    <>
+      <span className="block my-4 group cursor-pointer" onClick={() => setExpanded(true)}>
+        <img
+          src={src}
+          alt={alt}
+          className="rounded-lg border border-border max-h-80 object-contain bg-muted/20"
+          onError={() => setFailed(true)}
+        />
+        <span className="flex items-center gap-1.5 mt-1.5 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
+          <Maximize2 className="h-3 w-3" /> Click to enlarge
+        </span>
+      </span>
+      {expanded && (
+        <div className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-sm flex items-center justify-center p-12" onClick={() => setExpanded(false)}>
+          <div className="relative max-w-4xl w-full flex flex-col items-center" onClick={e => e.stopPropagation()}>
+            <button onClick={() => setExpanded(false)} className="absolute -top-10 right-0 p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors">
+              <X className="h-4 w-4" />
+            </button>
+            <img src={src} alt={alt} className="max-w-full max-h-[70vh] object-contain rounded-lg shadow-2xl" />
+            {alt && alt !== "Image" && (
+              <span className="mt-3 text-xs text-muted-foreground text-center max-w-lg">{alt}</span>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function WikiPdfLink({ href, title }: { href: string; title: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const proxied = proxyUrl(href);
+
+  return (
+    <>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-3 rounded-lg border border-border bg-card hover:bg-muted/50 px-4 py-3 my-2 w-full text-left transition-colors group"
+      >
+        <FileText className="h-5 w-5 text-red-400 shrink-0" />
+        <div className="flex-1 min-w-0">
+          <span className="text-sm font-medium text-foreground group-hover:text-primary truncate block">{title}</span>
+          <span className="text-xs text-muted-foreground">PDF Document — click to {expanded ? "collapse" : "preview"}</span>
+        </div>
+        <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" onClick={(e) => { e.stopPropagation(); window.open(proxied, "_blank"); }} />
+      </button>
+      {expanded && (
+        <div className="my-2 rounded-lg border border-border overflow-hidden">
+          <iframe src={proxied} className="w-full h-[500px] bg-white" title={title} />
+        </div>
+      )}
+    </>
+  );
+}
+
+export function WikiMarkdown({ content, citations = [], onNavigate: _onNavigate }: WikiMarkdownProps) {
+  const processed = preprocessContent(content);
+  const ci = citations; // capture for closures
+
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        code({ className, children, ...props }) {
+          const lang = className?.replace("language-", "") ?? "";
+          const code = String(children).replace(/\n$/, "");
+
+          if (lang === "mermaid") return <MermaidBlock chart={code} />;
+          if (lang === "chart" || lang.startsWith("chart")) return <ChartBlock spec={code} />;
+
+          return (
+            <code className={`${className ?? ""} rounded bg-muted px-1 py-0.5 text-sm font-mono text-foreground`} {...props}>
+              {children}
+            </code>
+          );
+        },
+        pre({ children }) {
+          return <pre className="rounded-lg bg-muted p-4 overflow-x-auto text-sm">{children}</pre>;
+        },
+        p({ children }) {
+          const processed = processChildren(children, ci);
+          // Detect citation-only paragraphs (e.g. standalone [1] after media)
+          // Check if all non-whitespace content is citation markers
+          const raw = extractText(children as ReactNode).replace(/\s+/g, " ").trim();
+          const withoutCites = raw.replace(/\u200Bcite:\d+\u200B/g, "").trim();
+          // Also check the processed children — if they only contain CitationLink components
+          const isCitationOnly = (raw.length > 0 && withoutCites === "") || isCitationOnlyNode(processed);
+          if (isCitationOnly) {
+            return <p className="flex justify-end -mt-5 mb-1 mr-1 relative z-10">{processed}</p>;
+          }
+          return <p className="text-foreground/90 leading-relaxed my-2">{processed}</p>;
+        },
+        li({ children }) {
+          return <li className="text-sm leading-relaxed">{processChildren(children, ci, "li")}</li>;
+        },
+        td({ children }) {
+          return <td className="border border-border px-3 py-2 text-muted-foreground">{processChildren(children, ci, "td")}</td>;
+        },
+        th({ children }) {
+          return <th className="border border-border bg-muted px-3 py-2 text-left font-semibold text-foreground">{processChildren(children, ci, "th")}</th>;
+        },
+        strong({ children }) {
+          return <strong className="font-semibold text-foreground">{processChildren(children, ci, "s")}</strong>;
+        },
+        em({ children }) {
+          return <em>{processChildren(children, ci, "em")}</em>;
+        },
+        blockquote({ children }) {
+          const text = extractText(children as ReactNode).trim();
+          const calloutMatch = text.match(/\[!(NOTE|TIP|WARNING)\]\s*([\s\S]*)/);
+          if (calloutMatch) {
+            return <CalloutBox type={calloutMatch[1].toLowerCase() as "note" | "tip" | "warning"} content={calloutMatch[2].trim()} />;
+          }
+          return <blockquote className="border-l-4 border-border pl-4 italic text-muted-foreground">{children}</blockquote>;
+        },
+        h1({ children }) {
+          return <h1 className="text-2xl font-bold text-foreground mt-6 mb-3">{processChildren(children, ci, "h1")}</h1>;
+        },
+        h2({ children }) {
+          const text = extractText(children as ReactNode);
+          const id = text.toLowerCase().replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").slice(0, 80);
+          return <h2 id={id} className="text-xl font-semibold text-foreground mt-5 mb-2 scroll-mt-6">{processChildren(children, ci, "h2")}</h2>;
+        },
+        h3({ children }) {
+          const text = extractText(children as ReactNode);
+          const id = text.toLowerCase().replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").slice(0, 80);
+          return <h3 id={id} className="text-lg font-semibold text-foreground/90 mt-4 mb-2 scroll-mt-6">{processChildren(children, ci, "h3")}</h3>;
+        },
+        h4({ children }) {
+          return <h4 className="text-base font-semibold text-foreground/90 mt-3 mb-1">{processChildren(children, ci, "h4")}</h4>;
+        },
+        ul({ children }) {
+          return <ul className="list-disc list-inside space-y-1 my-3 text-foreground/80">{children}</ul>;
+        },
+        ol({ children }) {
+          return <ol className="list-decimal list-inside space-y-1 my-3 text-foreground/80">{children}</ol>;
+        },
+        img({ src, alt }) {
+          if (!src) return <span className="text-muted-foreground text-sm italic">[Image: {alt}]</span>;
+          const proxied = proxyUrl(src);
+          return <WikiImage src={proxied} alt={alt || "Image"} />;
+        },
+        a({ href, children }) {
+          if (!href) return <span>{children}</span>;
+          const text = String(children);
+          const mediaType = detectMediaType(href, text);
+
+          // PDF links — show expandable card
+          if (mediaType === "pdf" || text.startsWith("📄")) {
+            const pdfTitle = text.replace(/^📄\s*/, "").trim();
+            return <WikiPdfLink href={href} title={pdfTitle || "PDF Document"} />;
+          }
+
+          // All other links — card style matching PDF cards
+          const cleanText = text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200D\uFE0F]/gu, "").trim();
+          const domain = (() => { try { return new URL(href).hostname.replace("www.", ""); } catch { return href; } })();
+          const icon = mediaType === "video"
+            ? <Film className="h-5 w-5 text-purple-400 shrink-0" />
+            : <Link2 className="h-5 w-5 text-blue-400 shrink-0" />;
+          const title = cleanText || domain;
+          return (
+            <a href={href} target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-3 rounded-lg border border-border bg-card hover:bg-muted/50 px-4 py-3 my-2 w-full text-left no-underline transition-colors group">
+              {icon}
+              <div className="flex-1 min-w-0">
+                <span className="text-sm font-medium text-foreground group-hover:text-primary truncate block">{title}</span>
+                <span className="text-xs text-muted-foreground">{domain}</span>
+              </div>
+              <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            </a>
+          );
+        },
+        table({ children }) {
+          return <div className="overflow-x-auto my-4"><table className="min-w-full text-sm border-collapse border border-border">{children}</table></div>;
+        },
+        hr() {
+          return <hr className="border-border my-6" />;
+        },
+      }}
+    >
+      {processed}
+    </ReactMarkdown>
+  );
+}

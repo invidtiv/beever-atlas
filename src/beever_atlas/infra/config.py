@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     use_batch_api: bool = Field(default=False)
     batch_poll_interval_seconds: int = Field(default=15)
     batch_max_wait_seconds: int = Field(default=3600)
-    batch_max_prompt_tokens: int = Field(default=12000)
+    batch_max_prompt_tokens: int = Field(default=6000)
     batch_time_window_seconds: int = Field(default=600)
     fact_max_retries: int = Field(default=3)
     stale_job_threshold_hours: float = Field(default=1.0)

@@ -640,6 +640,128 @@ class Neo4jStore:
             channel_id=channel_id, entity_type="Decision", limit=limit
         )
 
+    async def list_person_entities_with_edges(
+        self, channel_id: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return Person entities with their edge types and connected entity names.
+
+        Each result contains: name, properties, edges list with
+        {type, target_name, target_type} for DECIDED/WORKS_ON/OWNS edges.
+        """
+        query = """
+        MATCH (p:Entity {type: 'Person'})
+        WHERE p.channel_id = $channel_id
+           OR EXISTS { MATCH (p)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }
+        OPTIONAL MATCH (p)-[r]->(t:Entity)
+        WHERE type(r) IN ['DECIDED', 'WORKS_ON', 'OWNS', 'USES']
+        WITH p, collect({
+            type: type(r),
+            target_name: t.name,
+            target_type: t.type
+        }) AS edges
+        RETURN p, edges
+        LIMIT $limit
+        """
+        async with self._driver.session() as session:
+            result = await session.run(query, channel_id=channel_id, limit=limit)
+            records = await result.data()
+        persons: list[dict[str, Any]] = []
+        for row in records:
+            entity = self._entity_from_record(row["p"])
+            edges = [e for e in row.get("edges", []) if e.get("type")]
+            persons.append({
+                "entity": entity,
+                "edges": edges,
+            })
+        return persons
+
+    async def list_technology_entities(
+        self, channel_id: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return Technology entities visible in a channel with USES edges."""
+        query = """
+        MATCH (t:Entity {type: 'Technology'})
+        WHERE t.channel_id = $channel_id
+           OR EXISTS { MATCH (t)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }
+        OPTIONAL MATCH (user:Entity)-[r:USES]->(t)
+        WITH t, collect(user.name) AS used_by
+        RETURN t, used_by
+        LIMIT $limit
+        """
+        async with self._driver.session() as session:
+            result = await session.run(query, channel_id=channel_id, limit=limit)
+            records = await result.data()
+        techs: list[dict[str, Any]] = []
+        for row in records:
+            entity = self._entity_from_record(row["t"])
+            techs.append({
+                "entity": entity,
+                "used_by": row.get("used_by", []),
+            })
+        return techs
+
+    async def list_project_entities(
+        self, channel_id: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return Project entities with BLOCKED_BY/DEPENDS_ON edges."""
+        query = """
+        MATCH (p:Entity {type: 'Project'})
+        WHERE p.channel_id = $channel_id
+           OR EXISTS { MATCH (p)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }
+        OPTIONAL MATCH (p)-[r]->(dep:Entity)
+        WHERE type(r) IN ['BLOCKED_BY', 'DEPENDS_ON']
+        WITH p, collect({type: type(r), target: dep.name}) AS deps
+        OPTIONAL MATCH (owner:Entity)-[:OWNS]->(p)
+        WITH p, deps, collect(owner.name) AS owners
+        RETURN p, deps, owners
+        LIMIT $limit
+        """
+        async with self._driver.session() as session:
+            result = await session.run(query, channel_id=channel_id, limit=limit)
+            records = await result.data()
+        projects: list[dict[str, Any]] = []
+        for row in records:
+            entity = self._entity_from_record(row["p"])
+            deps = [d for d in row.get("deps", []) if d.get("type")]
+            projects.append({
+                "entity": entity,
+                "dependencies": deps,
+                "owners": row.get("owners", []),
+            })
+        return projects
+
+    async def get_decisions_with_chains(
+        self, channel_id: str, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return Decision entities with SUPERSEDES chains and DECIDED-by persons."""
+        query = """
+        MATCH (d:Entity {type: 'Decision'})
+        WHERE d.channel_id = $channel_id
+           OR EXISTS { MATCH (d)-[:MENTIONED_IN]->(ev:Event) WHERE ev.channel_id = $channel_id }
+        OPTIONAL MATCH (person:Entity)-[:DECIDED]->(d)
+        OPTIONAL MATCH (d)-[:SUPERSEDES]->(old:Entity)
+        OPTIONAL MATCH (newer:Entity)-[:SUPERSEDES]->(d)
+        WITH d,
+             collect(DISTINCT person.name) AS decided_by,
+             collect(DISTINCT old.name) AS supersedes,
+             collect(DISTINCT newer.name) AS superseded_by
+        RETURN d, decided_by, supersedes, superseded_by
+        LIMIT $limit
+        """
+        async with self._driver.session() as session:
+            result = await session.run(query, channel_id=channel_id, limit=limit)
+            records = await result.data()
+        decisions: list[dict[str, Any]] = []
+        for row in records:
+            entity = self._entity_from_record(row["d"])
+            decisions.append({
+                "entity": entity,
+                "decided_by": [n for n in row.get("decided_by", []) if n],
+                "supersedes": [n for n in row.get("supersedes", []) if n],
+                "superseded_by": [n for n in row.get("superseded_by", []) if n],
+            })
+        return decisions
+
     async def count_entities(self, channel_id: str | None = None) -> int:
         """Return total entity count, optionally scoped to a channel."""
         params: dict[str, Any] = {}

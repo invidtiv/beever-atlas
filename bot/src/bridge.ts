@@ -391,7 +391,23 @@ class SlackBridge implements PlatformBridge {
     });
   }
 
+  // ── Request queue: serializes Slack file API calls to avoid rate-limit bursts ──
+  private fileRequestQueue: Promise<void> = Promise.resolve();
+  private static readonly FILE_REQUEST_SPACING_MS = 200; // minimum ms between file requests
+
   async proxyFile(fileUrl: string): Promise<{ contentType: string; buffer: Buffer }> {
+    // Serialize file requests to avoid hitting Slack rate limits
+    return new Promise((resolve, reject) => {
+      this.fileRequestQueue = this.fileRequestQueue
+        .then(() => this._proxyFileInner(fileUrl).then(resolve, reject))
+        .then(() => new Promise<void>((r) => setTimeout(r, SlackBridge.FILE_REQUEST_SPACING_MS)));
+    });
+  }
+
+  private async _proxyFileInner(
+    fileUrl: string,
+    retries = 3,
+  ): Promise<{ contentType: string; buffer: Buffer }> {
     const decodedUrl = decodeURIComponent(fileUrl);
     const token = (this.adapter as any).defaultBotToken || (this.adapter as any).getToken();
 
@@ -399,12 +415,21 @@ class SlackBridge implements PlatformBridge {
       headers: { Authorization: `Bearer ${token}` },
     });
 
+    // Retry on 429 with exponential backoff
+    if (response.status === 429 && retries > 0) {
+      const retryAfter = parseInt(response.headers.get("retry-after") || "2", 10);
+      const waitMs = retryAfter * 1000;
+      console.log(`Bridge: Slack rate limited (429), retrying after ${retryAfter}s (${retries} retries left)`);
+      await new Promise((r) => setTimeout(r, waitMs));
+      return this._proxyFileInner(fileUrl, retries - 1);
+    }
+
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/html") && decodedUrl.includes("files-pri")) {
       console.log("Bridge: fileProxy got HTML, trying files.sharedPublicURL fallback");
-      const match = decodedUrl.match(/files-pri\/[^/]+-([^/]+)\//);
+      const match = decodedUrl.match(/files-pri\/[^/]+-(F[^/]+)\//);
       if (match) {
-        const fileId = `F${match[1]}`;
+        const fileId = match[1];
         try {
           const fileInfo = await (this.adapter as any).client.files.info({ file: fileId });
           const downloadUrl = fileInfo.file?.url_private_download || fileInfo.file?.url_private;
@@ -412,6 +437,13 @@ class SlackBridge implements PlatformBridge {
             response = await fetch(downloadUrl, {
               headers: { Authorization: `Bearer ${token}` },
             });
+            // Retry on 429 for fallback URL too
+            if (response.status === 429 && retries > 0) {
+              const retryAfter = parseInt(response.headers.get("retry-after") || "2", 10);
+              console.log(`Bridge: Slack rate limited on fallback (429), retrying after ${retryAfter}s`);
+              await new Promise((r) => setTimeout(r, retryAfter * 1000));
+              return this._proxyFileInner(fileUrl, retries - 1);
+            }
           }
         } catch (e) {
           console.log("Bridge: files.info fallback failed:", e);

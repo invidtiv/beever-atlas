@@ -123,6 +123,16 @@ class ConsolidationService:
             logger.error("Consolidation error for %s: %s", channel_id, exc, exc_info=True)
             result.errors.append(str(exc))
 
+        # Mark wiki as stale after consolidation
+        try:
+            from beever_atlas.infra.config import get_settings
+            from beever_atlas.wiki.cache import WikiCache
+            settings = get_settings()
+            cache = WikiCache(settings.mongodb_uri)
+            await cache.mark_stale(channel_id)
+        except Exception:
+            logger.warning("Failed to mark wiki stale for channel %s", channel_id)
+
         return result
 
     async def full_reconsolidate(

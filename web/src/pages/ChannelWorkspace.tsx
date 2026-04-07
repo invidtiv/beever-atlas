@@ -102,7 +102,7 @@ export function ChannelWorkspace() {
   }
 
   const isMember = channel?.is_member === true;
-  const { syncState, triggerSync, isSyncing, error: syncError } = useSync(id ?? "");
+  const { syncState, triggerSync, isSyncing, error: syncError } = useSync(id ?? "", channel?.connection_id ?? null);
   const syncFailureMessage =
     syncError || (syncState.state === "error" ? syncState.errors?.filter(Boolean).join("; ") : null);
   const syncCompletedWithNoNew =
