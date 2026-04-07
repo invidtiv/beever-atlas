@@ -17,20 +17,22 @@ export function SummaryCard({ summary }: SummaryCardProps) {
           </h3>
         </div>
         <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 text-primary text-sm font-medium w-fit">
-          {summary.message_count.toLocaleString()} messages
+          {summary.message_count.toLocaleString()} facts
         </div>
       </div>
       <p className="mt-4 text-base text-foreground/85 leading-relaxed">
         {summary.summary}
       </p>
-      <p className="mt-4 text-sm text-muted-foreground">
-        Updated{" "}
-        {updatedDate.toLocaleDateString(undefined, {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        })}
-      </p>
+      {summary.updated_at && (
+        <p className="mt-4 text-sm text-muted-foreground">
+          Updated{" "}
+          {updatedDate.toLocaleDateString(undefined, {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          })}
+        </p>
+      )}
     </div>
   );
 }

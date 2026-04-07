@@ -294,6 +294,7 @@ class SlackBridge implements PlatformBridge {
                 : "file",
             url: f.url_private_download || f.url_private || f.permalink,
             name: f.name || f.title,
+            mimetype: f.mimetype || "",
           })),
           ...(msg.attachments || [])
             .filter((a: any) => a.image_url && !a.from_url && !a.original_url)
@@ -301,6 +302,7 @@ class SlackBridge implements PlatformBridge {
               type: "image" as const,
               url: a.image_url,
               name: a.title || a.fallback || "Image",
+              mimetype: "image/png",
             })),
         ],
         reactions: (msg.reactions || []).map((r: any) => ({
@@ -375,6 +377,7 @@ class SlackBridge implements PlatformBridge {
           type: f.mimetype?.startsWith("image/") ? "image" : "file",
           url: f.url_private,
           name: f.name,
+          mimetype: f.mimetype || "",
         })),
         reactions: (msg.reactions || []).map((r: any) => ({
           name: r.name,
@@ -609,6 +612,7 @@ class DiscordBridge implements PlatformBridge {
               : "file",
           url: a.url,
           name: a.filename,
+          mimetype: a.content_type || "",
         })),
         reactions: (m.reactions ?? []).map((r: any) => ({
           name: r.emoji?.name || r.emoji?.id || "?",

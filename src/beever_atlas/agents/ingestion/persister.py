@@ -1,4 +1,4 @@
-"""Stage 7: PersisterAgent — write embedded facts and validated entities to all stores.
+"""Stage 6: PersisterAgent — write embedded facts and validated entities to all stores.
 
 Reads:
   - ``session.state["embedded_facts"]``     (from EmbedderAgent)
@@ -15,6 +15,7 @@ any writes that fail before completion.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, AsyncGenerator
 
@@ -42,6 +43,11 @@ class PersisterAgent(BaseAgent):
         ctx: InvocationContext,
     ) -> AsyncGenerator[Event, None]:
         """Execute the full persistence sequence and write ``persist_result``."""
+        from beever_atlas.agents.callbacks.checkpoint_skip import should_skip_stage
+        if should_skip_stage(ctx.session.state, "persist_result", self.name):
+            yield Event(author=self.name, invocation_id=ctx.invocation_id)
+            return
+
         sync_job_id = ctx.session.state.get("sync_job_id", "unknown")
         channel_id = ctx.session.state.get("channel_id", "unknown")
         batch_num = ctx.session.state.get("batch_num", "?")
@@ -83,10 +89,16 @@ class PersisterAgent(BaseAgent):
         )
         media_lookup: dict[str, dict[str, Any]] = {}
         for pm in preprocessed_messages:
-            for key in ("ts", "message_id", "source_message_id"):
+            for key in ("msg_id", "ts", "message_id", "source_message_id"):
                 val = pm.get(key)
                 if val and val not in media_lookup:
                     media_lookup[val] = pm
+
+        logger.info(
+            "PersisterAgent: media lookup keys=%s, mixed_msgs=%d",
+            list(media_lookup.keys())[:10],
+            sum(1 for pm in preprocessed_messages if pm.get("source_media_urls")),
+        )
 
         # --- 3. Convert dicts to Pydantic models ---
         facts: list[AtomicFact] = []
@@ -100,12 +112,48 @@ class PersisterAgent(BaseAgent):
             fact_data["channel_id"] = fact_channel_id
 
             # Join media provenance from preprocessed message
+            src_msg_id = fd.get("source_message_id", "")
+            src_msg_ts = fd.get("message_ts", "")
             source_msg = (
-                media_lookup.get(fd.get("source_message_id", ""))
-                or media_lookup.get(fd.get("message_ts", ""))
+                media_lookup.get(src_msg_id)
+                or media_lookup.get(src_msg_ts)
             )
+            # Fallback: content-based matching when LLM doesn't output source_message_id
+            if not source_msg:
+                fact_text_lower = (fd.get("memory_text", "")).lower()
+
+                # Pass 1: URL matching — if the fact text contains a URL from a message
+                for pm in preprocessed_messages:
+                    for url in (pm.get("source_link_urls") or []):
+                        if url.lower() in fact_text_lower:
+                            source_msg = pm
+                            break
+                    if source_msg:
+                        break
+
+            if not source_msg:
+                fact_text_lower = (fd.get("memory_text", "")).lower()
+                # Pass 2: word overlap matching
+                best_match = None
+                best_score = 0
+                for pm in preprocessed_messages:
+                    pm_text = (pm.get("text", "")).lower()
+                    pm_words = set(w for w in pm_text.split() if len(w) > 3)
+                    fact_words = set(w for w in fact_text_lower.split() if len(w) > 3)
+                    overlap = len(pm_words & fact_words)
+                    if overlap > best_score:
+                        best_score = overlap
+                        best_match = pm
+                if best_match and best_score >= 3:
+                    source_msg = best_match
+
             if source_msg:
                 media_urls = source_msg.get("source_media_urls") or []
+                if media_urls:
+                    logger.info(
+                        "PersisterAgent: fact[%d] matched media_urls=%d media_type=%s",
+                        idx, len(media_urls), source_msg.get("source_media_type", ""),
+                    )
                 fact_data["source_media_urls"] = media_urls
                 fact_data["source_media_url"] = media_urls[0] if media_urls else ""
                 fact_data["source_media_type"] = source_msg.get("source_media_type", "")
@@ -114,6 +162,12 @@ class PersisterAgent(BaseAgent):
                 fact_data["source_link_urls"] = source_msg.get("source_link_urls") or []
                 fact_data["source_link_titles"] = source_msg.get("source_link_titles") or []
                 fact_data["source_link_descriptions"] = source_msg.get("source_link_descriptions") or []
+
+            # Normalize fact_type from LLM output
+            raw_type = str(fact_data.get("fact_type", "")).lower().strip()
+            valid_types = {"decision", "opinion", "observation", "action_item", "question"}
+            fact_data["fact_type"] = raw_type if raw_type in valid_types else "observation" if raw_type else ""
+            # Pass through thread_context_summary as-is (already a string)
 
             fact = AtomicFact(id=fact_id, **fact_data)
             facts.append(fact)
@@ -150,53 +204,39 @@ class PersisterAgent(BaseAgent):
             relationships.append(rel)
 
         persist_errors: list[str] = []
+        skip_graph = ctx.session.state.get("skip_graph_writes", False)
 
-        # --- 3. Batch upsert facts to Weaviate ---
-        weaviate_ids: list[str] = []
-        if facts:
-            try:
-                weaviate_ids = await stores.weaviate.batch_upsert_facts(facts)
-                logger.info(
-                    "PersisterAgent: weaviate upsert job_id=%s channel=%s batch=%s facts=%d",
-                    sync_job_id,
-                    channel_id,
-                    batch_num,
-                    len(weaviate_ids),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "PersisterAgent: weaviate failed job_id=%s channel=%s batch=%s: %s",
-                    sync_job_id,
-                    channel_id,
-                    batch_num,
-                    exc,
-                )
-                persist_errors.append(f"weaviate: {exc}")
-        try:
+        # --- 3. Parallel upsert to Weaviate and Neo4j ---
+        async def _upsert_weaviate() -> list[str]:
+            if not facts:
+                return []
+            ids = await stores.weaviate.batch_upsert_facts(facts)
+            logger.info(
+                "PersisterAgent: weaviate upsert job_id=%s channel=%s batch=%s facts=%d",
+                sync_job_id, channel_id, batch_num, len(ids),
+            )
             await stores.mongodb.mark_intent_weaviate_done(intent_id)
-        except Exception:  # noqa: BLE001
-            pass  # reconciler handles this
+            return ids
 
-        # --- 4. Batch upsert entities and relationships to Neo4j ---
-        try:
-            if entities:
-                await stores.graph.batch_upsert_entities(entities)
+        async def _upsert_graph() -> None:
+            if skip_graph:
                 logger.info(
-                    "PersisterAgent: neo4j entity upsert job_id=%s channel=%s batch=%s entities=%d",
-                    sync_job_id,
-                    channel_id,
-                    batch_num,
-                    len(entities),
+                    "PersisterAgent: skip_graph_writes=true, skipping graph upserts job_id=%s channel=%s batch=%s",
+                    sync_job_id, channel_id, batch_num,
                 )
-            if relationships:
-                await stores.graph.batch_upsert_relationships(relationships)
-                logger.info(
-                    "PersisterAgent: neo4j relationship upsert job_id=%s channel=%s batch=%s relationships=%d",
-                    sync_job_id,
-                    channel_id,
-                    batch_num,
-                    len(relationships),
-                )
+            else:
+                if entities:
+                    await stores.graph.batch_upsert_entities(entities)
+                    logger.info(
+                        "PersisterAgent: neo4j entity upsert job_id=%s channel=%s batch=%s entities=%d",
+                        sync_job_id, channel_id, batch_num, len(entities),
+                    )
+                if relationships:
+                    await stores.graph.batch_upsert_relationships(relationships)
+                    logger.info(
+                        "PersisterAgent: neo4j relationship upsert job_id=%s channel=%s batch=%s relationships=%d",
+                        sync_job_id, channel_id, batch_num, len(relationships),
+                    )
                 # Store name_vectors on Neo4j entity nodes
                 for entity in entities:
                     if entity.name_vector:
@@ -205,80 +245,112 @@ class PersisterAgent(BaseAgent):
                                 entity.name, entity.name_vector
                             )
                         except Exception:  # noqa: BLE001
-                            pass  # Best effort
-                # Promote pending entities that now have relationships
-                rel_entity_names: set[str] = set()
-                for rel in relationships:
-                    rel_entity_names.add(rel.source)
-                    rel_entity_names.add(rel.target)
-                for name in rel_entity_names:
-                    try:
-                        await stores.graph.promote_pending_entity(name)
-                    except Exception:  # noqa: BLE001
-                        pass  # Best effort — entity may not be pending
-        except Exception as exc:  # noqa: BLE001
+                            logger.warning("PersisterAgent: store_name_vector failed for %s", entity.name, exc_info=True)
+            await stores.mongodb.mark_intent_neo4j_done(intent_id)
+
+        weaviate_ids: list[str] = []
+        results = await asyncio.gather(
+            _upsert_weaviate(), _upsert_graph(), return_exceptions=True,
+        )
+
+        # Handle Weaviate result
+        if isinstance(results[0], BaseException):
+            logger.error(
+                "PersisterAgent: weaviate failed job_id=%s channel=%s batch=%s: %s",
+                sync_job_id, channel_id, batch_num, results[0],
+            )
+            persist_errors.append(f"weaviate: {results[0]}")
+        else:
+            weaviate_ids = results[0]
+
+        # Handle Neo4j result
+        if isinstance(results[1], BaseException):
             logger.error(
                 "PersisterAgent: neo4j failed job_id=%s channel=%s batch=%s: %s",
-                sync_job_id,
-                channel_id,
-                batch_num,
-                exc,
+                sync_job_id, channel_id, batch_num, results[1],
             )
-            persist_errors.append(f"neo4j: {exc}")
-        try:
-            await stores.mongodb.mark_intent_neo4j_done(intent_id)
-        except Exception:  # noqa: BLE001
-            pass  # reconciler handles this
+            persist_errors.append(f"neo4j: {results[1]}")
 
-        # --- 4b. Reconcile entity_tags: create stub entities for missing names ---
-        # Facts are ground truth. If a fact references an entity in entity_tags
-        # that the entity extractor didn't create (e.g., due to the orphan rule),
-        # we create a minimal stub entity so episodic + media links succeed.
-        all_tag_names: set[str] = set()
-        for f in facts:
-            all_tag_names.update(f.entity_tags)
-        extracted_names: set[str] = {e.name for e in entities}
-        missing_names = all_tag_names - extracted_names
-        if missing_names:
-            # Check which of these already exist in the graph from prior batches
-            for name in list(missing_names):
-                existing = await stores.graph.find_entity_by_name(name)
-                if existing is not None:
-                    missing_names.discard(name)
-            # Create stub entities for truly missing names
-            for name in missing_names:
-                stub = GraphEntity(
-                    name=name,
-                    type="Project",
-                    scope="global",
-                    properties={"stub": True},
-                    source_message_id=facts[0].source_message_id if facts else "",
-                    message_ts=facts[0].message_ts if facts else "",
-                )
-                await stores.graph.upsert_entity(stub)
+        # --- 4. Reconcile entity_tags: create stub entities for missing names ---
+        if not skip_graph:
+            all_tag_names: set[str] = set()
+            for f in facts:
+                all_tag_names.update(f.entity_tags)
+            extracted_names: set[str] = {e.name for e in entities}
+            missing_names = all_tag_names - extracted_names
             if missing_names:
-                logger.info(
-                    "PersisterAgent: created %d stub entities job_id=%s channel=%s batch=%s names=%s",
-                    len(missing_names),
-                    sync_job_id,
-                    channel_id,
-                    batch_num,
-                    list(missing_names)[:5],
-                )
+                try:
+                    existing_names = await stores.graph.batch_find_entities_by_name(list(missing_names))
+                    missing_names -= existing_names
+                except Exception:  # noqa: BLE001
+                    logger.warning("PersisterAgent: batch_find_entities_by_name failed", exc_info=True)
+                # Create stub entities for truly missing names
+                stubs: list[GraphEntity] = []
+                for name in missing_names:
+                    stubs.append(GraphEntity(
+                        name=name,
+                        type="Project",
+                        scope="global",
+                        properties={"stub": True},
+                        source_message_id=facts[0].source_message_id if facts else "",
+                        message_ts=facts[0].message_ts if facts else "",
+                    ))
+                if stubs:
+                    try:
+                        await stores.graph.batch_upsert_entities(stubs)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("PersisterAgent: stub entity creation failed", exc_info=True)
+                if missing_names:
+                    logger.info(
+                        "PersisterAgent: created %d stub entities job_id=%s channel=%s batch=%s names=%s",
+                        len(missing_names), sync_job_id, channel_id, batch_num,
+                        list(missing_names)[:5],
+                    )
 
-        # --- 5. Create episodic links (entity → Event → weaviate_fact_id) ---
+        # --- 5. Batch promote pending entities that now have relationships ---
+        if not skip_graph and relationships:
+            rel_entity_names: set[str] = set()
+            for rel in relationships:
+                rel_entity_names.add(rel.source)
+                rel_entity_names.add(rel.target)
+            try:
+                promoted = await stores.graph.batch_promote_pending(list(rel_entity_names))
+                if promoted:
+                    logger.info("PersisterAgent: promoted %d pending entities", promoted)
+            except Exception:  # noqa: BLE001
+                logger.warning("PersisterAgent: batch_promote_pending failed", exc_info=True)
+
+        # --- 6. Batch episodic links ---
+        episodic_links: list[dict[str, Any]] = []
         for fact, weaviate_id in zip(facts, weaviate_ids, strict=True):
+            if skip_graph:
+                break
             for entity_name in fact.entity_tags:
-                await stores.graph.create_episodic_link(
-                    entity_name=entity_name,
-                    weaviate_fact_id=weaviate_id,
-                    message_ts=fact.message_ts,
-                    channel_id=fact.channel_id,
-                    media_urls=fact.source_media_urls,
-                    link_urls=fact.source_link_urls,
-                )
+                episodic_links.append({
+                    "entity_name": entity_name,
+                    "weaviate_fact_id": weaviate_id,
+                    "message_ts": fact.message_ts,
+                    "channel_id": fact.channel_id,
+                    "media_urls": fact.source_media_urls or [],
+                    "link_urls": fact.source_link_urls or [],
+                })
 
-            # --- 5b. Create Media nodes and link entities to them ---
+        if episodic_links and not skip_graph:
+            try:
+                ep_count = await stores.graph.batch_create_episodic_links(episodic_links)
+                logger.info(
+                    "PersisterAgent: created %d episodic links (batch) job_id=%s channel=%s batch=%s",
+                    ep_count, sync_job_id, channel_id, batch_num,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("PersisterAgent: batch episodic links failed", exc_info=True)
+
+        # --- 7. Batch media nodes and entity-media links ---
+        media_items: list[dict[str, Any]] = []
+        entity_media_links: list[dict[str, Any]] = []
+        for fact, weaviate_id in zip(facts, weaviate_ids, strict=True):
+            if skip_graph:
+                break
             all_media_urls = [
                 (url, fact.source_media_type or "file")
                 for url in (fact.source_media_urls or [])
@@ -287,39 +359,47 @@ class PersisterAgent(BaseAgent):
                 for url in (fact.source_link_urls or [])
             ]
             for url, mtype in all_media_urls:
-                # Find a meaningful title for this media
                 title = ""
                 if mtype == "link":
                     idx = (fact.source_link_urls or []).index(url) if url in (fact.source_link_urls or []) else -1
                     if idx >= 0 and idx < len(fact.source_link_titles or []):
                         title = fact.source_link_titles[idx]
                     if not title:
-                        # Derive readable name from URL
                         try:
                             parts = url.split("//")[-1].split("/")
                             title = "/".join(parts[:3]) if len(parts) > 2 else parts[0]
                         except Exception:
                             title = url
                 else:
-                    # Use original attachment name from Slack
-                    media_urls = fact.source_media_urls or []
+                    media_urls_list = fact.source_media_urls or []
                     media_names = fact.source_media_names or []
-                    if url in media_urls:
-                        idx = media_urls.index(url)
+                    if url in media_urls_list:
+                        idx = media_urls_list.index(url)
                         if idx < len(media_names) and media_names[idx]:
                             title = media_names[idx]
-                await stores.graph.upsert_media(
-                    url=url,
-                    media_type=mtype,
-                    title=title,
-                    channel_id=fact.channel_id,
-                    message_ts=fact.message_ts,
-                )
+                media_items.append({
+                    "url": url,
+                    "media_type": mtype,
+                    "title": title,
+                    "channel_id": fact.channel_id,
+                    "message_ts": fact.message_ts,
+                })
                 for entity_name in fact.entity_tags:
-                    await stores.graph.link_entity_to_media(
-                        entity_name=entity_name,
-                        media_url=url,
-                    )
+                    entity_media_links.append({
+                        "entity_name": entity_name,
+                        "media_url": url,
+                    })
+
+        if media_items and not skip_graph:
+            try:
+                await stores.graph.batch_upsert_media(media_items)
+            except Exception:  # noqa: BLE001
+                logger.warning("PersisterAgent: batch_upsert_media failed", exc_info=True)
+        if entity_media_links and not skip_graph:
+            try:
+                await stores.graph.batch_link_entities_to_media(entity_media_links)
+            except Exception:  # noqa: BLE001
+                logger.warning("PersisterAgent: batch_link_entities_to_media failed", exc_info=True)
 
         # --- 6. Mark intent fully complete ---
         await stores.mongodb.mark_intent_complete(intent_id)

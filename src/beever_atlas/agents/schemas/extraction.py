@@ -36,6 +36,12 @@ class ExtractedFact(BaseModel):
     message_ts: str = ""
     """ISO-8601 or Slack epoch timestamp of the source message."""
 
+    fact_type: str = "observation"
+    """One of: "decision", "opinion", "observation", "action_item", "question"."""
+
+    thread_context_summary: str = ""
+    """Brief summary of thread deliberation arc when fact comes from a threaded discussion."""
+
 
 class FactExtractionResult(BaseModel):
     """Top-level LLM output for one batch of preprocessed messages."""

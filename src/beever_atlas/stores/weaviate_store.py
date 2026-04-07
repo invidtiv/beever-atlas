@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import weaviate
 from weaviate.classes.config import Configure, DataType, Property
 from weaviate.classes.query import Filter
 
 from beever_atlas.models import AtomicFact, MemoryFilters, PaginatedFacts
+
+if TYPE_CHECKING:
+    from beever_atlas.models.domain import ChannelSummary, EntityKnowledgeCard, TopicCluster
 
 COLLECTION_NAME = "MemoryFact"
 logger = logging.getLogger(__name__)
@@ -34,18 +39,26 @@ class WeaviateStore:
         """Connect to Weaviate and ensure schema exists."""
 
         def _connect() -> weaviate.WeaviateClient:
-            if self._url in ("http://localhost:8080", "http://127.0.0.1:8080", "localhost"):
-                return weaviate.connect_to_local()
+            from urllib.parse import urlparse
+
+            parsed = urlparse(self._url)
+            host = parsed.hostname or "localhost"
+            port = parsed.port or (443 if parsed.scheme == "https" else 8080)
+            secure = parsed.scheme == "https"
+
+            if host in ("localhost", "127.0.0.1") and not secure:
+                return weaviate.connect_to_local(port=port, grpc_port=50051)
+
             headers: dict[str, str] = {}
             if self._api_key:
                 headers["X-Weaviate-Api-Key"] = self._api_key
             return weaviate.connect_to_custom(
-                http_host=self._url,
-                http_port=443,
-                http_secure=True,
-                grpc_host=self._url,
+                http_host=host,
+                http_port=port,
+                http_secure=secure,
+                grpc_host=host,
                 grpc_port=50051,
-                grpc_secure=True,
+                grpc_secure=secure,
                 headers=headers,
             )
 
@@ -87,6 +100,41 @@ class WeaviateStore:
         ("superseded_by", DataType.TEXT),
         ("supersedes", DataType.TEXT),
         ("potential_contradiction", DataType.BOOL),
+        ("member_ids", DataType.TEXT_ARRAY),
+        ("member_count", DataType.INT),
+        ("fact_type", DataType.TEXT),
+        ("thread_context_summary", DataType.TEXT),
+        ("source_media_names", DataType.TEXT_ARRAY),
+        # Enrichment fields (R4)
+        ("authors", DataType.TEXT_ARRAY),
+        ("date_range_start", DataType.TEXT),
+        ("date_range_end", DataType.TEXT),
+        ("high_importance_count", DataType.INT),
+        ("key_entities_json", DataType.TEXT),
+        ("key_relationships_json", DataType.TEXT),
+        ("key_decisions_json", DataType.TEXT),
+        ("key_topics_json", DataType.TEXT),
+        ("media_refs", DataType.TEXT_ARRAY),
+        ("media_names", DataType.TEXT_ARRAY),
+        ("link_refs", DataType.TEXT_ARRAY),
+        ("author_count", DataType.INT),
+        ("media_count", DataType.INT),
+        ("related_cluster_ids", DataType.TEXT_ARRAY),
+        ("staleness_score", DataType.NUMBER),
+        ("status", DataType.TEXT),
+        ("fact_type_counts_json", DataType.TEXT),
+        ("worst_staleness", DataType.NUMBER),
+        # EntityKnowledgeCard fields
+        ("entity_id", DataType.TEXT),
+        ("entity_name", DataType.TEXT),
+        ("entity_type", DataType.TEXT),
+        ("channel_ids", DataType.TEXT_ARRAY),
+        ("cluster_ids", DataType.TEXT_ARRAY),
+        ("fact_count", DataType.INT),
+        ("fact_type_breakdown_json", DataType.TEXT),
+        ("key_facts", DataType.TEXT_ARRAY),
+        ("related_entities_json", DataType.TEXT),
+        ("last_mentioned_at", DataType.TEXT),
     ]
 
     async def ensure_schema(self) -> None:
@@ -143,24 +191,8 @@ class WeaviateStore:
             vectorizer_config=Configure.Vectorizer.none(),
             vector_index_config=Configure.VectorIndex.hnsw(),
             properties=[
-                Property(name="memory_text", data_type=DataType.TEXT),
-                Property(name="quality_score", data_type=DataType.NUMBER),
-                Property(name="tier", data_type=DataType.TEXT),
-                Property(name="cluster_id", data_type=DataType.TEXT),
-                Property(name="channel_id", data_type=DataType.TEXT),
-                Property(name="platform", data_type=DataType.TEXT),
-                Property(name="author_id", data_type=DataType.TEXT),
-                Property(name="author_name", data_type=DataType.TEXT),
-                Property(name="message_ts", data_type=DataType.TEXT),
-                Property(name="thread_ts", data_type=DataType.TEXT),
-                Property(name="source_message_id", data_type=DataType.TEXT),
-                Property(name="topic_tags", data_type=DataType.TEXT_ARRAY),
-                Property(name="entity_tags", data_type=DataType.TEXT_ARRAY),
-                Property(name="action_tags", data_type=DataType.TEXT_ARRAY),
-                Property(name="importance", data_type=DataType.TEXT),
-                Property(name="graph_entity_ids", data_type=DataType.TEXT_ARRAY),
-                Property(name="valid_at", data_type=DataType.DATE),
-                Property(name="invalid_at", data_type=DataType.DATE),
+                Property(name=name, data_type=dtype)
+                for name, dtype in self._EXPECTED_PROPERTIES
             ],
         )
 
@@ -196,7 +228,7 @@ class WeaviateStore:
             "memory_text": fact.memory_text,
             "quality_score": fact.quality_score,
             "tier": fact.tier,
-            "cluster_id": fact.cluster_id or "",
+            "cluster_id": fact.cluster_id or "__none__",
             "channel_id": fact.channel_id,
             "platform": fact.platform,
             "author_id": fact.author_id,
@@ -215,6 +247,9 @@ class WeaviateStore:
             "source_link_urls": fact.source_link_urls,
             "source_link_titles": fact.source_link_titles,
             "source_link_descriptions": fact.source_link_descriptions,
+            "fact_type": fact.fact_type,
+            "thread_context_summary": fact.thread_context_summary,
+            "source_media_names": fact.source_media_names,
         }
         # Supersession fields
         if fact.superseded_by:
@@ -232,10 +267,10 @@ class WeaviateStore:
         return props
 
     @staticmethod
-    def _obj_to_fact(obj: Any) -> AtomicFact:
+    def _obj_to_fact(obj: Any, include_vector: bool = False) -> AtomicFact:
         """Convert a Weaviate data object back to an AtomicFact."""
         props = obj.properties
-        return AtomicFact(
+        fact = AtomicFact(
             id=str(obj.uuid),
             memory_text=props.get("memory_text", ""),
             quality_score=float(props.get("quality_score", 0.0)),
@@ -256,15 +291,24 @@ class WeaviateStore:
             source_media_url=props.get("source_media_url", ""),
             source_media_type=props.get("source_media_type", ""),
             source_media_urls=props.get("source_media_urls") or [],
+            source_media_names=props.get("source_media_names") or [],
             source_link_urls=props.get("source_link_urls") or [],
             source_link_titles=props.get("source_link_titles") or [],
             source_link_descriptions=props.get("source_link_descriptions") or [],
+            fact_type=props.get("fact_type", ""),
+            thread_context_summary=props.get("thread_context_summary", ""),
             valid_at=props.get("valid_at"),
             invalid_at=props.get("invalid_at"),
             superseded_by=props.get("superseded_by") or None,
             supersedes=props.get("supersedes") or None,
             potential_contradiction=bool(props.get("potential_contradiction")),
         )
+        if include_vector and hasattr(obj, "vector") and obj.vector:
+            vec = obj.vector
+            if isinstance(vec, dict):
+                vec = vec.get("default", [])
+            fact.text_vector = vec
+        return fact
 
     # ------------------------------------------------------------------
     # Write operations
@@ -405,7 +449,10 @@ class WeaviateStore:
             collection = self._collection()
 
             # Build filter chain starting with channel_id (always required)
-            weaviate_filter: Any = Filter.by_property("channel_id").equal(channel_id)
+            weaviate_filter: Any = (
+                Filter.by_property("channel_id").equal(channel_id)
+                & Filter.by_property("tier").equal("atomic")
+            )
 
             if filters.topic:
                 weaviate_filter = weaviate_filter & Filter.by_property("topic_tags").contains_any(
@@ -462,10 +509,11 @@ class WeaviateStore:
 
         def _count() -> int:
             collection = self._collection()
+            tier_filter = Filter.by_property("tier").equal("atomic")
             weaviate_filter = (
-                Filter.by_property("channel_id").equal(channel_id)
+                Filter.by_property("channel_id").equal(channel_id) & tier_filter
                 if channel_id
-                else None
+                else tier_filter
             )
             result = collection.aggregate.over_all(
                 filters=weaviate_filter,
@@ -476,11 +524,14 @@ class WeaviateStore:
         return await asyncio.to_thread(_count)
 
     async def delete_by_channel(self, channel_id: str) -> int:
-        """Delete all facts for a given channel. Returns count of deleted objects."""
+        """Delete all objects for a channel (facts, clusters, summaries).
+
+        Returns count of deleted objects.
+        """
 
         def _delete() -> int:
             collection = self._collection()
-            # Fetch all objects matching the channel, then delete by ID.
+            # Delete ALL tiers for this channel — atomic facts, topic clusters, summaries
             result = collection.query.fetch_objects(
                 filters=Filter.by_property("channel_id").equal(channel_id),
                 limit=10000,
@@ -491,6 +542,19 @@ class WeaviateStore:
             return len(ids)
 
         return await asyncio.to_thread(_delete)
+
+    async def delete_all(self) -> int:
+        """Delete ALL objects in the collection. Dev/reset use only."""
+
+        def _delete_all() -> int:
+            collection = self._collection()
+            result = collection.query.fetch_objects(limit=10000)
+            ids = [obj.uuid for obj in result.objects]
+            for uid in ids:
+                collection.data.delete_by_id(uuid=uid)
+            return len(ids)
+
+        return await asyncio.to_thread(_delete_all)
 
     # ------------------------------------------------------------------
     # Semantic search
@@ -523,6 +587,12 @@ class WeaviateStore:
                 weaviate_filter = (
                     weaviate_filter & no_superseded if weaviate_filter else no_superseded
                 )
+
+            # Exclude cluster/summary objects from fact search
+            tier_filter = Filter.by_property("tier").equal("atomic")
+            weaviate_filter = (
+                weaviate_filter & tier_filter if weaviate_filter else tier_filter
+            )
 
             result = collection.query.near_vector(
                 near_vector=query_vector,
@@ -672,3 +742,451 @@ class WeaviateStore:
             return facts
 
         return await asyncio.to_thread(_fetch)
+
+    # ------------------------------------------------------------------
+    # Cluster / summary operations (Tier 0 + Tier 1)
+    # ------------------------------------------------------------------
+
+    async def get_unclustered_facts(
+        self, channel_id: str, limit: int = 1000,
+    ) -> list[AtomicFact]:
+        """Fetch atomic facts that have no cluster assignment, with vectors."""
+
+        def _fetch() -> list[AtomicFact]:
+            collection = self._collection()
+            from weaviate.classes.query import MetadataQuery
+
+            # Unclustered facts have cluster_id set to "__none__" sentinel.
+            # Cannot use "" (stopword) or is_none (requires indexNullState).
+            weaviate_filter = (
+                Filter.by_property("channel_id").equal(channel_id)
+                & Filter.by_property("tier").equal("atomic")
+                & Filter.by_property("cluster_id").equal("__none__")
+            )
+            result = collection.query.fetch_objects(
+                filters=weaviate_filter,
+                limit=limit,
+                include_vector=True,
+            )
+            return [self._obj_to_fact(obj, include_vector=True) for obj in result.objects]
+
+        return await asyncio.to_thread(_fetch)
+
+    async def upsert_cluster(self, cluster: "TopicCluster") -> str:
+        """Upsert a topic cluster as a MemoryFact with tier='topic'."""
+        from beever_atlas.models.domain import TopicCluster
+
+        def _upsert() -> str:
+            collection = self._collection()
+            props: dict[str, Any] = {
+                "memory_text": cluster.summary,
+                "tier": "topic",
+                "cluster_id": "",
+                "channel_id": cluster.channel_id,
+                "topic_tags": cluster.topic_tags,
+                "member_ids": cluster.member_ids,
+                "member_count": cluster.member_count,
+                "platform": "",
+                "author_id": "",
+                "author_name": "",
+                "message_ts": "",
+                "thread_ts": "",
+                "source_message_id": "",
+                "entity_tags": [],
+                "action_tags": [],
+                "importance": "",
+                "graph_entity_ids": [],
+                "source_media_url": "",
+                "source_media_type": "",
+                "source_media_urls": [],
+                "source_link_urls": [],
+                "source_link_titles": [],
+                "source_link_descriptions": [],
+                "quality_score": 0.0,
+                "potential_contradiction": False,
+                # Enrichment fields (R4)
+                "authors": cluster.authors,
+                "date_range_start": cluster.date_range_start,
+                "date_range_end": cluster.date_range_end,
+                "high_importance_count": cluster.high_importance_count,
+                "key_entities_json": json.dumps(cluster.key_entities),
+                "key_relationships_json": json.dumps(cluster.key_relationships),
+                "media_refs": cluster.media_refs,
+                "media_names": cluster.media_names,
+                "link_refs": cluster.link_refs,
+                "related_cluster_ids": cluster.related_cluster_ids,
+                "staleness_score": cluster.staleness_score,
+                "status": cluster.status,
+                "fact_type_counts_json": json.dumps(cluster.fact_type_counts),
+            }
+            try:
+                collection.data.insert(
+                    properties=props,
+                    uuid=cluster.id,
+                    vector=cluster.centroid_vector or None,
+                )
+            except Exception:
+                # Object already exists — update it
+                collection.data.replace(
+                    properties=props,
+                    uuid=cluster.id,
+                    vector=cluster.centroid_vector or None,
+                )
+            return cluster.id
+
+        return await asyncio.to_thread(_upsert)
+
+    async def list_clusters(self, channel_id: str) -> list["TopicCluster"]:
+        """List all topic clusters for a channel, with centroid vectors."""
+        from beever_atlas.models import TopicCluster
+
+        def _list() -> list[TopicCluster]:
+            collection = self._collection()
+            result = collection.query.fetch_objects(
+                filters=(
+                    Filter.by_property("channel_id").equal(channel_id)
+                    & Filter.by_property("tier").equal("topic")
+                ),
+                limit=500,
+                include_vector=True,
+            )
+            clusters: list[TopicCluster] = []
+            for obj in result.objects:
+                props = obj.properties
+                vec = obj.vector
+                if isinstance(vec, dict):
+                    vec = vec.get("default", [])
+                clusters.append(TopicCluster(
+                    id=str(obj.uuid),
+                    channel_id=props.get("channel_id", ""),
+                    summary=props.get("memory_text", ""),
+                    topic_tags=props.get("topic_tags") or [],
+                    member_ids=props.get("member_ids") or [],
+                    member_count=int(props.get("member_count", 0)),
+                    centroid_vector=vec if vec else None,
+                    key_entities=json.loads(props.get("key_entities_json") or "[]"),
+                    key_relationships=json.loads(props.get("key_relationships_json") or "[]"),
+                    date_range_start=props.get("date_range_start", ""),
+                    date_range_end=props.get("date_range_end", ""),
+                    authors=props.get("authors") or [],
+                    media_refs=props.get("media_refs") or [],
+                    media_names=props.get("media_names") or [],
+                    link_refs=props.get("link_refs") or [],
+                    high_importance_count=int(props.get("high_importance_count", 0)),
+                    related_cluster_ids=props.get("related_cluster_ids") or [],
+                    staleness_score=float(props.get("staleness_score", 0.0)),
+                    status=props.get("status", "active"),
+                    fact_type_counts=json.loads(props.get("fact_type_counts_json") or "{}"),
+                ))
+            return clusters
+
+        return await asyncio.to_thread(_list)
+
+    async def get_cluster(self, cluster_id: str) -> "TopicCluster | None":
+        """Fetch a single topic cluster by ID, with centroid vector."""
+        from beever_atlas.models import TopicCluster
+
+        def _get() -> TopicCluster | None:
+            collection = self._collection()
+            obj = collection.query.fetch_object_by_id(
+                uuid=cluster_id,
+                include_vector=True,
+            )
+            if obj is None:
+                return None
+            props = obj.properties
+            if props.get("tier") != "topic":
+                return None
+            vec = obj.vector
+            if isinstance(vec, dict):
+                vec = vec.get("default", [])
+            return TopicCluster(
+                id=str(obj.uuid),
+                channel_id=props.get("channel_id", ""),
+                summary=props.get("memory_text", ""),
+                topic_tags=props.get("topic_tags") or [],
+                member_ids=props.get("member_ids") or [],
+                member_count=int(props.get("member_count", 0)),
+                centroid_vector=vec if vec else None,
+                key_entities=json.loads(props.get("key_entities_json") or "[]"),
+                key_relationships=json.loads(props.get("key_relationships_json") or "[]"),
+                date_range_start=props.get("date_range_start", ""),
+                date_range_end=props.get("date_range_end", ""),
+                authors=props.get("authors") or [],
+                media_refs=props.get("media_refs") or [],
+                media_names=props.get("media_names") or [],
+                link_refs=props.get("link_refs") or [],
+                high_importance_count=int(props.get("high_importance_count", 0)),
+                related_cluster_ids=props.get("related_cluster_ids") or [],
+                staleness_score=float(props.get("staleness_score", 0.0)),
+                status=props.get("status", "active"),
+                fact_type_counts=json.loads(props.get("fact_type_counts_json") or "{}"),
+            )
+
+        return await asyncio.to_thread(_get)
+
+    async def get_cluster_members(
+        self, cluster_id: str, limit: int = 100,
+    ) -> list[AtomicFact]:
+        """Fetch atomic facts assigned to a specific cluster."""
+
+        def _fetch() -> list[AtomicFact]:
+            collection = self._collection()
+            result = collection.query.fetch_objects(
+                filters=(
+                    Filter.by_property("cluster_id").equal(cluster_id)
+                    & Filter.by_property("tier").equal("atomic")
+                ),
+                limit=limit,
+            )
+            return [self._obj_to_fact(obj) for obj in result.objects]
+
+        return await asyncio.to_thread(_fetch)
+
+    async def upsert_channel_summary(self, summary: "ChannelSummary") -> str:
+        """Upsert a channel summary (Tier 0). One per channel via deterministic UUID."""
+        from beever_atlas.models import ChannelSummary  # noqa: F811
+
+        def _upsert() -> str:
+            collection = self._collection()
+            # Deterministic UUID ensures exactly one summary per channel
+            namespace = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+            det_id = str(uuid.uuid5(namespace, f"summary:{summary.channel_id}"))
+            props: dict[str, Any] = {
+                "memory_text": summary.text,
+                "tier": "summary",
+                "cluster_id": "",
+                "channel_id": summary.channel_id,
+                "member_count": summary.cluster_count,
+                "member_ids": [],
+                "topic_tags": [],
+                "platform": "",
+                "author_id": "",
+                "author_name": "",
+                "message_ts": "",
+                "thread_ts": "",
+                "source_message_id": "",
+                "entity_tags": [],
+                "action_tags": [],
+                "importance": "",
+                "graph_entity_ids": [],
+                "source_media_url": "",
+                "source_media_type": "",
+                "source_media_urls": [],
+                "source_link_urls": [],
+                "source_link_titles": [],
+                "source_link_descriptions": [],
+                "quality_score": 0.0,
+                "potential_contradiction": False,
+                # Enrichment fields (R4)
+                "key_entities_json": json.dumps(summary.key_entities),
+                "key_decisions_json": json.dumps(summary.key_decisions),
+                "key_topics_json": json.dumps(summary.key_topics),
+                "date_range_start": summary.date_range_start,
+                "date_range_end": summary.date_range_end,
+                "media_count": summary.media_count,
+                "author_count": summary.author_count,
+                "worst_staleness": summary.worst_staleness,
+                "fact_count": summary.fact_count,
+            }
+            try:
+                collection.data.insert(
+                    properties=props,
+                    uuid=det_id,
+                )
+            except Exception:
+                collection.data.replace(
+                    properties=props,
+                    uuid=det_id,
+                )
+            return det_id
+
+        return await asyncio.to_thread(_upsert)
+
+    async def get_channel_summary(self, channel_id: str) -> "ChannelSummary | None":
+        """Fetch the Tier 0 channel summary."""
+        from beever_atlas.models import ChannelSummary
+
+        def _get() -> ChannelSummary | None:
+            collection = self._collection()
+            result = collection.query.fetch_objects(
+                filters=(
+                    Filter.by_property("channel_id").equal(channel_id)
+                    & Filter.by_property("tier").equal("summary")
+                ),
+                limit=1,
+            )
+            if not result.objects:
+                return None
+            obj = result.objects[0]
+            props = obj.properties
+            return ChannelSummary(
+                id=str(obj.uuid),
+                channel_id=props.get("channel_id", ""),
+                text=props.get("memory_text", ""),
+                cluster_count=int(props.get("member_count", 0)),
+                fact_count=int(props.get("fact_count", 0)),
+                key_decisions=json.loads(props.get("key_decisions_json") or "[]"),
+                key_entities=json.loads(props.get("key_entities_json") or "[]"),
+                key_topics=json.loads(props.get("key_topics_json") or "[]"),
+                date_range_start=props.get("date_range_start", ""),
+                date_range_end=props.get("date_range_end", ""),
+                media_count=int(props.get("media_count", 0)),
+                author_count=int(props.get("author_count", 0)),
+                worst_staleness=float(props.get("worst_staleness", 0.0)),
+            )
+
+        return await asyncio.to_thread(_get)
+
+    async def upsert_entity_card(self, card: "EntityKnowledgeCard") -> str:
+        """Upsert an EntityKnowledgeCard as a MemoryFact with tier='entity_card'."""
+        from beever_atlas.models.domain import EntityKnowledgeCard  # noqa: F811
+
+        def _upsert() -> str:
+            collection = self._collection()
+            # Deterministic UUID from entity_name
+            namespace = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+            det_id = str(uuid.uuid5(namespace, f"entity_card:{card.entity_name}"))
+            props: dict[str, Any] = {
+                "memory_text": card.summary,
+                "tier": "entity_card",
+                "cluster_id": "",
+                "channel_id": "",
+                "entity_id": card.entity_id,
+                "entity_name": card.entity_name,
+                "entity_type": card.entity_type,
+                "channel_ids": card.channel_ids,
+                "cluster_ids": card.cluster_ids,
+                "fact_count": card.fact_count,
+                "fact_type_breakdown_json": json.dumps(card.fact_type_breakdown),
+                "key_facts": card.key_facts,
+                "related_entities_json": json.dumps(card.related_entities),
+                "last_mentioned_at": card.last_mentioned_at,
+                "staleness_score": card.staleness_score,
+                "platform": "",
+                "author_id": "",
+                "author_name": "",
+                "message_ts": "",
+                "thread_ts": "",
+                "source_message_id": "",
+                "topic_tags": [],
+                "entity_tags": [],
+                "action_tags": [],
+                "importance": "",
+                "graph_entity_ids": [],
+                "source_media_url": "",
+                "source_media_type": "",
+                "source_media_urls": [],
+                "source_link_urls": [],
+                "source_link_titles": [],
+                "source_link_descriptions": [],
+                "quality_score": 0.0,
+                "potential_contradiction": False,
+                "member_ids": [],
+                "member_count": 0,
+            }
+            try:
+                collection.data.insert(properties=props, uuid=det_id)
+            except Exception:
+                collection.data.replace(properties=props, uuid=det_id)
+            return det_id
+
+        return await asyncio.to_thread(_upsert)
+
+    async def get_entity_card(self, entity_name: str) -> "EntityKnowledgeCard | None":
+        """Fetch an EntityKnowledgeCard by entity_name."""
+        from beever_atlas.models.domain import EntityKnowledgeCard
+
+        def _get() -> EntityKnowledgeCard | None:
+            collection = self._collection()
+            result = collection.query.fetch_objects(
+                filters=(
+                    Filter.by_property("tier").equal("entity_card")
+                    & Filter.by_property("entity_name").equal(entity_name)
+                ),
+                limit=1,
+            )
+            if not result.objects:
+                return None
+            obj = result.objects[0]
+            props = obj.properties
+            return EntityKnowledgeCard(
+                id=str(obj.uuid),
+                entity_id=props.get("entity_id", ""),
+                entity_name=props.get("entity_name", ""),
+                entity_type=props.get("entity_type", ""),
+                channel_ids=props.get("channel_ids") or [],
+                cluster_ids=props.get("cluster_ids") or [],
+                fact_count=int(props.get("fact_count", 0)),
+                fact_type_breakdown=json.loads(props.get("fact_type_breakdown_json") or "{}"),
+                key_facts=props.get("key_facts") or [],
+                related_entities=json.loads(props.get("related_entities_json") or "[]"),
+                last_mentioned_at=props.get("last_mentioned_at", ""),
+                staleness_score=float(props.get("staleness_score", 0.0)),
+                summary=props.get("memory_text", ""),
+            )
+
+        return await asyncio.to_thread(_get)
+
+    async def list_entity_cards(
+        self, channel_id: str | None = None, limit: int = 50,
+    ) -> list["EntityKnowledgeCard"]:
+        """List EntityKnowledgeCards, optionally filtered by channel_id."""
+        from beever_atlas.models.domain import EntityKnowledgeCard
+
+        def _list() -> list[EntityKnowledgeCard]:
+            collection = self._collection()
+            weaviate_filter = Filter.by_property("tier").equal("entity_card")
+            if channel_id:
+                weaviate_filter = weaviate_filter & Filter.by_property(
+                    "channel_ids"
+                ).contains_any([channel_id])
+            result = collection.query.fetch_objects(
+                filters=weaviate_filter,
+                limit=limit,
+            )
+            cards: list[EntityKnowledgeCard] = []
+            for obj in result.objects:
+                props = obj.properties
+                cards.append(EntityKnowledgeCard(
+                    id=str(obj.uuid),
+                    entity_id=props.get("entity_id", ""),
+                    entity_name=props.get("entity_name", ""),
+                    entity_type=props.get("entity_type", ""),
+                    channel_ids=props.get("channel_ids") or [],
+                    cluster_ids=props.get("cluster_ids") or [],
+                    fact_count=int(props.get("fact_count", 0)),
+                    fact_type_breakdown=json.loads(props.get("fact_type_breakdown_json") or "{}"),
+                    key_facts=props.get("key_facts") or [],
+                    related_entities=json.loads(props.get("related_entities_json") or "[]"),
+                    last_mentioned_at=props.get("last_mentioned_at", ""),
+                    staleness_score=float(props.get("staleness_score", 0.0)),
+                    summary=props.get("memory_text", ""),
+                ))
+            return cards
+
+        return await asyncio.to_thread(_list)
+
+    async def batch_update_fact_clusters(
+        self, updates: list[tuple[str, str]],
+    ) -> None:
+        """Batch update cluster_id on multiple facts."""
+
+        def _batch() -> None:
+            collection = self._collection()
+            for fact_id, cluster_id in updates:
+                collection.data.update(
+                    uuid=fact_id,
+                    properties={"cluster_id": cluster_id},
+                )
+
+        await asyncio.to_thread(_batch)
+
+    async def delete_cluster(self, cluster_id: str) -> None:
+        """Delete a cluster object by UUID."""
+
+        def _delete() -> None:
+            collection = self._collection()
+            collection.data.delete_by_id(uuid=cluster_id)
+
+        await asyncio.to_thread(_delete)

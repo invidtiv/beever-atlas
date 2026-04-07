@@ -50,10 +50,14 @@ class StoreClients:
                 settings.nebula_password,
                 settings.nebula_space,
             )
+        elif settings.graph_backend == "none":
+            from beever_atlas.stores.null_graph import NullGraphStore
+
+            graph = NullGraphStore()
         else:
             raise ValueError(
                 f"Unknown graph backend: {settings.graph_backend!r}. "
-                "Expected 'neo4j' or 'nebula'."
+                "Expected 'neo4j', 'nebula', or 'none'."
             )
 
         entity_registry = EntityRegistry(graph)

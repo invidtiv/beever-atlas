@@ -19,8 +19,10 @@ def fact_quality_gate_callback(callback_context: CallbackContext) -> None:
     ``quality_score`` is below ``settings.quality_threshold``, and writes the
     filtered list back.
     """
+    # Per-channel quality_threshold from policy (via session state), else global default
     settings = get_settings()
-    threshold: float = settings.quality_threshold
+    state_threshold = callback_context.state.get("quality_threshold")
+    threshold: float = state_threshold if state_threshold is not None else settings.quality_threshold
 
     raw: Any = callback_context.state.get("extracted_facts")
     if raw is None:
@@ -61,6 +63,10 @@ def fact_quality_gate_callback(callback_context: CallbackContext) -> None:
             "facts": filtered,
             "skip_reason": raw.skip_reason if isinstance(raw, FactExtractionResult) else None,
         }
+
+    # Bridge: also write as classified_facts so the embedder can read it
+    # without the classifier stage (which has been removed).
+    callback_context.state["classified_facts"] = callback_context.state["extracted_facts"]
 
 
 def entity_quality_gate_callback(callback_context: CallbackContext) -> None:
@@ -139,3 +145,51 @@ def entity_quality_gate_callback(callback_context: CallbackContext) -> None:
         "relationships": filtered_rels,
         "skip_reason": skip_reason,
     }
+
+
+def fact_extraction_with_recovery(callback_context: CallbackContext) -> None:
+    """After-agent callback that attempts JSON recovery on malformed extraction output."""
+    raw = callback_context.state.get("extracted_facts")
+
+    # If extraction produced valid structured output, just run normal quality gate
+    if isinstance(raw, dict) and "facts" in raw:
+        return fact_quality_gate_callback(callback_context)
+
+    # If raw is a string (LLM returned text instead of parsed JSON), try recovery
+    if isinstance(raw, str):
+        from beever_atlas.services.json_recovery import recover_facts_from_truncated
+        recovered = recover_facts_from_truncated(raw)
+        if recovered and "facts" in recovered:
+            logger.info(
+                "fact_extraction_with_recovery: recovered %d facts from truncated output",
+                len(recovered["facts"]),
+            )
+            callback_context.state["extracted_facts"] = recovered
+            return fact_quality_gate_callback(callback_context)
+
+    # Fallback: set empty facts
+    logger.warning("fact_extraction_with_recovery: no recoverable facts, setting empty")
+    callback_context.state["extracted_facts"] = {"facts": [], "skip_reason": "extraction_failed"}
+    callback_context.state["classified_facts"] = callback_context.state["extracted_facts"]
+
+
+def entity_extraction_with_recovery(callback_context: CallbackContext) -> None:
+    """After-agent callback that attempts JSON recovery on malformed entity extraction output."""
+    raw = callback_context.state.get("extracted_entities")
+
+    if isinstance(raw, dict) and ("entities" in raw or "relationships" in raw):
+        return entity_quality_gate_callback(callback_context)
+
+    if isinstance(raw, str):
+        from beever_atlas.services.json_recovery import recover_entities_from_truncated
+        recovered = recover_entities_from_truncated(raw)
+        if recovered:
+            logger.info(
+                "entity_extraction_with_recovery: recovered %d entities from truncated output",
+                len(recovered.get("entities", [])),
+            )
+            callback_context.state["extracted_entities"] = recovered
+            return entity_quality_gate_callback(callback_context)
+
+    logger.warning("entity_extraction_with_recovery: no recoverable entities, setting empty")
+    callback_context.state["extracted_entities"] = {"entities": [], "relationships": []}

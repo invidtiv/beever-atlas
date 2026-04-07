@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from beever_atlas.adapters import get_adapter
@@ -45,6 +45,7 @@ class SyncRunner:
     def __init__(self) -> None:
         self._batch_processor = BatchProcessor()
         self._active_tasks: dict[str, asyncio.Task[None]] = {}
+        # Consolidation is handled by pipeline_orchestrator (not SyncRunner)
 
     def _is_task_active(self, channel_id: str) -> bool:
         """Return True when this process has an unfinished sync task."""
@@ -64,6 +65,7 @@ class SyncRunner:
         self,
         channel_id: str,
         sync_type: str = "auto",
+        use_batch_api: bool = False,
     ) -> str:
         """Kick off a sync for *channel_id* and return the new job_id.
 
@@ -81,6 +83,27 @@ class SyncRunner:
         settings = get_settings()
         if sync_type not in {"auto", "full", "incremental"}:
             raise ValueError(f"Invalid sync_type '{sync_type}'. Use one of: auto, full, incremental.")
+
+        # Stale job recovery: mark jobs stuck "running" for > threshold as "failed"
+        stale_threshold = datetime.now(tz=UTC) - timedelta(hours=settings.stale_job_threshold_hours)
+        stale_jobs = await stores.mongodb.db["sync_jobs"].find({
+            "channel_id": channel_id,
+            "status": "running",
+            "started_at": {"$lt": stale_threshold},
+        }).to_list(length=10)
+        for stale in stale_jobs:
+            stale_id = stale.get("id", "?")
+            if not self._is_task_active(channel_id):
+                logger.warning(
+                    "SyncRunner: recovering stale job channel=%s job_id=%s started_at=%s",
+                    channel_id, stale_id, stale.get("started_at"),
+                )
+                await stores.mongodb.complete_sync_job(
+                    job_id=stale_id,
+                    status="failed",
+                    errors=["stale_recovery: job stuck in running state"],
+                    failed_stage="stale_recovery",
+                )
 
         # 1. Guard: no concurrent sync for the same channel.
         existing = await stores.mongodb.get_sync_status(channel_id)
@@ -123,14 +146,20 @@ class SyncRunner:
         if resolved_type == "incremental" and sync_state is not None:
             since = sync_state.last_sync_ts
 
+        # 2b. Resolve effective policy for max_messages limit.
+        from beever_atlas.services.policy_resolver import resolve_effective_policy
+        effective_policy = await resolve_effective_policy(channel_id)
+        _max_messages = effective_policy.sync.max_messages
+
         # 3. Fetch all messages via cursor-based pagination.
         logger.info(
-            "SyncRunner: fetch start channel=%s resolved_type=%s since=%s",
+            "SyncRunner: fetch start channel=%s resolved_type=%s since=%s max_messages=%s",
             channel_id,
             resolved_type,
             since,
+            _max_messages,
         )
-        messages = await self._fetch_all_messages(channel_id, since=since)
+        messages = await self._fetch_all_messages(channel_id, since=since, max_messages=_max_messages)
 
         # If incremental sync found nothing, auto-fallback to full sync
         if not messages and resolved_type == "incremental":
@@ -140,7 +169,7 @@ class SyncRunner:
             )
             resolved_type = "full"
             since = None
-            messages = await self._fetch_all_messages(channel_id, since=None)
+            messages = await self._fetch_all_messages(channel_id, since=None, max_messages=_max_messages)
 
         if not messages:
             logger.info(
@@ -150,6 +179,7 @@ class SyncRunner:
             )
 
         # 4. Fetch thread replies for messages with reply_count > 0.
+        parent_count = len(messages)
         messages = await self._fetch_thread_replies(channel_id, messages)
 
         # 5. Get channel info for the human-readable name.
@@ -162,6 +192,7 @@ class SyncRunner:
             channel_id=channel_id,
             sync_type=resolved_type,
             total_messages=len(messages),
+            parent_messages=parent_count,
             batch_size=settings.sync_batch_size,
         )
         job_id: str = job.id
@@ -173,6 +204,8 @@ class SyncRunner:
                 channel_id=channel_id,
                 channel_name=channel_name,
                 messages=messages,
+                parent_count=parent_count,
+                use_batch_api=use_batch_api,
             )
         )
         self._active_tasks[channel_id] = task
@@ -192,11 +225,12 @@ class SyncRunner:
         self,
         channel_id: str,
         since: datetime | str | None = None,
+        max_messages: int | None = None,
     ) -> list[Any]:
         """Fetch all messages via cursor-based pagination.
 
         The bridge adapter caps each page at 500 messages. We continue until
-        we hit ``settings.sync_max_messages`` or the adapter returns nothing.
+        we hit *max_messages* (or ``settings.sync_max_messages``) or the adapter returns nothing.
 
         Args:
             channel_id: Channel to fetch from.
@@ -206,13 +240,19 @@ class SyncRunner:
             Flat list of NormalizedMessage objects.
         """
         settings = get_settings()
+        msg_limit = max_messages or settings.sync_max_messages
         adapter = get_adapter()
         all_messages: list[Any] = []
+        seen_ids: set[str] = set()
         cursor = _coerce_since_timestamp(since)
 
-        while len(all_messages) < settings.sync_max_messages:
+        while len(all_messages) < msg_limit:
             page_num = (len(all_messages) // 500) + 1
-            batch = await adapter.fetch_history(channel_id, since=cursor, limit=500)
+            # Use order=asc so that `since` (Slack's `oldest`) cursor moves
+            # forward chronologically, avoiding duplicate re-fetches.
+            batch = await adapter.fetch_history(
+                channel_id, since=cursor, limit=500, order="asc",
+            )
             if not batch:
                 logger.info(
                     "SyncRunner: fetch page=%d channel=%s empty; stopping.",
@@ -237,7 +277,21 @@ class SyncRunner:
                 )
                 break
 
-            remaining = settings.sync_max_messages - len(all_messages)
+            # Deduplicate by message_id as a safety net.
+            deduped_batch: list[Any] = []
+            for m in batch:
+                mid = getattr(m, "message_id", "") or getattr(m, "ts", "")
+                if mid and mid in seen_ids:
+                    continue
+                if mid:
+                    seen_ids.add(mid)
+                deduped_batch.append(m)
+            batch = deduped_batch
+
+            if not batch:
+                break
+
+            remaining = msg_limit - len(all_messages)
             if len(batch) > remaining:
                 batch = batch[:remaining]
             all_messages.extend(batch)
@@ -355,6 +409,8 @@ class SyncRunner:
         channel_id: str,
         channel_name: str,
         messages: list[Any],
+        parent_count: int = 0,
+        use_batch_api: bool = False,
     ) -> None:
         """Execute the full sync, update job status, and clean up the task entry.
 
@@ -370,11 +426,17 @@ class SyncRunner:
         )
 
         try:
+            # Resolve per-channel ingestion config from policy
+            from beever_atlas.services.policy_resolver import resolve_effective_policy
+            effective_policy = await resolve_effective_policy(channel_id)
+
             result = await self._batch_processor.process_messages(
                 messages=messages,
                 channel_id=channel_id,
                 channel_name=channel_name,
                 sync_job_id=job_id,
+                ingestion_config=effective_policy.ingestion,
+                use_batch_api=use_batch_api,
             )
 
             # Determine last_sync_ts from the latest TOP-LEVEL message only.
@@ -398,19 +460,26 @@ class SyncRunner:
             # Mark job complete.
             sync_status = "failed" if result.errors else "completed"
             sync_errors = None
+            failed_stage = None
             if result.errors:
                 sync_errors = [
                     f"batch={err.get('batch_num')} error={err.get('error')}"
                     for err in result.errors
                 ]
+                # Record the last failed batch as the failed stage for the UI.
+                last_err = result.errors[-1]
+                failed_stage = f"Failed at batch {last_err.get('batch_num')}: {last_err.get('error', 'unknown error')}"
             await stores.mongodb.complete_sync_job(
                 job_id=job_id,
                 status=sync_status,
                 errors=sync_errors,
+                failed_stage=failed_stage,
             )
 
-            # Update channel sync state.
-            if last_ts is not None:
+            # Update channel sync state — only advance cursor if ALL batches succeeded.
+            # If any batches failed, keep the old cursor so retry re-fetches the
+            # unprocessed messages instead of skipping them forever.
+            if last_ts is not None and not result.errors:
                 await stores.mongodb.update_channel_sync_state(
                     channel_id=channel_id,
                     last_sync_ts=last_ts,
@@ -432,11 +501,16 @@ class SyncRunner:
                     "total_facts": result.total_facts,
                     "total_entities": result.total_entities,
                     "total_relationships": result.total_relationships,
-                    "total_messages": len(messages),
+                    "total_messages": parent_count or len(messages),
                     "error_count": len(result.errors),
                     "results_summary": batch_summaries,
                 },
             )
+
+            # Trigger consolidation via pipeline orchestrator (policy-aware)
+            if not result.errors:
+                from beever_atlas.services.pipeline_orchestrator import on_ingestion_complete
+                await on_ingestion_complete(channel_id, result.total_facts)
 
             logger.info(
                 "SyncRunner: run complete job_id=%s channel=%s status=%s facts=%d entities=%d errors=%d",
@@ -460,28 +534,32 @@ class SyncRunner:
                 job_id=job_id,
                 status="failed",
                 errors=[str(exc)],
+                failed_stage=f"Pipeline error: {str(exc)[:200]}",
             )
 
             await stores.mongodb.log_activity(
                 event_type="sync_failed",
                 channel_id=channel_id,
-                details={"job_id": job_id, "error": str(exc)},
+                details={"job_id": job_id, "channel_name": channel_name, "error": str(exc)},
             )
 
         finally:
             self._active_tasks.pop(channel_id, None)
 
     async def shutdown(self) -> None:
-        """Cancel all active sync tasks gracefully."""
-        if not self._active_tasks:
+        """Cancel all active sync and consolidation tasks gracefully."""
+        from beever_atlas.services.pipeline_orchestrator import get_active_consolidation_tasks
+
+        consolidation_tasks = get_active_consolidation_tasks()
+        if not self._active_tasks and not consolidation_tasks:
             return
 
         logger.info(
             "SyncRunner: shutting down — cancelling %d active task(s).",
-            len(self._active_tasks),
+            len(self._active_tasks) + len(consolidation_tasks),
         )
 
-        tasks = list(self._active_tasks.values())
+        tasks = list(self._active_tasks.values()) + list(consolidation_tasks.values())
         for task in tasks:
             task.cancel()
 
@@ -491,4 +569,5 @@ class SyncRunner:
                 logger.warning("SyncRunner: task raised during shutdown: %s", res)
 
         self._active_tasks.clear()
+        consolidation_tasks.clear()
         logger.info("SyncRunner: shutdown complete.")

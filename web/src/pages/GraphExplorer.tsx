@@ -3,6 +3,7 @@ import { useGraph } from "@/hooks/useGraph";
 import { GraphFilters } from "@/components/graph/GraphFilters";
 import { GraphCanvas } from "@/components/graph/GraphCanvas";
 import { EntityPanel } from "@/components/graph/EntityPanel";
+import { GitBranch } from "lucide-react";
 
 export function GraphExplorer() {
   const [channelId] = useState("");
@@ -45,7 +46,23 @@ export function GraphExplorer() {
         </div>
       )}
 
-      {!loading && !error && (
+      {!loading && !error && entities.length === 0 && (
+        <div className="flex flex-1 items-center justify-center p-6">
+          <div className="rounded-2xl border border-dashed border-border bg-card p-10 flex flex-col items-center gap-3 text-center max-w-sm">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+              <GitBranch size={22} className="text-muted-foreground/40" />
+            </div>
+            <div>
+              <p className="text-sm font-medium text-foreground/70">Your knowledge graph</p>
+              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                People, projects, decisions, and their connections will appear here after syncing channels with deep analysis enabled.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!loading && !error && entities.length > 0 && (
         <div className="flex flex-1 min-h-0">
           <GraphCanvas
             entities={entities}
@@ -59,6 +76,7 @@ export function GraphExplorer() {
               entity={selectedEntity}
               relationships={relationships}
               allEntities={entities}
+              channelId={channelId}
               onClose={() => setSelectedId(null)}
             />
           )}

@@ -217,10 +217,10 @@ export function SearchPage() {
               <Search size={22} className="text-muted-foreground/30" />
             </div>
             <p className="text-sm font-medium text-foreground/60">
-              Start typing to search
+              Search your team's knowledge
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              Results update as you type.
+              Decisions, facts, and discussions from your connected channels. Connect and sync channels to start building searchable knowledge.
             </p>
           </div>
         ) : (

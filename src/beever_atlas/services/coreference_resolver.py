@@ -1,17 +1,14 @@
 """Coreference resolution service — resolves pronouns and implicit references.
 
-Uses an LLM (Gemini Flash) to rewrite messages with explicit entity names
+Uses an ADK LlmAgent to rewrite messages with explicit entity names
 before they enter the fact/entity extraction pipeline.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
-
-from beever_atlas.infra.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +90,6 @@ async def resolve_coreferences(
             msg["raw_text"] = msg.get("text") or msg.get("content") or ""
         return batch_messages
 
-    settings = get_settings()
-
     # Build prompt context
     prompt_parts: list[str] = []
     if history_messages:
@@ -111,38 +106,16 @@ async def resolve_coreferences(
     messages_text = "\n".join(prompt_parts)
 
     try:
-        from google import genai
-        from google.genai import types as genai_types
-
-        client = genai.Client(api_key=settings.google_api_key)
-
-        from beever_atlas.agents.prompts.coreference_resolver import (
-            COREFERENCE_RESOLVER_INSTRUCTION,
+        from beever_atlas.agents.ingestion.coreference_resolver import (
+            create_coreference_resolver,
         )
+        from beever_atlas.agents.runner import run_agent
 
-        instruction = COREFERENCE_RESOLVER_INSTRUCTION.replace("{messages}", messages_text)
+        agent = create_coreference_resolver()
+        state = await run_agent(agent, state={"messages": messages_text})
 
-        response = await client.aio.models.generate_content(
-            model=settings.coref_model,
-            contents=[
-                genai_types.Content(
-                    role="user",
-                    parts=[genai_types.Part.from_text(text=instruction)],
-                )
-            ],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
-        )
-
-        result_text = response.text or ""
-        # Strip markdown fences if present
-        if result_text.startswith("```"):
-            result_text = re.sub(r"^```(?:json)?\n?", "", result_text)
-            result_text = re.sub(r"\n?```$", "", result_text)
-
-        result = json.loads(result_text)
-        resolved = result.get("resolved_messages") or []
+        resolved_data = state.get("resolved_messages") or {}
+        resolved = resolved_data.get("resolved_messages") or [] if isinstance(resolved_data, dict) else []
 
         # Apply resolved text back to batch messages
         resolved_by_index = {r["index"]: r["text"] for r in resolved if "index" in r and "text" in r}
@@ -161,7 +134,7 @@ async def resolve_coreferences(
 
     except Exception:
         logger.warning(
-            "CoreferenceResolver: LLM call failed, preserving original text",
+            "CoreferenceResolver: agent call failed, preserving original text",
             exc_info=True,
         )
         for msg in batch_messages:

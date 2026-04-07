@@ -62,24 +62,36 @@ export function useGraph(channelId: string): UseGraphReturn {
 
       // Convert Media nodes to GraphEntity format for unified rendering.
       // Deduplicate: skip Media nodes whose name closely matches an existing Entity.
-      const entityNames = new Set(baseEntities.map((e) => e.name.toLowerCase().replace(/[\s_-]+/g, "")));
-      const mediaEntities: GraphEntity[] = (Array.isArray(mediaData) ? mediaData : [])
-        .map((m) => {
-          let name: string;
-          try {
-            name = m.title || (m.media_type === "link" ? new URL(m.url).hostname : m.url.split("/").pop() || m.url);
-          } catch {
-            name = m.url.split("/").pop() || m.url;
-          }
-          return {
-            id: m.id,
-            name,
-            type: m.media_type === "link" ? "Link" : m.media_type === "pdf" ? "Document" : m.media_type === "image" ? "Image" : "Media",
-            scope: "channel",
-            properties: { url: m.url, media_type: m.media_type },
-          };
-        })
-        .filter((m) => !entityNames.has(m.name.toLowerCase().replace(/[\s_-]+/g, "")));
+      const mediaNodes = (Array.isArray(mediaData) ? mediaData : []).map((m) => {
+        let name: string;
+        try {
+          name = m.title || (m.media_type === "link" ? new URL(m.url).hostname : m.url.split("/").pop() || m.url);
+        } catch {
+          name = m.url.split("/").pop() || m.url;
+        }
+        return {
+          id: m.id,
+          name,
+          type: m.media_type === "link" ? "Link" : m.media_type === "pdf" ? "Document" : m.media_type === "image" ? "Image" : "Media",
+          scope: "channel" as const,
+          properties: { url: m.url, media_type: m.media_type },
+        };
+      });
+
+      // Merge media properties into matching entities so they become clickable,
+      // then add remaining media nodes that have no matching entity.
+      const entityNameMap = new Map(baseEntities.map((e) => [e.name.toLowerCase().replace(/[\s_-]+/g, ""), e]));
+      const mediaEntities: GraphEntity[] = [];
+      for (const m of mediaNodes) {
+        const key = m.name.toLowerCase().replace(/[\s_-]+/g, "");
+        const existing = entityNameMap.get(key);
+        if (existing) {
+          // Merge url + media_type into the existing entity so it becomes clickable
+          existing.properties = { ...(existing.properties || {}), url: m.properties.url, media_type: m.properties.media_type };
+        } else {
+          mediaEntities.push(m);
+        }
+      }
 
       const entities = [...baseEntities, ...mediaEntities];
       setEntities(entities);

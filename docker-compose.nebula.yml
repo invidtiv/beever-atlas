@@ -1,0 +1,98 @@
+# NebulaGraph services for pluggable graph DB testing
+# Usage:
+#   docker compose -f docker-compose.nebula.yml up -d
+#   # Wait ~30s, then register storage host:
+#   docker compose -f docker-compose.nebula.yml exec nebula-graphd \
+#     sh -c 'sleep 5 && echo "ADD HOSTS nebula-storaged:9779;" | /usr/local/nebula/bin/nebula-console -addr nebula-graphd -port 9669 -u root -p nebula'
+#   # Or use the helper script:
+#   python scripts/nebula_setup.py
+
+services:
+  nebula-metad:
+    image: vesoft/nebula-metad:v3.8.0
+    environment:
+      USER: root
+      TZ: UTC
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-metad
+      - --ws_ip=nebula-metad
+      - --port=9559
+      - --ws_http_port=19559
+      - --data_path=/data/meta
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    volumes:
+      - nebula_meta_data:/data/meta
+      - nebula_meta_logs:/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-metad:19559/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    ports:
+      - "9559:9559"
+      - "19559:19559"
+
+  nebula-storaged:
+    image: vesoft/nebula-storaged:v3.8.0
+    environment:
+      USER: root
+      TZ: UTC
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-storaged
+      - --ws_ip=nebula-storaged
+      - --port=9779
+      - --ws_http_port=19779
+      - --data_path=/data/storage
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    volumes:
+      - nebula_storage_data:/data/storage
+      - nebula_storage_logs:/logs
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+    # No healthcheck — storaged is healthy once metad registers it via ADD HOSTS
+    ports:
+      - "9779:9779"
+
+  nebula-graphd:
+    image: vesoft/nebula-graphd:v3.8.0
+    environment:
+      USER: root
+      TZ: UTC
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-graphd
+      - --ws_ip=nebula-graphd
+      - --port=9669
+      - --ws_http_port=19669
+      - --log_dir=/logs
+      - --v=0
+      - --minloglevel=0
+    volumes:
+      - nebula_graph_logs:/logs
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://nebula-graphd:19669/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    ports:
+      - "9669:9669"
+      - "19669:19669"
+
+volumes:
+  nebula_meta_data:
+  nebula_meta_logs:
+  nebula_storage_data:
+  nebula_storage_logs:
+  nebula_graph_logs:

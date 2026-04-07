@@ -1,16 +1,24 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api, ApiError } from "@/lib/api";
-import type { SyncResponse, SyncStatusResponse } from "@/lib/types";
+import type { BatchResultEntry, SyncResponse, SyncStatusResponse } from "@/lib/types";
 
 export interface SyncState {
   state: "idle" | "syncing" | "error";
   job_id?: string;
   total_messages?: number;
+  parent_messages?: number;
   processed_messages?: number;
   current_batch?: number;
+  total_batches?: number;
   current_stage?: string | null;
   stage_timings?: Record<string, number>;
-  stage_details?: Record<string, Record<string, unknown>>;
+  stage_details?: {
+    activity_log?: import("@/lib/types").ActivityEntry[];
+    [key: string]: unknown;
+  };
+  batch_results?: BatchResultEntry[];
+  batch_job_state?: string | null;
+  batch_job_elapsed_seconds?: number | null;
   errors?: string[];
 }
 
@@ -47,11 +55,16 @@ export function useSync(channelId: string): UseSyncReturn {
         state: status.state,
         job_id: status.job_id,
         total_messages: status.total_messages,
+        parent_messages: status.parent_messages,
         processed_messages: status.processed_messages,
         current_batch: status.current_batch,
+        total_batches: status.total_batches,
         current_stage: status.current_stage,
         stage_timings: status.stage_timings,
         stage_details: status.stage_details,
+        batch_results: status.batch_results,
+        batch_job_state: status.batch_job_state,
+        batch_job_elapsed_seconds: status.batch_job_elapsed_seconds,
         errors: status.errors,
       });
       setError(backendError);
@@ -72,9 +85,9 @@ export function useSync(channelId: string): UseSyncReturn {
 
   const startPolling = useCallback(() => {
     stopPolling();
-    // Poll immediately, then every 5 seconds
+    // Poll immediately, then every 2 seconds
     void pollStatus();
-    intervalRef.current = setInterval(pollStatus, 5000);
+    intervalRef.current = setInterval(pollStatus, 2000);
   }, [pollStatus, stopPolling]);
 
   const triggerSync = useCallback(async () => {

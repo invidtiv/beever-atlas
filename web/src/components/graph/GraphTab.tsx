@@ -31,11 +31,11 @@ export function GraphTab() {
   const handleSelectEntity = (id: string | null) => {
     if (id) {
       const entity = entities.find((e) => e.id === id);
-      if (entity && MEDIA_TYPES.has(entity.type)) {
+      if (entity) {
         const props = entity.properties as Record<string, unknown> | undefined;
         const url = (props?.url as string) || "";
         const mediaType = (props?.media_type as string) || entity.type.toLowerCase();
-        if (url) {
+        if (url && (MEDIA_TYPES.has(entity.type) || mediaType)) {
           setMediaModal({ name: entity.name, url, mediaType });
           return;
         }

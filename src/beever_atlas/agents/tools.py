@@ -30,19 +30,29 @@ def search_weaviate_hybrid(
     raise NotImplementedError("Weaviate store not yet implemented (M3)")
 
 
-def get_tier0_summary(channel_id: str) -> dict | None:
+async def get_tier0_summary(channel_id: str) -> dict | None:
     """Get the Tier 0 channel summary from Weaviate.
 
     Args:
         channel_id: Target channel ID.
 
     Returns:
-        Summary dict with text, updated_at, message_count, or None if not found.
+        Summary dict with text, cluster_count, fact_count, or None if not found.
     """
-    raise NotImplementedError("Weaviate store not yet implemented (M3)")
+    from beever_atlas.stores import get_stores
+
+    store = get_stores().weaviate
+    summary = await store.get_channel_summary(channel_id)
+    if summary is None:
+        return None
+    return {
+        "text": summary.text,
+        "cluster_count": summary.cluster_count,
+        "fact_count": summary.fact_count,
+    }
 
 
-def get_tier1_clusters(channel_id: str) -> list[dict]:
+async def get_tier1_clusters(channel_id: str) -> list[dict]:
     """Get all Tier 1 topic clusters for a channel from Weaviate.
 
     Args:
@@ -51,7 +61,19 @@ def get_tier1_clusters(channel_id: str) -> list[dict]:
     Returns:
         List of cluster dicts with summary, topic_tags, member_count.
     """
-    raise NotImplementedError("Weaviate store not yet implemented (M3)")
+    from beever_atlas.stores import get_stores
+
+    store = get_stores().weaviate
+    clusters = await store.list_clusters(channel_id)
+    return [
+        {
+            "id": cluster.id,
+            "summary": cluster.summary,
+            "topic_tags": cluster.topic_tags,
+            "member_count": cluster.member_count,
+        }
+        for cluster in clusters
+    ]
 
 
 # --- Graph Memory (Neo4j) tools ---

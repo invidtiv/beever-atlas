@@ -236,3 +236,43 @@ class GraphStore(Protocol):
     ) -> None:
         """Persist a pre-computed name-embedding vector on an entity node."""
         ...
+
+    # ------------------------------------------------------------------
+    # Batch operations (optimised for persister pipeline)
+    # ------------------------------------------------------------------
+
+    async def batch_create_episodic_links(self, links: list[dict[str, Any]]) -> int:
+        """Create multiple episodic links in one batch operation.
+
+        Each link dict has: entity_name, weaviate_fact_id, message_ts,
+        channel_id, media_urls, link_urls.
+        Returns count of links created.
+        """
+        ...
+
+    async def batch_upsert_media(self, items: list[dict[str, Any]]) -> int:
+        """Batch upsert media nodes.
+
+        Each item has: url, media_type, title, channel_id, message_ts.
+        Returns count of media nodes upserted.
+        """
+        ...
+
+    async def batch_link_entities_to_media(self, links: list[dict[str, Any]]) -> int:
+        """Batch create entity-to-media links.
+
+        Each link has: entity_name, media_url.
+        Returns count of links created.
+        """
+        ...
+
+    async def batch_promote_pending(self, names: list[str]) -> int:
+        """Batch promote pending entities to active.  Returns count promoted."""
+        ...
+
+    async def batch_find_entities_by_name(self, names: list[str]) -> set[str]:
+        """Check which entity names exist in the graph.
+
+        Returns set of existing names.
+        """
+        ...

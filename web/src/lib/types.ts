@@ -45,18 +45,63 @@ export interface SyncResponse {
   status: "started";
 }
 
+export interface ActivitySample {
+  item_type: string;
+  content?: string;
+  agent?: string;
+  author?: string;
+  tags?: string[];
+  score?: number;
+  source?: string;
+  target?: string;
+  rel_type?: string;
+  model?: string;
+  status?: string;
+}
+
+export interface ActivityEntry {
+  type: "stage_start" | "stage_output";
+  agent: string;
+  stage?: string;
+  message?: string;
+  metrics?: Record<string, number>;
+  samples?: ActivitySample[];
+  elapsed?: number;
+  model?: string;
+}
+
 export interface SyncStatusResponse {
   state: "idle" | "syncing" | "error";
   job_id?: string;
   total_messages?: number;
+  parent_messages?: number;
   processed_messages?: number;
   current_batch?: number;
+  total_batches?: number;
   current_stage?: string | null;
   stage_timings?: Record<string, number>;
-  stage_details?: Record<string, Record<string, unknown>>;
+  stage_details?: {
+    activity_log?: ActivityEntry[];
+    [key: string]: unknown;
+  };
+  batch_results?: BatchResultEntry[];
+  batch_job_state?: string | null;
+  batch_job_elapsed_seconds?: number | null;
   errors?: string[];
   started_at?: string | null;
   completed_at?: string | null;
+}
+
+export interface BatchResultEntry {
+  batch_num: number;
+  facts_count: number;
+  entities_count: number;
+  relationships_count: number;
+  sample_facts: string[];
+  sample_entities: { name: string; type: string }[];
+  sample_relationships: { source: string; target: string; type: string }[];
+  duration_seconds: number;
+  error: string | null;
 }
 
 export interface ChannelInfo {
@@ -173,4 +218,121 @@ export interface MemoryTier2 {
   source_link_descriptions: string[];
   valid_at: string | null;
   invalid_at: string | null;
+}
+
+export interface ChannelSummaryResponse {
+  text: string;
+  cluster_count: number;
+  fact_count: number;
+}
+
+export interface ConsolidateResponse {
+  status: string;
+  channel_id: string;
+}
+
+// --- Sync Policy Types ---
+
+export type SyncTriggerMode = "manual" | "interval" | "cron" | "webhook";
+export type ConsolidationStrategy = "after_every_sync" | "after_n_syncs" | "scheduled" | "manual";
+
+export interface SyncConfig {
+  trigger_mode: SyncTriggerMode | null;
+  cron_expression: string | null;
+  interval_minutes: number | null;
+  sync_type: "auto" | "full" | "incremental" | null;
+  max_messages: number | null;
+  min_sync_interval_minutes: number | null;
+}
+
+export interface IngestionConfig {
+  batch_size: number | null;
+  quality_threshold: number | null;
+  max_facts_per_message: number | null;
+  skip_entity_extraction: boolean | null;
+  skip_graph_writes: boolean | null;
+}
+
+export interface ConsolidationConfig {
+  strategy: ConsolidationStrategy | null;
+  after_n_syncs: number | null;
+  cron_expression: string | null;
+  similarity_threshold: number | null;
+  merge_threshold: number | null;
+  min_facts_for_clustering: number | null;
+  staleness_refresh_days: number | null;
+}
+
+export interface ChannelPolicyResponse {
+  channel_id: string;
+  preset: string | null;
+  policy: {
+    sync: SyncConfig;
+    ingestion: IngestionConfig;
+    consolidation: ConsolidationConfig;
+  } | null;
+  effective: {
+    sync: SyncConfig;
+    ingestion: IngestionConfig;
+    consolidation: ConsolidationConfig;
+  };
+  enabled: boolean;
+  syncs_since_last_consolidation: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface GlobalDefaultsResponse {
+  sync: SyncConfig;
+  ingestion: IngestionConfig;
+  consolidation: ConsolidationConfig;
+  max_concurrent_syncs: number;
+  updated_at: string;
+}
+
+export interface PolicyPreset {
+  id: string;
+  name: string;
+  description: string;
+  sync: SyncConfig;
+  ingestion: IngestionConfig;
+  consolidation: ConsolidationConfig;
+}
+
+// --- Agent Model Configuration ---
+
+export interface AgentModelConfig {
+  models: Record<string, string>;
+  defaults: Record<string, string>;
+  updated_at: string | null;
+}
+
+export interface AvailableModels {
+  gemini: string[];
+  ollama: string[];
+  ollama_connected: boolean;
+}
+
+export type ModelPreset = "balanced" | "cost_optimized" | "quality_first" | "local_first";
+
+// --- Sync History ---
+
+export interface SyncHistoryEntry {
+  job_id: string;
+  status: "running" | "completed" | "failed";
+  sync_type: "full" | "incremental";
+  total_messages: number;
+  parent_messages: number;
+  processed_messages: number;
+  total_batches: number;
+  current_stage: string | null;
+  stage_timings: Record<string, number>;
+  stage_details: {
+    activity_log?: ActivityEntry[];
+    [key: string]: unknown;
+  };
+  batch_results: BatchResultEntry[];
+  errors: string[];
+  started_at: string | null;
+  completed_at: string | null;
 }

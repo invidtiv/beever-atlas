@@ -1,6 +1,8 @@
 """FastAPI application entry point."""
 
 import logging
+import warnings
+warnings.filterwarnings("ignore", message="unclosed resource.*TCPTransport", category=ResourceWarning)
 from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime, timezone
@@ -22,6 +24,10 @@ from beever_atlas.api.memories import router as memories_router
 from beever_atlas.api.graph import router as graph_router
 from beever_atlas.api.search import router as search_router
 from beever_atlas.api.stats import router as stats_router
+from beever_atlas.api.topics import router as topics_router
+from beever_atlas.api.policies import router as policies_router
+from beever_atlas.api.models import router as models_router
+from beever_atlas.api.dev import router as dev_router
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
 from beever_atlas.llm.provider import init_llm_provider
@@ -107,9 +113,23 @@ async def lifespan(app: FastAPI):
     init_stores(stores)
     init_llm_provider(settings)
     await _migrate_env_connection(stores, settings)
+
+    # Start the sync scheduler
+    from beever_atlas.services.scheduler import SyncScheduler, init_scheduler
+    scheduler = SyncScheduler(settings.mongodb_uri)
+    try:
+        await scheduler.startup()
+        init_scheduler(scheduler)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("SyncScheduler startup failed (non-fatal): %s", exc)
+
     try:
         yield
     finally:
+        try:
+            await scheduler.shutdown()
+        except Exception:
+            pass
         await shutdown_sync_runner()
         await close_adapter()
         await stores.shutdown()
@@ -140,6 +160,10 @@ app.include_router(memories_router)
 app.include_router(graph_router)
 app.include_router(search_router)
 app.include_router(stats_router)
+app.include_router(topics_router)
+app.include_router(policies_router)
+app.include_router(models_router)
+app.include_router(dev_router)
 
 register_health_checks()
 

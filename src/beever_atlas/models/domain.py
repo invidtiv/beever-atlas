@@ -42,6 +42,8 @@ class AtomicFact(BaseModel):
     supersedes: str | None = None
     potential_contradiction: bool = False
     text_vector: list[float] | None = None
+    fact_type: str = ""  # "decision", "opinion", "observation", "action_item", "question"
+    thread_context_summary: str = ""  # Brief summary of thread deliberation
 
     @staticmethod
     def deterministic_id(platform: str, channel_id: str, message_ts: str, fact_index: int = 0) -> str:
@@ -91,3 +93,73 @@ class Subgraph(BaseModel):
 
     nodes: list[GraphEntity] = Field(default_factory=list)
     edges: list[GraphRelationship] = Field(default_factory=list)
+
+
+class TopicCluster(BaseModel):
+    """A Tier 1 topic cluster grouping related atomic facts."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tier: str = "topic"
+    channel_id: str
+    summary: str = ""
+    topic_tags: list[str] = Field(default_factory=list)
+    member_ids: list[str] = Field(default_factory=list)
+    member_count: int = 0
+    centroid_vector: list[float] | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    # Enrichment fields (R4)
+    key_entities: list[dict[str, str]] = Field(default_factory=list)  # [{"id", "name", "type"}]
+    key_relationships: list[dict[str, str]] = Field(default_factory=list)  # [{"source", "type", "target", "confidence"}]
+    date_range_start: str = ""
+    date_range_end: str = ""
+    authors: list[str] = Field(default_factory=list)
+    media_refs: list[str] = Field(default_factory=list)
+    media_names: list[str] = Field(default_factory=list)
+    link_refs: list[str] = Field(default_factory=list)
+    high_importance_count: int = 0
+    related_cluster_ids: list[str] = Field(default_factory=list)
+    staleness_score: float = 0.0  # 0.0=fresh, 1.0=very stale
+    status: str = "active"  # "active", "completed", "stale"
+    fact_type_counts: dict[str, int] = Field(default_factory=dict)  # {"decision": N, ...}
+
+
+class ChannelSummary(BaseModel):
+    """A Tier 0 channel-level summary consolidating all topic clusters."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tier: str = "summary"
+    channel_id: str
+    text: str = ""
+    cluster_count: int = 0
+    fact_count: int = 0
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    # Enrichment fields (R4)
+    key_decisions: list[dict[str, str]] = Field(default_factory=list)
+    key_entities: list[dict[str, str]] = Field(default_factory=list)
+    key_topics: list[dict[str, Any]] = Field(default_factory=list)
+    date_range_start: str = ""
+    date_range_end: str = ""
+    media_count: int = 0
+    author_count: int = 0
+    worst_staleness: float = 0.0
+
+
+class EntityKnowledgeCard(BaseModel):
+    """Cross-channel aggregation of all knowledge about a single graph entity."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tier: str = "entity_card"
+    entity_id: str = ""
+    entity_name: str = ""
+    entity_type: str = ""
+    channel_ids: list[str] = Field(default_factory=list)
+    cluster_ids: list[str] = Field(default_factory=list)
+    fact_count: int = 0
+    fact_type_breakdown: dict[str, int] = Field(default_factory=dict)
+    key_facts: list[str] = Field(default_factory=list)
+    related_entities: list[dict[str, str]] = Field(default_factory=list)
+    last_mentioned_at: str = ""
+    staleness_score: float = 0.0
+    summary: str = ""
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))

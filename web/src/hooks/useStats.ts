@@ -76,6 +76,7 @@ export interface BatchBreakdown {
   sample_entities: { name: string; type: string }[];
   sample_relationships: { source: string; target: string; type: string }[];
   duration_seconds: number;
+  error?: string | null;
 }
 
 export interface SyncHistoryEvent extends ActivityEvent {
@@ -87,6 +88,7 @@ export interface SyncHistoryEvent extends ActivityEvent {
     total_relationships?: number;
     total_messages?: number;
     error_count?: number;
+    error?: string;
     results_summary?: BatchBreakdown[];
     [key: string]: unknown;
   };

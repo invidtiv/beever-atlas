@@ -1,19 +1,60 @@
-"""Cross-batch validator agent — Stage 6 of the ingestion pipeline."""
+"""Cross-batch validator agent — Stage 5 of the ingestion pipeline."""
 from __future__ import annotations
 
+import logging
+
 from google.adk.agents import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.genai import types
 
 from beever_atlas.agents.prompts.cross_batch_validator import CROSS_BATCH_VALIDATOR_INSTRUCTION
 from beever_atlas.agents.schemas.validation import ValidationResult
+from beever_atlas.agents.callbacks.checkpoint_skip import make_checkpoint_skip_callback
 from beever_atlas.llm import get_llm_provider
 
+logger = logging.getLogger(__name__)
 
-def create_cross_batch_validator() -> LlmAgent:
+_checkpoint_skip = make_checkpoint_skip_callback("cross_batch_validator_agent")
+
+
+def _skip_if_no_work(callback_context: CallbackContext) -> types.Content | None:
+    """Skip validator if checkpointed OR if no entities to validate."""
+    # First check: checkpoint skip
+    checkpoint_result = _checkpoint_skip(callback_context)
+    if checkpoint_result is not None:
+        return checkpoint_result
+
+    # Second check: empty entities
+    raw = callback_context.state.get("extracted_entities")
+    if raw is None:
+        return types.Content(
+            role="model",
+            parts=[types.Part(text="[Skipped: no entities to validate]")],
+        )
+    entities = raw.get("entities", []) if isinstance(raw, dict) else []
+    relationships = raw.get("relationships", []) if isinstance(raw, dict) else []
+    if not entities and not relationships:
+        logger.info("CrossBatchValidator: skipping — 0 entities, 0 relationships")
+        # Write empty validation result so downstream stages have the key
+        callback_context.state["validated_entities"] = {"entities": [], "relationships": []}
+        return types.Content(
+            role="model",
+            parts=[types.Part(text="[Skipped: no entities to validate]")],
+        )
+    return None
+
+
+def create_cross_batch_validator(model=None) -> LlmAgent:
     """Create the cross-batch validator LlmAgent."""
     return LlmAgent(
         name="cross_batch_validator_agent",
-        model=get_llm_provider().quality,
+        model=model or get_llm_provider().resolve_model("cross_batch_validator"),
         instruction=CROSS_BATCH_VALIDATOR_INSTRUCTION,
         output_schema=ValidationResult,
         output_key="validated_entities",
+        generate_content_config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            max_output_tokens=65536,
+        ),
+        before_agent_callback=_skip_if_no_work,
     )

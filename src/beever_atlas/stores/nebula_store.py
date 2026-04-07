@@ -10,7 +10,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -105,7 +104,9 @@ class NebulaStore:
         self._space = space
 
         self._pool: ConnectionPool | None = None
+        self._session: Any | None = None  # persistent session with USE <space>
         self._registered_edge_types: set[str] = set()
+        self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -131,13 +132,98 @@ class NebulaStore:
         finally:
             session.release()
 
+    def _execute_on_session_sync(self, ngql: str) -> Any:
+        """Execute on the persistent session (which already has USE <space>)."""
+        if self._session is None:
+            raise RuntimeError("Persistent session not initialized")
+        resp = self._session.execute(ngql)
+        if not resp.is_succeeded():
+            raise RuntimeError(f"nGQL error: {resp.error_msg()} | query: {ngql[:300]}")
+        return resp
+
     async def _execute(self, ngql: str) -> Any:
-        """Execute an nGQL statement asynchronously."""
+        """Execute an nGQL statement asynchronously (fresh session, no space)."""
         return await asyncio.to_thread(self._execute_sync, ngql)
 
-    async def _execute_with_space(self, ngql: str) -> Any:
-        """Execute after a USE <space> prefix."""
-        return await self._execute(f"USE `{_escape(self._space)}`; {ngql}")
+    async def _execute_with_space(self, ngql: str, *, retries: int = 5) -> Any:
+        """Execute on the persistent session that has USE <space> set.
+
+        Falls back to USE prefix with retry if persistent session isn't ready.
+        If the persistent session fails with a retryable error (SpaceNotFound,
+        session gone, etc.), it is invalidated so subsequent retries use the
+        fresh-session fallback path which is self-contained.  After a
+        successful fallback recovery, the persistent session is re-initialized
+        so future calls return to the fast path.
+        """
+        session_was_invalidated = False
+        result: Any = None
+        async with self._lock:
+            for attempt in range(retries + 1):
+                try:
+                    if self._session is not None:
+                        return await asyncio.to_thread(self._execute_on_session_sync, ngql)
+                    else:
+                        # Fallback: no persistent session yet (during ensure_schema)
+                        # or persistent session was invalidated by a prior retry.
+                        result = await asyncio.to_thread(
+                            self._execute_sync, f"USE `{_escape(self._space)}`; {ngql}"
+                        )
+                        break  # success — exit retry loop
+                except RuntimeError as exc:
+                    err = str(exc)
+                    retryable = (
+                        "SpaceNotFound" in err
+                        or "No schema found" in err
+                        or "Session not existed" in err
+                        or "connection is lost" in err
+                    )
+                    if retryable and attempt < retries:
+                        # Invalidate the persistent session so the next retry
+                        # uses a fresh session with an explicit USE prefix.
+                        # This avoids retrying the same broken session state.
+                        if self._session is not None:
+                            logger.warning(
+                                "Invalidating persistent session after retryable error: %s",
+                                err.split("|")[0].strip(),
+                            )
+                            try:
+                                self._session.release()
+                            except Exception:
+                                pass
+                            self._session = None
+                            session_was_invalidated = True
+                        wait = 5.0
+                        logger.warning("Nebula not ready (%s), retrying in %.0fs (attempt %d/%d)...",
+                                       err.split("|")[0].strip(), wait, attempt + 1, retries)
+                        await asyncio.sleep(wait)
+                        continue
+                    raise
+
+        # If we recovered via the fallback path after invalidating the
+        # persistent session, re-initialize it for future calls.
+        if session_was_invalidated and self._session is None:
+            try:
+                await self._init_persistent_session()
+            except Exception:
+                logger.warning("Could not re-init persistent session; will keep using fallback path")
+
+        return result
+
+    async def _init_persistent_session(self) -> None:
+        """Create a persistent session with USE <space> pre-configured.
+
+        Called after ensure_schema when the space is confirmed ready.
+        """
+        def _init() -> Any:
+            pool = self._get_pool()
+            session = pool.get_session(self._user, self._password)
+            resp = session.execute(f"USE `{_escape(self._space)}`")
+            if not resp.is_succeeded():
+                session.release()
+                raise RuntimeError(f"USE {self._space} failed: {resp.error_msg()}")
+            return session
+        self._session = await asyncio.to_thread(_init)
+        logger.info("Persistent session initialized for space '%s'", self._space)
 
     def _entity_from_row(self, row: dict[str, Any]) -> GraphEntity:
         """Construct a GraphEntity from a Nebula result row."""
@@ -227,13 +313,13 @@ class NebulaStore:
     # Schema propagation helper
     # ------------------------------------------------------------------
 
-    async def _wait_for_schema(self, check_ngql: str, max_retries: int = 3) -> None:
+    async def _wait_for_schema(self, check_ngql: str, max_retries: int = 6) -> None:
         """Retry *check_ngql* with exponential backoff until it succeeds.
 
         Nebula schema DDL is asynchronous; newly created TAGs/EDGEs may not
-        be visible immediately.
+        be visible immediately.  Default waits up to ~30s.
         """
-        wait = 2.0
+        wait = 3.0
         for attempt in range(max_retries):
             try:
                 await self._execute_with_space(check_ngql)
@@ -309,7 +395,13 @@ class NebulaStore:
         logger.info("NebulaStore connected to %s", self._hosts_str)
 
     async def shutdown(self) -> None:
-        """Close the ConnectionPool."""
+        """Release persistent session and close the ConnectionPool."""
+        if self._session is not None:
+            try:
+                await asyncio.to_thread(self._session.release)
+            except Exception:
+                pass
+            self._session = None
         if self._pool is not None:
             await asyncio.to_thread(self._pool.close)
             self._pool = None
@@ -324,8 +416,22 @@ class NebulaStore:
             f"CREATE SPACE IF NOT EXISTS `{space}` "
             f"(vid_type=FIXED_STRING(128), partition_num=10, replica_factor=1)"
         )
-        # Wait for space to propagate
-        await asyncio.sleep(2.0)
+        # Wait for space to propagate — NebulaGraph needs ~2 heartbeat cycles
+        # (default 10s each = ~20-25s) for storage partition assignment after
+        # CREATE SPACE.  We poll every 5s for up to 60s.
+        for attempt in range(12):
+            await asyncio.sleep(5.0)
+            try:
+                await self._execute(f"USE `{space}`; SHOW TAGS")
+                logger.info("Space '%s' ready after ~%ds", self._space, (attempt + 1) * 5)
+                break
+            except RuntimeError:
+                logger.info("Waiting for space '%s' partition assignment (attempt %d/12)...", self._space, attempt + 1)
+        else:
+            raise RuntimeError(
+                f"Space '{self._space}' did not become ready after 60s. "
+                f"Check NebulaGraph storaged status with SHOW HOSTS."
+            )
 
         # Entity tag
         await self._execute_with_space(
@@ -383,40 +489,75 @@ class NebulaStore:
         self._registered_edge_types = set(_EDGE_TYPE_VOCABULARY)
 
         # Create indexes for common lookups
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_entity_name ON Entity(name(128))"
-        )
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_entity_type ON Entity(type(64))"
-        )
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_entity_channel ON Entity(channel_id(128))"
-        )
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_entity_status ON Entity(status(16))"
-        )
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_event_weaviate ON Event(weaviate_id(128))"
-        )
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_event_channel ON Event(channel_id(128))"
-        )
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_media_url ON Media(url(256))"
-        )
-        await self._execute_with_space(
-            "CREATE TAG INDEX IF NOT EXISTS idx_media_channel ON Media(channel_id(128))"
-        )
+        _indexes = [
+            "CREATE TAG INDEX IF NOT EXISTS idx_entity_name ON Entity(name(128))",
+            "CREATE TAG INDEX IF NOT EXISTS idx_entity_type ON Entity(type(64))",
+            "CREATE TAG INDEX IF NOT EXISTS idx_entity_channel ON Entity(channel_id(128))",
+            "CREATE TAG INDEX IF NOT EXISTS idx_entity_status ON Entity(status(16))",
+            "CREATE TAG INDEX IF NOT EXISTS idx_event_weaviate ON Event(weaviate_id(128))",
+            "CREATE TAG INDEX IF NOT EXISTS idx_event_channel ON Event(channel_id(128))",
+            "CREATE TAG INDEX IF NOT EXISTS idx_media_url ON Media(url(256))",
+            "CREATE TAG INDEX IF NOT EXISTS idx_media_channel ON Media(channel_id(128))",
+        ]
+        for stmt in _indexes:
+            await self._execute_with_space(stmt)
 
-        # Rebuild indexes
-        await self._execute_with_space("REBUILD TAG INDEX idx_entity_name")
-        await self._execute_with_space("REBUILD TAG INDEX idx_entity_type")
-        await self._execute_with_space("REBUILD TAG INDEX idx_entity_channel")
-        await self._execute_with_space("REBUILD TAG INDEX idx_entity_status")
-        await self._execute_with_space("REBUILD TAG INDEX idx_event_weaviate")
-        await self._execute_with_space("REBUILD TAG INDEX idx_event_channel")
-        await self._execute_with_space("REBUILD TAG INDEX idx_media_url")
-        await self._execute_with_space("REBUILD TAG INDEX idx_media_channel")
+        # Rebuild indexes — NebulaGraph DDL is asynchronous, so CREATE INDEX
+        # may not have propagated to storaged yet.  We poll until the first
+        # index is visible in SHOW TAG INDEXES output, then rebuild all.
+        _index_names = [
+            "idx_entity_name", "idx_entity_type", "idx_entity_channel",
+            "idx_entity_status", "idx_event_weaviate", "idx_event_channel",
+            "idx_media_url", "idx_media_channel",
+        ]
+
+        # Wait for indexes to propagate (poll up to ~60s).
+        for wait_attempt in range(12):
+            try:
+                await self._execute_with_space(f"REBUILD TAG INDEX {_index_names[0]}")
+                # First index rebuild succeeded — propagation is done.
+                remaining = _index_names[1:]
+                break
+            except RuntimeError:
+                logger.info(
+                    "Waiting for index propagation (attempt %d/12)...",
+                    wait_attempt + 1,
+                )
+                await asyncio.sleep(5.0)
+        else:
+            logger.warning(
+                "Index propagation timed out — skipping REBUILD (will retry next startup)"
+            )
+            remaining = []
+
+        for idx_name in remaining:
+            try:
+                await self._execute_with_space(f"REBUILD TAG INDEX {idx_name}")
+            except RuntimeError as exc:
+                logger.warning("Index %s rebuild skipped: %s", idx_name, exc)
+
+        # Final stabilization — verify INSERT works (NebulaGraph partition
+        # assignment can lag behind DDL success by 10-20s).
+        sentinel_vid = "__nebula_schema_probe__"
+        for probe_attempt in range(6):
+            try:
+                await self._execute_with_space(
+                    f'INSERT VERTEX IF NOT EXISTS Entity (name) VALUES "{sentinel_vid}":("{sentinel_vid}")'
+                )
+                # Clean up probe vertex
+                await self._execute_with_space(
+                    f'DELETE VERTEX "{sentinel_vid}" WITH EDGE'
+                )
+                break
+            except RuntimeError:
+                logger.info("Schema probe INSERT failed, waiting 5s (attempt %d/6)...", probe_attempt + 1)
+                await asyncio.sleep(5.0)
+        else:
+            logger.warning("Schema probe never succeeded — space may not be fully operational yet")
+
+        # Initialize persistent session now that the space is confirmed ready.
+        # This avoids per-call USE <space> and sidesteps propagation edge cases.
+        await self._init_persistent_session()
 
         logger.info(
             "NebulaStore schema ensured for space %r (%d edge types registered)",
@@ -1330,3 +1471,58 @@ class NebulaStore:
             f'UPDATE VERTEX ON Entity {_quote(vid)} SET '
             f'name_vector = {_quote(vec_json)}'
         )
+
+    # ------------------------------------------------------------------
+    # Batch operations (delegate to individual methods)
+    # ------------------------------------------------------------------
+
+    async def batch_create_episodic_links(self, links: list[dict[str, Any]]) -> int:
+        count = 0
+        for link in links:
+            try:
+                await self.create_episodic_link(**link)
+                count += 1
+            except Exception:
+                logger.warning("NebulaStore: batch episodic link failed for %s", link.get("entity_name", "?"), exc_info=True)
+        return count
+
+    async def batch_upsert_media(self, items: list[dict[str, Any]]) -> int:
+        count = 0
+        for item in items:
+            try:
+                await self.upsert_media(**item)
+                count += 1
+            except Exception:
+                logger.warning("NebulaStore: batch upsert_media failed for %s", item.get("url", "?")[:60], exc_info=True)
+        return count
+
+    async def batch_link_entities_to_media(self, links: list[dict[str, Any]]) -> int:
+        count = 0
+        for link in links:
+            try:
+                await self.link_entity_to_media(**link)
+                count += 1
+            except Exception:
+                logger.warning("NebulaStore: batch link_entity_to_media failed", exc_info=True)
+        return count
+
+    async def batch_promote_pending(self, names: list[str]) -> int:
+        count = 0
+        for name in names:
+            try:
+                await self.promote_pending_entity(name)
+                count += 1
+            except Exception:
+                pass  # Entity may not be pending
+        return count
+
+    async def batch_find_entities_by_name(self, names: list[str]) -> set[str]:
+        found: set[str] = set()
+        for name in names:
+            try:
+                entity = await self.find_entity_by_name(name)
+                if entity is not None:
+                    found.add(name)
+            except Exception:
+                pass
+        return found

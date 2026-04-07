@@ -69,6 +69,8 @@ class MockAdapter(BaseAdapter):
         channel_id: str,
         since: datetime | None = None,
         limit: int = 100,
+        before: str | None = None,
+        order: str = "desc",
     ) -> list[NormalizedMessage]:
         """Return fixture messages for the given channel."""
         raw_messages = self._data.get("messages", {}).get(channel_id, [])
@@ -77,7 +79,7 @@ class MockAdapter(BaseAdapter):
         if since:
             messages = [m for m in messages if m.timestamp >= since]
 
-        messages.sort(key=lambda m: m.timestamp)
+        messages.sort(key=lambda m: m.timestamp, reverse=(order == "desc"))
         return messages[:limit]
 
     async def fetch_thread(

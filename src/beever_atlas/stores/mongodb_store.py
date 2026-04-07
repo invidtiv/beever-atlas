@@ -13,6 +13,10 @@ from beever_atlas.models import (
     SyncJob,
     WriteIntent,
 )
+from beever_atlas.models.sync_policy import (
+    ChannelPolicy,
+    GlobalPolicyDefaults,
+)
 
 
 class MongoDBStore:
@@ -25,6 +29,9 @@ class MongoDBStore:
         self._channel_sync_state = self._db["channel_sync_state"]
         self._write_intents = self._db["write_intents"]
         self._activity_events = self._db["activity_events"]
+        self._channel_policies = self._db["channel_policies"]
+        self._global_policy_defaults = self._db["global_policy_defaults"]
+        self._pipeline_checkpoints = self._db["pipeline_checkpoints"]
 
     @property
     def db(self):
@@ -38,6 +45,44 @@ class MongoDBStore:
         await self._write_intents.create_index([("created_at", 1), ("weaviate_done", 1), ("neo4j_done", 1)])
         await self._channel_sync_state.create_index("channel_id", unique=True)
         await self._activity_events.create_index([("timestamp", -1)])
+        await self._channel_policies.create_index("channel_id", unique=True)
+        await self._pipeline_checkpoints.create_index("batch_key", unique=True)
+        # Seed global policy defaults from Settings if not present
+        existing = await self._global_policy_defaults.find_one({"id": "global"})
+        if existing is None:
+            from beever_atlas.infra.config import get_settings
+            from beever_atlas.models.sync_policy import (
+                ConsolidationConfig,
+                ConsolidationStrategy,
+                IngestionConfig,
+                SyncConfig,
+                SyncTriggerMode,
+            )
+            s = get_settings()
+            defaults = GlobalPolicyDefaults(
+                sync=SyncConfig(
+                    trigger_mode=SyncTriggerMode.MANUAL,
+                    sync_type="auto",
+                    max_messages=s.sync_max_messages,
+                    min_sync_interval_minutes=5,
+                ),
+                ingestion=IngestionConfig(
+                    batch_size=s.sync_batch_size,
+                    quality_threshold=s.quality_threshold,
+                    max_facts_per_message=s.max_facts_per_message,
+                    skip_entity_extraction=False,
+                    skip_graph_writes=False,
+                ),
+                consolidation=ConsolidationConfig(
+                    strategy=ConsolidationStrategy.AFTER_EVERY_SYNC,
+                    after_n_syncs=3,
+                    similarity_threshold=s.cluster_similarity_threshold,
+                    merge_threshold=s.cluster_merge_threshold,
+                    min_facts_for_clustering=3,
+                    staleness_refresh_days=7,
+                ),
+            )
+            await self._global_policy_defaults.insert_one(defaults.model_dump(mode="json"))
 
     async def shutdown(self) -> None:
         """Close the MongoDB client connection."""
@@ -52,13 +97,15 @@ class MongoDBStore:
         channel_id: str,
         sync_type: str,
         total_messages: int,
-        batch_size: int = 50,
+        batch_size: int = 10,
+        parent_messages: int = 0,
     ) -> SyncJob:
         """Create and persist a new SyncJob, returning the model."""
         job = SyncJob(
             channel_id=channel_id,
             sync_type=sync_type,
             total_messages=total_messages,
+            parent_messages=parent_messages or total_messages,
             batch_size=batch_size,
         )
         await self._sync_jobs.insert_one(job.model_dump())
@@ -72,28 +119,35 @@ class MongoDBStore:
         current_stage: str | None = None,
         stage_timings: dict[str, float] | None = None,
         stage_details: dict[str, Any] | None = None,
+        total_batches: int | None = None,
+        batch_result: dict[str, Any] | None = None,
     ) -> None:
         """Update processed message count, current batch index, and optional stage."""
         update: dict[str, Any] = {
             "processed_messages": processed,
             "current_batch": current_batch,
         }
+        if total_batches is not None:
+            update["total_batches"] = total_batches
         if current_stage is not None:
             update["current_stage"] = current_stage
         if stage_timings is not None:
             update["stage_timings"] = stage_timings
         if stage_details is not None:
             update["stage_details"] = stage_details
-        await self._sync_jobs.update_one(
-            {"id": job_id},
-            {"$set": update},
-        )
+
+        ops: dict[str, Any] = {"$set": update, "$inc": {"version": 1}}
+        if batch_result is not None:
+            ops["$push"] = {"batch_results": batch_result}
+
+        await self._sync_jobs.update_one({"id": job_id}, ops)
 
     async def complete_sync_job(
         self,
         job_id: str,
         status: str,
         errors: list[str] | None = None,
+        failed_stage: str | None = None,
     ) -> None:
         """Mark a sync job as completed or failed with an optional error list."""
         update: dict[str, Any] = {
@@ -102,6 +156,8 @@ class MongoDBStore:
         }
         if errors is not None:
             update["errors"] = errors
+        if failed_stage is not None:
+            update["current_stage"] = failed_stage
         await self._sync_jobs.update_one({"id": job_id}, {"$set": update})
 
     async def get_sync_status(self, channel_id: str) -> SyncJob | None:
@@ -114,6 +170,59 @@ class MongoDBStore:
             return None
         doc.pop("_id", None)
         return SyncJob(**doc)
+
+    async def get_sync_jobs_for_channel(
+        self,
+        channel_id: str,
+        limit: int = 20,
+    ) -> list[SyncJob]:
+        """Return past sync jobs for a channel, newest first."""
+        cursor = self._sync_jobs.find(
+            {"channel_id": channel_id},
+            sort=[("started_at", -1)],
+            limit=limit,
+        )
+        jobs: list[SyncJob] = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            jobs.append(SyncJob(**doc))
+        return jobs
+
+    async def save_fact_statuses(
+        self,
+        job_id: str,
+        batch_num: int,
+        statuses: list[dict[str, Any]],
+    ) -> None:
+        """Upsert fact status array into a batch result entry.
+
+        Each status dict has: fact_index, status, weaviate_id, error, retry_count
+        """
+        # Use array filter to update the specific batch_result entry by batch_num
+        # If no matching batch_result exists, push a new entry
+        await self._sync_jobs.update_one(
+            {"id": job_id, "batch_results.batch_num": batch_num},
+            {"$set": {"batch_results.$.fact_statuses": statuses}},
+        )
+
+    async def get_failed_facts(
+        self,
+        job_id: str,
+        max_retries: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return facts with status 'failed' and retry_count < max_retries."""
+        job = await self._sync_jobs.find_one({"id": job_id})
+        if not job:
+            return []
+        failed: list[dict[str, Any]] = []
+        for batch_result in job.get("batch_results", []):
+            for fact in batch_result.get("fact_statuses", []):
+                if fact.get("status") == "failed" and fact.get("retry_count", 0) < max_retries:
+                    failed.append({
+                        "batch_num": batch_result.get("batch_num"),
+                        **fact,
+                    })
+        return failed
 
     async def get_channel_sync_state(self, channel_id: str) -> ChannelSyncState | None:
         """Return the ChannelSyncState for the given channel, or None."""
@@ -254,3 +363,139 @@ class MongoDBStore:
             doc.pop("_id", None)
             events.append(ActivityEvent(**doc))
         return events
+
+    # ------------------------------------------------------------------
+    # Channel policies
+    # ------------------------------------------------------------------
+
+    async def get_channel_policy(self, channel_id: str) -> ChannelPolicy | None:
+        """Return the policy for a channel, or None if not set."""
+        doc = await self._channel_policies.find_one({"channel_id": channel_id})
+        if doc is None:
+            return None
+        doc.pop("_id", None)
+        return ChannelPolicy(**doc)
+
+    async def upsert_channel_policy(self, policy: ChannelPolicy) -> ChannelPolicy:
+        """Create or update a channel policy. Returns the persisted policy."""
+        policy.updated_at = datetime.now(tz=UTC)
+        await self._channel_policies.update_one(
+            {"channel_id": policy.channel_id},
+            {"$set": policy.model_dump(mode="json")},
+            upsert=True,
+        )
+        return policy
+
+    async def delete_channel_policy(self, channel_id: str) -> bool:
+        """Delete a channel policy. Returns True if a document was deleted."""
+        result = await self._channel_policies.delete_one({"channel_id": channel_id})
+        return result.deleted_count > 0
+
+    async def list_channel_policies(self) -> list[ChannelPolicy]:
+        """Return all channel policies."""
+        policies: list[ChannelPolicy] = []
+        async for doc in self._channel_policies.find():
+            doc.pop("_id", None)
+            policies.append(ChannelPolicy(**doc))
+        return policies
+
+    async def get_global_defaults(self) -> GlobalPolicyDefaults:
+        """Return the global policy defaults (always exists after startup)."""
+        doc = await self._global_policy_defaults.find_one({"id": "global"})
+        if doc is None:
+            return GlobalPolicyDefaults()
+        doc.pop("_id", None)
+        return GlobalPolicyDefaults(**doc)
+
+    async def update_global_defaults(
+        self, defaults: GlobalPolicyDefaults,
+    ) -> GlobalPolicyDefaults:
+        """Update the global policy defaults."""
+        defaults.updated_at = datetime.now(tz=UTC)
+        await self._global_policy_defaults.update_one(
+            {"id": "global"},
+            {"$set": defaults.model_dump(mode="json")},
+            upsert=True,
+        )
+        return defaults
+
+    async def increment_sync_counter(self, channel_id: str) -> int:
+        """Atomically increment syncs_since_last_consolidation. Returns new value.
+
+        Uses upsert so it works even for channels without an explicit policy document.
+        """
+        result = await self._channel_policies.find_one_and_update(
+            {"channel_id": channel_id},
+            {
+                "$inc": {"syncs_since_last_consolidation": 1},
+                "$setOnInsert": {"channel_id": channel_id, "enabled": True},
+            },
+            upsert=True,
+            return_document=True,
+        )
+        if result is None:
+            return 0
+        return result.get("syncs_since_last_consolidation", 0)
+
+    async def reset_sync_counter(self, channel_id: str) -> None:
+        """Reset syncs_since_last_consolidation to 0."""
+        await self._channel_policies.update_one(
+            {"channel_id": channel_id},
+            {"$set": {"syncs_since_last_consolidation": 0}},
+        )
+
+    # ------------------------------------------------------------------
+    # Pipeline checkpoints
+    # ------------------------------------------------------------------
+
+    async def save_pipeline_checkpoint(
+        self, sync_job_id: str, batch_num: int, channel_id: str,
+        completed_stage: str, completed_stage_index: int,
+        state_snapshot: dict[str, Any], stage_timings: dict[str, float],
+    ) -> None:
+        batch_key = f"{sync_job_id}:{batch_num}"
+        await self._pipeline_checkpoints.update_one(
+            {"batch_key": batch_key},
+            {"$set": {
+                "batch_key": batch_key, "sync_job_id": sync_job_id,
+                "batch_num": batch_num, "channel_id": channel_id,
+                "completed_stage": completed_stage,
+                "completed_stage_index": completed_stage_index,
+                "state_snapshot": state_snapshot,
+                "stage_timings": stage_timings,
+                "updated_at": datetime.now(tz=UTC),
+            }, "$setOnInsert": {"created_at": datetime.now(tz=UTC)}},
+            upsert=True,
+        )
+
+    async def load_pipeline_checkpoint(self, sync_job_id: str, batch_num: int) -> dict[str, Any] | None:
+        batch_key = f"{sync_job_id}:{batch_num}"
+        doc = await self._pipeline_checkpoints.find_one({"batch_key": batch_key})
+        if doc is None:
+            return None
+        doc.pop("_id", None)
+        return doc
+
+    async def delete_pipeline_checkpoint(self, sync_job_id: str, batch_num: int) -> None:
+        batch_key = f"{sync_job_id}:{batch_num}"
+        await self._pipeline_checkpoints.delete_one({"batch_key": batch_key})
+
+    # ------------------------------------------------------------------
+    # Agent model configuration
+    # ------------------------------------------------------------------
+
+    async def get_agent_model_config(self) -> dict[str, Any] | None:
+        """Load per-agent model configuration from MongoDB."""
+        doc = await self.db["agent_model_config"].find_one({"_id": "agent_model_config"})
+        if doc:
+            doc.pop("_id", None)
+        return doc
+
+    async def save_agent_model_config(self, models: dict[str, str]) -> None:
+        """Persist per-agent model assignments to MongoDB."""
+        from datetime import UTC, datetime
+        await self.db["agent_model_config"].update_one(
+            {"_id": "agent_model_config"},
+            {"$set": {"models": models, "updated_at": datetime.now(tz=UTC).isoformat()}},
+            upsert=True,
+        )

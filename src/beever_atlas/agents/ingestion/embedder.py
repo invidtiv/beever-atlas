@@ -129,6 +129,11 @@ class EmbedderAgent(BaseAgent):
         ctx: InvocationContext,
     ) -> AsyncGenerator[Event, None]:
         """Embed all classified facts and write results to session state."""
+        from beever_atlas.agents.callbacks.checkpoint_skip import should_skip_stage
+        if should_skip_stage(ctx.session.state, "embedded_facts", self.name):
+            yield Event(author=self.name, invocation_id=ctx.invocation_id)
+            return
+
         sync_job_id = ctx.session.state.get("sync_job_id", "unknown")
         channel_id = ctx.session.state.get("channel_id", "unknown")
         batch_num = ctx.session.state.get("batch_num", "?")

@@ -131,7 +131,8 @@ def _is_skippable(msg: dict[str, Any]) -> bool:
     - Is a Slack join/leave or other system subtype.
     """
     text: str = (msg.get("text") or msg.get("content") or "").strip()
-    if not text:
+    has_attachments = bool(msg.get("attachments") or msg.get("files"))
+    if not text and not has_attachments:
         return True
 
     raw_meta = msg.get("raw_metadata") if isinstance(msg.get("raw_metadata"), dict) else {}
@@ -267,13 +268,18 @@ async def _resolve_cross_batch_parent(
             return f"[Reply to {author}: {text}]"
 
         # Fallback: search Weaviate for a fact from this message
-        facts = await stores.weaviate.list_facts(
+        weaviate_facts = await stores.weaviate.list_facts(
             channel_id=msg.get("channel_id", ""),
             filters=type("F", (), {"topic": None, "entity": None, "importance": None, "since": None, "until": None})(),
             page=1,
             limit=1,
         )
-        # This is a basic fallback — in practice you'd filter by source_message_id
+        if weaviate_facts:
+            first = weaviate_facts[0] if isinstance(weaviate_facts, list) else None
+            if first:
+                text = (first.get("text") or first.get("statement") or "")[:max_len]
+                if text:
+                    return f"[Reply to thread: {text}]"
 
     except Exception:
         logger.warning(
@@ -305,6 +311,11 @@ class PreprocessorAgent(BaseAgent):
         ctx: InvocationContext,
     ) -> AsyncGenerator[Event, None]:
         """Execute preprocessing and yield a single completion event."""
+        from beever_atlas.agents.callbacks.checkpoint_skip import should_skip_stage
+        if should_skip_stage(ctx.session.state, "preprocessed_messages", self.name):
+            yield Event(author=self.name, invocation_id=ctx.invocation_id)
+            return
+
         messages: list[dict[str, Any]] = ctx.session.state.get("messages") or []
         sync_job_id = ctx.session.state.get("sync_job_id", "unknown")
         channel_id = ctx.session.state.get("channel_id", "unknown")
@@ -331,6 +342,7 @@ class PreprocessorAgent(BaseAgent):
 
         preprocessed: list[dict[str, Any]] = []
         skipped = 0
+        msg_seq = 0
 
         for msg in messages:
             if _is_skippable(msg):
@@ -352,6 +364,8 @@ class PreprocessorAgent(BaseAgent):
             enriched["modality"] = _detect_modality(msg)
             enriched["thread_context"] = _build_thread_context(msg, messages_by_ts)
             enriched["preprocessed"] = True
+            enriched["msg_id"] = f"msg-{msg_seq}"
+            msg_seq += 1
             preprocessed.append(enriched)
 
         # --- Coreference resolution ---
@@ -384,7 +398,7 @@ class PreprocessorAgent(BaseAgent):
 
         # Process media attachments and extract links for all messages.
         media_enriched = 0
-        media_processor = None
+        mixed_msgs: list[dict[str, Any]] = []
         for enriched_msg in preprocessed:
             # --- Extract link/unfurl metadata for ALL messages ---
             raw_meta = enriched_msg.get("raw_metadata") if isinstance(enriched_msg.get("raw_metadata"), dict) else {}
@@ -445,24 +459,43 @@ class PreprocessorAgent(BaseAgent):
                 att_type = first_att.get("type", "")
                 enriched_msg["source_media_type"] = att_type if att_type in ("image", "pdf", "video") else "file"
 
-            try:
-                if media_processor is None:
-                    from beever_atlas.services.media_processor import MediaProcessor
-                    media_processor = MediaProcessor()
+            mixed_msgs.append(enriched_msg)
 
-                media_result = await media_processor.process_message_media(enriched_msg)
-                if media_result["description"]:
-                    enriched_msg["text"] += "\n\n" + media_result["description"]
+        # Concurrent media processing: fire off all API calls in parallel,
+        # then apply results sequentially to preserve virtual-message ordering.
+        if mixed_msgs:
+            import asyncio as _asyncio
+            from beever_atlas.services.media_processor import MediaProcessor
+            media_processor = MediaProcessor()
+
+            async def _safe_process(msg: dict[str, Any]) -> dict[str, Any] | None:
+                try:
+                    return await media_processor.process_message_media(msg)
+                except Exception:
+                    logger.warning(
+                        "PreprocessorAgent: media processing failed for message %s",
+                        msg.get("ts"),
+                        exc_info=True,
+                    )
+                    return None
+
+            media_results = await _asyncio.gather(*[_safe_process(m) for m in mixed_msgs])
+            await media_processor.close()
+
+            for enriched_msg, media_result in zip(mixed_msgs, media_results):
+                if media_result is None:
+                    continue
+
+                if media_result.get("description"):
+                    desc = media_result["description"]
+                    # Cap media descriptions to avoid bloating the fact extraction prompt
+                    if len(desc) > 2000:
+                        desc = desc[:2000] + "\n[...truncated]"
+                    enriched_msg["text"] += "\n\n" + desc
                     media_enriched += 1
-                if media_result["media_urls"]:
+                if media_result.get("media_urls"):
                     enriched_msg["source_media_urls"] = media_result["media_urls"]
                     enriched_msg["source_media_type"] = media_result["media_type"]
-            except Exception:
-                logger.warning(
-                    "PreprocessorAgent: media processing failed for message %s",
-                    enriched_msg.get("ts"),
-                    exc_info=True,
-                )
 
         logger.info(
             "PreprocessorAgent: done job_id=%s channel=%s batch=%s in=%d skipped=%d retained=%d media_enriched=%d",

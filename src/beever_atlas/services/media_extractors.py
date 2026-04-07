@@ -15,11 +15,63 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-
+from beever_atlas.agents.prompts.media import (
+    AUDIO_TRANSCRIPTION_PROMPT,
+    DOCUMENT_DIGEST_PROMPT,
+    IMAGE_DESCRIPTION_PROMPT,
+    VIDEO_ANALYSIS_PROMPT,
+)
 from beever_atlas.infra.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# ── Shared Gemini client ──────────────────────────────────────────────
+_gemini_client: Any = None
+_gemini_client_lock: asyncio.Lock | None = None
+
+
+def _get_client_lock() -> asyncio.Lock:
+    global _gemini_client_lock
+    if _gemini_client_lock is None:
+        _gemini_client_lock = asyncio.Lock()
+    return _gemini_client_lock
+
+
+async def _get_gemini_client() -> Any:
+    """Return a shared genai.Client, creating it lazily under a lock."""
+    global _gemini_client
+    lock = _get_client_lock()
+    async with lock:
+        if _gemini_client is None:
+            from google import genai
+            settings = get_settings()
+            _gemini_client = genai.Client(api_key=settings.google_api_key)
+        return _gemini_client
+
+
+async def _poll_file_active(
+    client: Any,
+    file_name: str,
+    *,
+    poll_interval: float = 2.0,
+    max_wait: float = 90.0,
+) -> None:
+    """Poll Gemini Files API until the uploaded file reaches ACTIVE state."""
+    elapsed = 0.0
+    while elapsed < max_wait:
+        file_info = await client.aio.files.get(name=file_name)
+        state = file_info.state
+        if state == "ACTIVE":
+            return
+        if state == "FAILED":
+            error_msg = getattr(file_info, "error", None) or "unknown error"
+            raise RuntimeError(f"File processing failed: {error_msg}")
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+
+    raise TimeoutError(
+        f"File {file_name} did not reach ACTIVE state within {max_wait}s"
+    )
 
 
 @dataclass
@@ -29,6 +81,7 @@ class MediaContent:
     media_urls: list[str] = field(default_factory=list)
     media_type: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    chunks: list[str] = field(default_factory=list)
 
 
 class MediaExtractor(ABC):
@@ -49,6 +102,35 @@ class MediaExtractor(ABC):
         self, data: bytes, filename: str, metadata: dict[str, Any] | None = None
     ) -> MediaContent:
         """Extract content from file bytes."""
+
+    async def _digest_document(self, text: str) -> str:
+        """Digest a document into a concise summary using direct Gemini API."""
+        settings = get_settings()
+        if not settings.google_api_key:
+            return text[:4000] + ("\n[...truncated]" if len(text) > 4000 else "")
+        try:
+            from google.genai import types as genai_types
+
+            client = await _get_gemini_client()
+
+            prompt = DOCUMENT_DIGEST_PROMPT.format(document_text=text[:8000])
+
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=settings.media_vision_model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[genai_types.Part.from_text(text=prompt)],
+                        )
+                    ],
+                ),
+                timeout=60,
+            )
+            return response.text or text[:4000]
+        except Exception:
+            logger.warning("Document digestion failed", exc_info=True)
+            return text[:4000] + ("\n[...truncated]" if len(text) > 4000 else "")
 
 
 class MediaExtractorRegistry:
@@ -101,9 +183,7 @@ class MediaExtractorRegistry:
 
 
 class PdfExtractor(MediaExtractor):
-    """Extract text from PDF files using pypdf."""
-
-    MAX_CHARS = 5000
+    """Extract text from PDF files using pypdf with page-chunked output."""
 
     @property
     def supported_mime_types(self) -> list[str]:
@@ -116,39 +196,61 @@ class PdfExtractor(MediaExtractor):
     async def extract(
         self, data: bytes, filename: str, metadata: dict[str, Any] | None = None
     ) -> MediaContent:
-        text = await asyncio.to_thread(self._extract_text, data)
+        from beever_atlas.infra.config import get_settings
+        settings = get_settings()
+
+        pages = await asyncio.to_thread(self._extract_pages, data, settings.pdf_max_pages)
         size_kb = len(data) // 1024
-        if text.strip():
+
+        if not any(p.strip() for p in pages):
+            return MediaContent(
+                text=f"[Attachment: {filename} (PDF, {size_kb} kB, no extractable text)]",
+                media_type="pdf",
+            )
+
+        full_text = "\n\n".join(p.strip() for p in pages if p.strip())
+        header = f"[Attachment: {filename} (PDF, {size_kb} kB, {len(pages)} pages)]"
+
+        if settings.media_digest_enabled:
+            digest_content = await self._digest_document(full_text)
             desc = (
-                f"[Attachment: {filename} (PDF, {size_kb} kB)]\n"
-                f"[Document text: {text[:self.MAX_CHARS]}]"
+                f"{header}\n"
+                f"[Document Digest]:\n{digest_content}"
             )
         else:
-            desc = f"[Attachment: {filename} (PDF, {size_kb} kB, no extractable text)]"
-        return MediaContent(text=desc, media_type="pdf")
+            # Skip LLM digestion — return truncated raw text for speed
+            truncated = full_text[:4000]
+            if len(full_text) > 4000:
+                truncated += "\n[...truncated]"
+            desc = f"{header}\n{truncated}"
+
+        return MediaContent(
+            text=desc,
+            media_type="pdf",
+        )
 
     @staticmethod
-    def _extract_text(data: bytes) -> str:
+    def _extract_pages(data: bytes, max_pages: int) -> list[str]:
+        """Extract text from each page independently. Returns one string per page."""
         try:
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(data))
             pages: list[str] = []
-            char_count = 0
-            for page in reader.pages:
-                page_text = page.extract_text() or ""
-                if page_text.strip():
-                    pages.append(page_text.strip())
-                    char_count += len(page_text.strip())
-                    if char_count >= PdfExtractor.MAX_CHARS:
-                        break
-            result = "\n\n".join(pages)
-            if char_count >= PdfExtractor.MAX_CHARS:
-                result = result[:PdfExtractor.MAX_CHARS]
-                result += "\n[...truncated]"
-            return result
+            total = len(reader.pages)
+            limit = min(total, max_pages)
+
+            for i in range(limit):
+                page_text = reader.pages[i].extract_text() or ""
+                pages.append(page_text.strip())
+
+            if total > max_pages:
+                remaining = total - max_pages
+                pages.append(f"[...remaining {remaining} pages not processed]")
+
+            return pages
         except Exception:
-            logger.warning("PdfExtractor: text extraction failed", exc_info=True)
-            return ""
+            logger.warning("PdfExtractor: page extraction failed", exc_info=True)
+            return []
 
 
 class ImageExtractor(MediaExtractor):
@@ -186,11 +288,11 @@ class ImageExtractor(MediaExtractor):
                 media_type="image",
             )
 
-        description = await self._describe_image(data, message_text)
+        description = await self._describe_image(data, message_text, filename)
         if description:
             desc = (
                 f"[Attachment: {filename} (image, {size_kb} kB)]\n"
-                f"[Image description: {description}]"
+                f"[Image description]: {description}"
             )
         else:
             desc = f"[Attachment: {filename} (image, {size_kb} kB)]"
@@ -206,37 +308,69 @@ class ImageExtractor(MediaExtractor):
             return True
         return False
 
-    async def _describe_image(self, data: bytes, message_context: str) -> str:
-        try:
-            from google import genai
-            from google.genai import types as genai_types
-            settings = get_settings()
-            client = genai.Client(api_key=settings.google_api_key)
+    _IMAGE_MIME_MAP: dict[str, str] = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+    }
 
-            prompt = (
-                "Describe this image concisely for a knowledge extraction system. "
-                "Focus on: key data points, text visible in the image, chart/graph values, "
-                "names, dates, and any actionable information. "
-                "Keep the description under 200 words."
-            )
+    async def _describe_image(
+        self, data: bytes, message_context: str, filename: str = ""
+    ) -> str:
+        """Describe an image using direct Gemini API with multimodal parts."""
+        settings = get_settings()
+        if not settings.google_api_key:
+            return ""
+        # Infer mime type from filename extension
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "png"
+        mime_type = self._IMAGE_MIME_MAP.get(ext, "image/png")
+
+        try:
+            from google.genai import types as genai_types
+
+            client = await _get_gemini_client()
+
+            prompt = IMAGE_DESCRIPTION_PROMPT
             if message_context:
                 prompt += f"\n\nMessage context: {message_context[:200]}"
 
-            response = await client.aio.models.generate_content(
-                model=settings.media_vision_model,
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[
-                            genai_types.Part.from_bytes(data=data, mime_type="image/png"),
-                            genai_types.Part.from_text(text=prompt),
-                        ],
-                    )
-                ],
+            logger.info(
+                "ImageExtractor: calling generate_content for %s (%s, %d bytes)",
+                filename, mime_type, len(data),
             )
-            return response.text or ""
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=settings.media_vision_model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_bytes(
+                                    data=data,
+                                    mime_type=mime_type,
+                                ),
+                                genai_types.Part.from_text(text=prompt),
+                            ],
+                        )
+                    ],
+                ),
+                timeout=60,
+            )
+            result = response.text or ""
+            logger.info(
+                "ImageExtractor: result for %s — %d chars",
+                filename, len(result),
+            )
+            return result
         except Exception:
-            logger.warning("ImageExtractor: vision description failed", exc_info=True)
+            logger.error(
+                "ImageExtractor: vision description failed for %s (mime=%s)",
+                filename,
+                mime_type,
+                exc_info=True,
+            )
             return ""
 
 
@@ -269,10 +403,17 @@ class OfficeExtractor(MediaExtractor):
         text = await asyncio.to_thread(self._extract_text, data, ext, max_chars)
 
         if text.strip():
-            desc = (
-                f"[Attachment: {filename} ({ext.upper()}, {size_kb} kB)]\n"
-                f"[Document text: {text}]"
-            )
+            if settings.media_digest_enabled:
+                digest_content = await self._digest_document(text)
+                desc = (
+                    f"[Attachment: {filename} ({ext.upper()}, {size_kb} kB)]\n"
+                    f"[Document Digest]:\n{digest_content}"
+                )
+            else:
+                truncated = text[:4000]
+                if len(text) > 4000:
+                    truncated += "\n[...truncated]"
+                desc = f"[Attachment: {filename} ({ext.upper()}, {size_kb} kB)]\n{truncated}"
         else:
             desc = f"[Attachment: {filename} ({ext.upper()}, {size_kb} kB, no extractable text)]"
 
@@ -364,7 +505,7 @@ class OfficeExtractor(MediaExtractor):
 
 
 class VideoExtractor(MediaExtractor):
-    """Extract content from video files via keyframe extraction + audio transcription."""
+    """Extract content from video files via combined audio + visual analysis."""
 
     @property
     def supported_mime_types(self) -> list[str]:
@@ -387,72 +528,125 @@ class VideoExtractor(MediaExtractor):
                 media_type="video",
             )
 
-        parts: list[str] = []
-        parts.append(f"[Attachment: {filename} (video, {size_mb:.1f} MB)]")
+        parts: list[str] = [f"[Attachment: {filename} (video, {size_mb:.1f} MB)]"]
 
-        # Attempt audio transcription
-        transcript = await self._transcribe_audio(data, filename)
-        if transcript:
-            parts.append(f"[Video transcript: {transcript}]")
+        # Single Gemini call for combined transcript + visual analysis
+        analysis = await self._analyze_video(data, filename)
+        if analysis:
+            parts.append(f"[Video summary]: {analysis}")
 
-        # Attempt keyframe description (simplified — extract first frame)
-        keyframe_desc = await self._describe_keyframes(data, metadata)
-        if keyframe_desc:
-            parts.append(f"[Keyframe descriptions: {keyframe_desc}]")
+        return MediaContent(text="\n".join(parts), media_type="video")
 
-        return MediaContent(
-            text="\n".join(parts),
-            media_type="video",
-        )
-
-    async def _transcribe_audio(self, data: bytes, filename: str) -> str:
-        """Transcribe video audio track via Gemini Flash."""
+    async def _analyze_video(self, data: bytes, filename: str) -> str:
+        """Analyze video using Gemini Files API + content generation."""
         settings = get_settings()
         if not settings.google_api_key:
-            logger.debug("VideoExtractor: no Google API key, skipping transcription")
+            logger.debug("VideoExtractor: no Google API key, skipping analysis")
             return ""
 
+        uploaded = None
+        client = await _get_gemini_client()
         try:
-            from google import genai
             from google.genai import types as genai_types
 
-            client = genai.Client(api_key=settings.google_api_key)
-
-            # Determine MIME type from filename
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp4"
             mime_map = {"mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "avi": "video/x-msvideo"}
             mime_type = mime_map.get(ext, "video/mp4")
 
-            response = await client.aio.models.generate_content(
-                model=settings.media_vision_model,
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[
-                            genai_types.Part.from_bytes(data=data, mime_type=mime_type),
-                            genai_types.Part.from_text(
-                                text="Transcribe all speech in this video. Return only the transcript text, no timestamps or speaker labels. If there is no speech, return an empty string."
-                            ),
-                        ],
-                    )
-                ],
+            # Upload via Files API
+            logger.info("VideoExtractor: uploading %s (%s, %.1f MB)", filename, mime_type, len(data) / (1024 * 1024))
+            uploaded = await asyncio.wait_for(
+                client.aio.files.upload(
+                    file=io.BytesIO(data),
+                    config=genai_types.UploadFileConfig(mime_type=mime_type, display_name=filename),
+                ),
+                timeout=60,
             )
-            return response.text or ""
-        except Exception:
-            logger.warning("VideoExtractor: Gemini transcription failed", exc_info=True)
-            return ""
+            file_uri: str = uploaded.uri or ""
+            logger.info("VideoExtractor: uploaded %s → %s (state=%s)", filename, uploaded.name, uploaded.state)
 
-    async def _describe_keyframes(
-        self, data: bytes, metadata: dict[str, Any] | None
-    ) -> str:
-        """Extract and describe keyframes. Currently returns empty — requires ffmpeg."""
-        # Full implementation requires ffmpeg for keyframe extraction
-        # This is a placeholder that can be enhanced when ffmpeg is available
-        return ""
+            # Poll until file is ready for use
+            await _poll_file_active(client, uploaded.name)
+            logger.info("VideoExtractor: file ACTIVE for %s", filename)
+
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=settings.media_vision_model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_uri(
+                                    file_uri=file_uri,
+                                    mime_type=mime_type,
+                                ),
+                                genai_types.Part.from_text(text=VIDEO_ANALYSIS_PROMPT),
+                            ],
+                        )
+                    ],
+                ),
+                timeout=60,
+            )
+            result = response.text or ""
+            logger.info("VideoExtractor: result for %s — %d chars", filename, len(result))
+            return result
+        except Exception:
+            logger.error("VideoExtractor: analysis failed for %s", filename, exc_info=True)
+            return ""
+        finally:
+            if uploaded and getattr(uploaded, "name", None):
+                try:
+                    await client.aio.files.delete(name=uploaded.name)
+                except Exception:
+                    logger.debug("VideoExtractor: cleanup failed for %s", filename)
+
+    @staticmethod
+    def _parse_analysis(text: str) -> tuple[str, str, str]:
+        """Parse structured analysis into (transcript, translation, visual_description)."""
+        transcript = ""
+        translation = ""
+        visual_desc = ""
+
+        current_section = ""
+        section_lines: dict[str, list[str]] = {
+            "transcript": [], "translation": [], "visual": [],
+        }
+
+        for line in text.split("\n"):
+            stripped = line.strip()
+            upper = stripped.upper()
+            if upper.startswith("TRANSCRIPT:"):
+                current_section = "transcript"
+                # Capture inline content after the label
+                rest = stripped[len("TRANSCRIPT:"):].strip()
+                if rest:
+                    section_lines["transcript"].append(rest)
+            elif upper.startswith("TRANSLATION"):
+                current_section = "translation"
+                rest = stripped.split(":", 1)[-1].strip() if ":" in stripped else ""
+                if rest:
+                    section_lines["translation"].append(rest)
+            elif upper.startswith("VISUAL DESCRIPTION:") or upper.startswith("VISUAL:"):
+                current_section = "visual"
+                rest = stripped.split(":", 1)[-1].strip() if ":" in stripped else ""
+                if rest:
+                    section_lines["visual"].append(rest)
+            elif current_section and stripped:
+                section_lines[current_section].append(stripped)
+
+        transcript = "\n".join(section_lines["transcript"]).strip()
+        translation = "\n".join(section_lines["translation"]).strip()
+        visual_desc = "\n".join(section_lines["visual"]).strip()
+
+        # Fallback: if no sections were parsed, treat the whole thing as transcript
+        if not transcript and not visual_desc and text.strip():
+            transcript = text.strip()
+
+        return transcript, translation, visual_desc
 
 
 class AudioExtractor(MediaExtractor):
-    """Transcribe audio files using Whisper API."""
+    """Transcribe audio files using Gemini multimodal API."""
 
     @property
     def supported_mime_types(self) -> list[str]:
@@ -470,44 +664,110 @@ class AudioExtractor(MediaExtractor):
     ) -> MediaContent:
         settings = get_settings()
         size_mb = len(data) / (1024 * 1024)
+        max_size = settings.media_max_file_size_mb
+
+        if size_mb > max_size:
+            return MediaContent(
+                text=f"[Attachment: {filename} (audio, {size_mb:.1f} MB — exceeds {max_size} MB limit)]",
+                media_type="audio",
+            )
 
         parts: list[str] = [f"[Attachment: {filename} (audio, {size_mb:.1f} MB)]"]
 
         if not settings.google_api_key:
             return MediaContent(text="\n".join(parts), media_type="audio")
 
+        uploaded = None
+        client = await _get_gemini_client()
         try:
-            from google import genai
             from google.genai import types as genai_types
 
-            client = genai.Client(api_key=settings.google_api_key)
-
-            # Determine MIME type from filename
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp3"
             mime_map = {"mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4", "ogg": "audio/ogg", "flac": "audio/flac"}
             mime_type = mime_map.get(ext, "audio/mpeg")
 
-            response = await client.aio.models.generate_content(
-                model=settings.media_vision_model,
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[
-                            genai_types.Part.from_bytes(data=data, mime_type=mime_type),
-                            genai_types.Part.from_text(
-                                text="Transcribe all speech in this audio. Return only the transcript text. If there is no speech, return an empty string."
-                            ),
-                        ],
-                    )
-                ],
+            # Upload via Files API
+            logger.info("AudioExtractor: uploading %s (%s, %.1f MB)", filename, mime_type, size_mb)
+            uploaded = await asyncio.wait_for(
+                client.aio.files.upload(
+                    file=io.BytesIO(data),
+                    config=genai_types.UploadFileConfig(mime_type=mime_type, display_name=filename),
+                ),
+                timeout=60,
             )
-            transcript = response.text or ""
-            if transcript:
-                parts.append(f"[Audio transcript: {transcript}]")
+            file_uri: str = uploaded.uri or ""
+            logger.info("AudioExtractor: uploaded %s → %s (state=%s)", filename, uploaded.name, uploaded.state)
+
+            # Poll until file is ready for use
+            await _poll_file_active(client, uploaded.name)
+            logger.info("AudioExtractor: file ACTIVE for %s", filename)
+
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=settings.media_vision_model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_uri(
+                                    file_uri=file_uri,
+                                    mime_type=mime_type,
+                                ),
+                                genai_types.Part.from_text(text=AUDIO_TRANSCRIPTION_PROMPT),
+                            ],
+                        )
+                    ],
+                ),
+                timeout=60,
+            )
+            if response.text:
+                logger.info("AudioExtractor: result for %s — %d chars", filename, len(response.text))
+                parts.append(f"[Audio summary]: {response.text}")
+            else:
+                logger.warning("AudioExtractor: empty response for %s", filename)
         except Exception:
-            logger.warning("AudioExtractor: Gemini transcription failed", exc_info=True)
+            logger.error("AudioExtractor: transcription failed for %s", filename, exc_info=True)
+        finally:
+            if uploaded and getattr(uploaded, "name", None):
+                try:
+                    await client.aio.files.delete(name=uploaded.name)
+                except Exception:
+                    logger.debug("AudioExtractor: cleanup failed for %s", filename)
 
         return MediaContent(text="\n".join(parts), media_type="audio")
+
+    @staticmethod
+    def _parse_transcript(text: str) -> tuple[str, str]:
+        """Parse structured transcript into (original, translation)."""
+        transcript = ""
+        translation = ""
+        current_section = ""
+        section_lines: dict[str, list[str]] = {"transcript": [], "translation": []}
+
+        for line in text.split("\n"):
+            stripped = line.strip()
+            upper = stripped.upper()
+            if upper.startswith("TRANSCRIPT:"):
+                current_section = "transcript"
+                rest = stripped[len("TRANSCRIPT:"):].strip()
+                if rest:
+                    section_lines["transcript"].append(rest)
+            elif upper.startswith("TRANSLATION"):
+                current_section = "translation"
+                rest = stripped.split(":", 1)[-1].strip() if ":" in stripped else ""
+                if rest:
+                    section_lines["translation"].append(rest)
+            elif current_section and stripped:
+                section_lines[current_section].append(stripped)
+
+        transcript = "\n".join(section_lines["transcript"]).strip()
+        translation = "\n".join(section_lines["translation"]).strip()
+
+        # Fallback: if no sections parsed, treat whole text as transcript
+        if not transcript and text.strip():
+            transcript = text.strip()
+
+        return transcript, translation
 
 
 def create_default_registry() -> MediaExtractorRegistry:

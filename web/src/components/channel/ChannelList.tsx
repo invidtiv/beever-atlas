@@ -173,8 +173,8 @@ export function ChannelList() {
       <div className="px-4 py-3">
         <p className="text-sm text-muted-foreground">
           {hasConnections
-            ? "No channels selected. Use Manage Channels in Settings."
-            : "No channels. Connect a platform in Settings."}
+            ? "No channels selected. Manage channels on the Channels page."
+            : "No channels yet. Connect a platform to get started."}
         </p>
       </div>
     );

@@ -16,6 +16,9 @@ Usage:
     # Limit to N messages:
     uv run python -m beever_atlas.scripts.dry_run C0AMY9QSPB2 --limit 3
 
+    # Simulate Batch API path (token estimates + request counts, no DB writes):
+    uv run python -m beever_atlas.scripts.dry_run C0AMY9QSPB2 --batch-api
+
 Results are printed as formatted JSON. No Weaviate, Neo4j, or MongoDB writes.
 Cached messages are stored in .omc/cache/ for instant re-runs.
 """
@@ -33,6 +36,85 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
 
+async def _run_batch_api_dry_run(args: Any, settings: Any) -> None:
+    """Simulate the Batch API path: show token estimates and request counts."""
+    from beever_atlas.agents.prompts.entity_extractor import ENTITY_EXTRACTOR_INSTRUCTION
+    from beever_atlas.agents.prompts.fact_extractor import FACT_EXTRACTOR_INSTRUCTION
+    from beever_atlas.services.adaptive_batcher import estimate_message_tokens
+
+    cache_dir = Path(".omc/cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"messages-{args.channel_id}.json"
+
+    if args.cached and cache_file.exists():
+        print(f"\n📦 Using cached messages from {cache_file}")
+        raw_messages = json.loads(cache_file.read_text())
+    else:
+        print(f"\n🔄 Fetching messages from bridge for channel {args.channel_id}...")
+        from beever_atlas.adapters.bridge import ChatBridgeAdapter
+        adapter = ChatBridgeAdapter(bridge_url=settings.bridge_url, api_key=settings.bridge_api_key)
+        messages = await adapter.fetch_history(args.channel_id, limit=500)
+        raw_messages = [vars(m) for m in messages]
+        cache_file.write_text(json.dumps(raw_messages, default=str, indent=2))
+        print(f"   Cached {len(raw_messages)} messages to {cache_file}")
+
+    if args.limit > 0:
+        raw_messages = raw_messages[: args.limit]
+
+    from beever_atlas.services.adaptive_batcher import token_aware_batches
+    batches = token_aware_batches(
+        raw_messages,
+        max_tokens=settings.batch_max_prompt_tokens,
+        time_window_seconds=settings.batch_time_window_seconds,
+    )
+
+    print(f"\n{'='*60}")
+    print(f"  BATCH API DRY-RUN ESTIMATE")
+    print(f"{'='*60}")
+    print(f"  Total messages:  {len(raw_messages)}")
+    print(f"  Token budget:    {settings.batch_max_prompt_tokens} tokens/batch")
+    print(f"  Total batches:   {len(batches)}  (adaptive, token-aware)")
+    print(f"  Batch API calls: {len(batches) * 2}  (fact + entity per batch)\n")
+
+    total_tokens = 0
+    for batch_num, batch in enumerate(batches, 1):
+        batch_tokens = sum(estimate_message_tokens(m) for m in batch)
+        total_tokens += batch_tokens
+
+        # Build prompt approximations to estimate full prompt token cost
+        msgs_json = json.dumps(batch, default=str)
+        fact_prompt = FACT_EXTRACTOR_INSTRUCTION.format(
+            channel_name=args.channel_id,
+            preprocessed_messages=msgs_json,
+            max_facts_per_message=settings.max_facts_per_message,
+        )
+        entity_prompt = ENTITY_EXTRACTOR_INSTRUCTION.format(
+            channel_name=args.channel_id,
+            channel_id=args.channel_id,
+            known_entities="[]",
+            preprocessed_messages=msgs_json,
+        )
+        # Rough token estimate: ~4 chars per token
+        fact_prompt_tokens = len(fact_prompt) // 4
+        entity_prompt_tokens = len(entity_prompt) // 4
+
+        print(f"  Batch {batch_num}/{len(batches)}")
+        print(f"    Messages:             {len(batch)}")
+        print(f"    Message tokens (est): {batch_tokens}")
+        print(f"    Fact prompt tokens:   ~{fact_prompt_tokens}")
+        print(f"    Entity prompt tokens: ~{entity_prompt_tokens}")
+        print(f"    Total prompt tokens:  ~{fact_prompt_tokens + entity_prompt_tokens}")
+        print()
+
+    print(f"{'='*60}")
+    print(f"  TOTALS")
+    print(f"{'='*60}")
+    print(f"  Message tokens (est):   {total_tokens}")
+    print(f"  Batch API requests:     {len(batches) * 2}")
+    print(f"  (Each request = 1 Gemini Batch API job submission)")
+    print(f"\n  Run without --batch-api to execute actual extraction.\n")
+
+
 async def main() -> None:
     import argparse
 
@@ -42,7 +124,8 @@ async def main() -> None:
     parser.add_argument("--facts-only", action="store_true", help="Only run fact extraction")
     parser.add_argument("--entities-only", action="store_true", help="Only run entity extraction")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of messages")
-    parser.add_argument("--batch-size", type=int, default=5, help="Messages per batch")
+    parser.add_argument("--batch-size", type=int, default=10, help="Messages per batch")
+    parser.add_argument("--batch-api", action="store_true", help="Simulate Batch API path: show token estimates and request counts without running LLM calls")
     args = parser.parse_args()
 
     from google.adk.runners import Runner
@@ -54,6 +137,11 @@ async def main() -> None:
 
     settings = get_settings()
     init_llm_provider(settings)
+
+    # --- Batch API dry-run path ---
+    if args.batch_api:
+        await _run_batch_api_dry_run(args, settings)
+        return
 
     # --- 1. Get messages ---
     cache_dir = Path(".omc/cache")

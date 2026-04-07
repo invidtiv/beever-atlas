@@ -142,7 +142,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
       />
 
       {/* Dialog */}
-      <div className="relative z-10 w-full max-w-lg bg-card border border-border rounded-2xl shadow-2xl overflow-hidden">
+      <div className="relative z-10 w-full max-w-3xl bg-card border border-border rounded-2xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="px-6 py-4 border-b border-border space-y-3">
           <div className="flex items-center justify-between">

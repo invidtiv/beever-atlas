@@ -53,18 +53,16 @@ class TestCoreferenceResolver:
 
     @pytest.mark.asyncio
     async def test_resolve_coreferences_preserves_raw_text(self):
-        """Even when LLM fails, raw_text should be preserved."""
+        """Even when agent fails, raw_text should be preserved."""
         from beever_atlas.services.coreference_resolver import resolve_coreferences
 
         messages = [{"text": "Alice built Atlas. It uses Redis."}]
-        # Patch the genai client to raise — test graceful fallback
-        with patch("beever_atlas.services.coreference_resolver.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(
-                coref_model="gemini-2.5-flash",
-                google_api_key="fake",
-            )
-            with patch("google.genai.Client", side_effect=ImportError("no genai")):
-                result = await resolve_coreferences(messages)
+        # Patch the agent runner to raise — test graceful fallback
+        with patch(
+            "beever_atlas.agents.runner.run_agent",
+            side_effect=RuntimeError("agent unavailable"),
+        ):
+            result = await resolve_coreferences(messages)
         assert result[0]["raw_text"] == "Alice built Atlas. It uses Redis."
 
     @pytest.mark.asyncio
@@ -202,7 +200,14 @@ class TestMediaExtractors:
         docx_bytes = buf.getvalue()
 
         extractor = OfficeExtractor()
-        result = await extractor.extract(docx_bytes, "test.docx")
+        # Mock _digest_document to return raw text (avoid hitting Gemini API in tests)
+        from unittest.mock import AsyncMock, patch
+        with patch.object(
+            extractor, "_digest_document",
+            new_callable=AsyncMock,
+            side_effect=lambda text: text,
+        ):
+            result = await extractor.extract(docx_bytes, "test.docx")
         assert "Test Heading" in result.text
         assert "Test paragraph" in result.text
 
@@ -228,7 +233,13 @@ class TestMediaExtractors:
         xlsx_bytes = buf.getvalue()
 
         extractor = OfficeExtractor()
-        result = await extractor.extract(xlsx_bytes, "data.xlsx")
+        from unittest.mock import AsyncMock, patch
+        with patch.object(
+            extractor, "_digest_document",
+            new_callable=AsyncMock,
+            side_effect=lambda text: text,
+        ):
+            result = await extractor.extract(xlsx_bytes, "data.xlsx")
         assert "Sheet: Data" in result.text
         assert "Name" in result.text
 
@@ -250,7 +261,13 @@ class TestMediaExtractors:
         pptx_bytes = buf.getvalue()
 
         extractor = OfficeExtractor()
-        result = await extractor.extract(pptx_bytes, "slides.pptx")
+        from unittest.mock import AsyncMock, patch
+        with patch.object(
+            extractor, "_digest_document",
+            new_callable=AsyncMock,
+            side_effect=lambda text: text,
+        ):
+            result = await extractor.extract(pptx_bytes, "slides.pptx")
         assert "Slide 1" in result.text
         assert "Slide Title" in result.text
 

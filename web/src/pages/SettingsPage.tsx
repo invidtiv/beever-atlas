@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Plus, MessageSquare, MonitorSmartphone, Send } from "lucide-react";
+import { Plus, MessageSquare, MonitorSmartphone, Send, ChevronDown, ChevronRight, Settings2 } from "lucide-react";
 import { useConnections, useDeleteConnection } from "@/hooks/useConnections";
 import { PlatformCard } from "@/components/settings/PlatformCard";
 import { ConnectionWizard } from "@/components/settings/ConnectionWizard";
 import { ManageChannelsDialog } from "@/components/settings/ManageChannelsDialog";
+import { SyncDefaultsSection } from "@/components/settings/SyncDefaultsSection";
+import { AgentModelSettings } from "@/components/settings/AgentModelSettings";
 import type { PlatformConnection } from "@/lib/types";
 
 type Platform = "slack" | "discord" | "teams" | "telegram";
@@ -30,6 +32,7 @@ export function SettingsPage() {
   const [wizardPlatform, setWizardPlatform] = useState<Platform | null>(null);
   const [managingConnection, setManagingConnection] = useState<PlatformConnection | null>(null);
   const [showPicker, setShowPicker] = useState(false);
+  const [showDefaults, setShowDefaults] = useState(false);
 
   async function handleDisconnect(connection: PlatformConnection) {
     if (!confirm(`Disconnect "${connection.display_name || connection.platform}"? This cannot be undone.`)) return;
@@ -134,6 +137,41 @@ export function SettingsPage() {
           ))}
         </div>
       )}
+
+      {/* Default channel settings — collapsed by default */}
+      <div className="mt-8 rounded-2xl border border-border bg-card overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowDefaults(!showDefaults)}
+          className="flex w-full items-center justify-between px-5 py-4 text-left hover:bg-muted/30 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <Settings2 className="h-4 w-4 text-muted-foreground" />
+            <div>
+              <span className="text-sm font-medium text-foreground">Default Channel Settings</span>
+              {!showDefaults && (
+                <span className="text-[11px] text-muted-foreground ml-2">
+                  Applied to new channels automatically
+                </span>
+              )}
+            </div>
+          </div>
+          {showDefaults
+            ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            : <ChevronRight className="h-4 w-4 text-muted-foreground" />
+          }
+        </button>
+        {showDefaults && (
+          <div className="border-t border-border px-1">
+            <SyncDefaultsSection />
+          </div>
+        )}
+      </div>
+
+      {/* AI Model configuration */}
+      <div className="mt-4 rounded-2xl border border-border bg-card overflow-hidden p-5">
+        <AgentModelSettings />
+      </div>
 
       {/* Platform picker dialog */}
       {showPicker && (

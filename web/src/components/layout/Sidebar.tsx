@@ -10,6 +10,7 @@ import {
   PanelLeft,
   Sun,
   Moon,
+  RotateCcw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -17,6 +18,7 @@ import { HealthBadge } from "./HealthBadge";
 import { ChannelList } from "@/components/channel/ChannelList";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/hooks/useTheme";
+import { api } from "@/lib/api";
 import { useState } from "react";
 
 const navItems = [
@@ -145,14 +147,58 @@ export function Sidebar({ open, onClose }: SidebarProps) {
         </div>
 
         {collapsed ? (
-          <Tooltip>
-            <TooltipTrigger render={themeButton} />
-            <TooltipContent side="right">
-              {resolvedTheme === "dark" ? "Light mode" : "Dark mode"}
-            </TooltipContent>
-          </Tooltip>
+          <>
+            <Tooltip>
+              <TooltipTrigger render={themeButton} />
+              <TooltipContent side="right">
+                {resolvedTheme === "dark" ? "Light mode" : "Dark mode"}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!confirm("Reset all data? This will delete all memories, connections, and settings.")) return;
+                      try {
+                        await api.post("/api/dev/reset", {});
+                        window.location.reload();
+                      } catch (e) {
+                        alert("Reset failed. Check console.");
+                        console.error(e);
+                      }
+                    }}
+                    className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                  >
+                    <RotateCcw size={16} />
+                  </button>
+                }
+              />
+              <TooltipContent side="right">Reset all data (dev)</TooltipContent>
+            </Tooltip>
+          </>
         ) : (
-          themeButton
+          <div className="flex items-center gap-1">
+            {themeButton}
+            <button
+              type="button"
+              onClick={async () => {
+                if (!confirm("Reset all data? This will delete all memories, connections, and settings.")) return;
+                try {
+                  await api.post("/api/dev/reset", {});
+                  window.location.reload();
+                } catch (e) {
+                  alert("Reset failed. Check console.");
+                  console.error(e);
+                }
+              }}
+              className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+              title="Reset all data (dev)"
+            >
+              <RotateCcw size={16} />
+            </button>
+          </div>
         )}
       </div>
     </aside>

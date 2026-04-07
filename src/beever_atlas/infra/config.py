@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     quality_threshold: float = Field(default=0.5)
     entity_threshold: float = Field(default=0.6)
     max_facts_per_message: int = Field(default=2)
-    sync_batch_timeout_seconds: int = Field(default=180)
+    sync_batch_timeout_seconds: int = Field(default=600)
 
     # Jina embeddings
     jina_api_url: str = Field(default="https://api.jina.ai/v1/embeddings")
@@ -78,27 +78,56 @@ class Settings(BaseSettings):
     # Reconciler
     reconciler_interval_minutes: int = Field(default=15)
 
+    # Consolidation pipeline
+    cluster_similarity_threshold: float = Field(default=0.6)
+    cluster_merge_threshold: float = Field(default=0.85)
+    cluster_max_size: int = Field(default=100)
+    consolidation_max_concurrent_llm: int = Field(default=5)
+    consolidation_enabled: bool = Field(default=True)
+
     # Application
     beever_api_url: str = Field(default="http://localhost:8000")
     cors_origins: str = Field(default="http://localhost:5173,http://localhost:3000")
 
     # Media processing
     media_max_file_size_mb: int = Field(default=20)
-    media_vision_timeout_seconds: int = Field(default=5)
+    media_vision_timeout_seconds: int = Field(default=180)
     media_vision_model: str = Field(default="gemini-2.5-flash")
     media_supported_image_types: str = Field(default="png,jpg,jpeg,gif,webp")
     media_supported_doc_types: str = Field(default="pdf")
+
+    # PDF chunked extraction
+    pdf_chunk_pages: int = Field(default=4)
+    pdf_max_pages: int = Field(default=100)
+    pdf_summarize_large_docs: bool = Field(default=False)
+    pdf_large_doc_threshold: int = Field(default=50)
+
+    # Document digest via LLM agent (disable to skip expensive LLM calls during media processing)
+    media_digest_enabled: bool = Field(default=True)
 
     # Bridge (bot service)
     bridge_url: str = Field(default="http://localhost:3001")
     bridge_api_key: str = Field(default="")
 
     # Graph database backend
-    graph_backend: str = Field(default="neo4j")  # "neo4j" or "nebula"
+    graph_backend: str = Field(default="neo4j")  # "neo4j", "nebula", or "none"
     nebula_hosts: str = Field(default="127.0.0.1:9669")
     nebula_user: str = Field(default="root")
     nebula_password: str = Field(default="nebula")
     nebula_space: str = Field(default="beever_atlas")
+
+    # Gemini Batch API
+    use_batch_api: bool = Field(default=False)
+    batch_poll_interval_seconds: int = Field(default=15)
+    batch_max_wait_seconds: int = Field(default=3600)
+    batch_max_prompt_tokens: int = Field(default=12000)
+    batch_time_window_seconds: int = Field(default=600)
+    fact_max_retries: int = Field(default=3)
+    stale_job_threshold_hours: float = Field(default=1.0)
+
+    # Ollama (local models)
+    ollama_enabled: bool = Field(default=False)
+    ollama_api_base: str = Field(default="http://localhost:11434")
 
     # Credential encryption
     credential_master_key: str = Field(default="")

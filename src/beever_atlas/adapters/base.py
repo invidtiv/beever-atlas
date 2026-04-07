@@ -59,6 +59,8 @@ class BaseAdapter(abc.ABC):
         channel_id: str,
         since: datetime | None = None,
         limit: int = 100,
+        before: str | None = None,
+        order: str = "desc",
     ) -> list[NormalizedMessage]:
         """Fetch message history for a channel."""
 

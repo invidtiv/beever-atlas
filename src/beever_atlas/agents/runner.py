@@ -54,3 +54,46 @@ async def create_session(user_id: str = "anonymous", state: dict | None = None) 
 def get_session_service() -> InMemorySessionService:
     """Return the shared session service instance."""
     return _session_service
+
+
+async def run_agent(
+    agent: BaseAgent,
+    state: dict | None = None,
+    message: str = "process",
+) -> dict:
+    """Run an agent standalone and return the final session state.
+
+    Creates a fresh session, drives the agent to completion, and returns
+    the resulting session state dict. Useful for invoking LlmAgents outside
+    the main pipeline (e.g., coreference resolution, media description).
+
+    Args:
+        agent: The ADK agent to run.
+        state: Initial session state (prompt context, input data).
+        message: User message to send to the agent (required for LlmAgents).
+
+    Returns:
+        The final session state after agent completion.
+    """
+    from google.genai import types
+
+    runner = create_runner(agent)
+    session = await create_session(state=state)
+
+    async for _event in runner.run_async(
+        user_id=session.user_id,
+        session_id=session.id,
+        new_message=types.Content(
+            role="user",
+            parts=[types.Part(text=message)],
+        ),
+    ):
+        pass  # Drive to completion
+
+    # Re-fetch session to get final state with all deltas applied
+    final_session = await _session_service.get_session(
+        app_name=APP_NAME,
+        user_id=session.user_id,
+        session_id=session.id,
+    )
+    return dict(final_session.state) if final_session else {}

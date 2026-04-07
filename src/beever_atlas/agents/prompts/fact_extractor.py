@@ -85,6 +85,11 @@ self-contained. A reply saying "yes, let's do that" to a question "should we use
 should become: "The team agreed to use Redis [for the purpose discussed in thread]."
 Never leave a fact dependent on an implicit referent that isn't named.
 
+When a thread represents a deliberation (back-and-forth discussion leading to a conclusion),
+also produce a `thread_context_summary` — a single sentence capturing the deliberation arc.
+Example: "Team debated Redis vs Memcached over several messages, ultimately chose Redis for its pub/sub support."
+Only populate this for threads with genuine discussion; leave empty for simple Q&A threads.
+
 ### Orphaned replies
 If a message appears to be a reply (has a `thread_ts` or `thread_id`) but no `thread_context`
 is provided, do NOT guess or hallucinate what the parent message was about. Instead,
@@ -97,14 +102,17 @@ Only extract a fact from a context-less reply if it is self-contained (e.g.,
 ### Media attachments
 Messages may contain bracketed media descriptions appended by the preprocessing system:
 - `[Attachment: filename (type, size)]` — metadata about an attached file
-- `[Image description: ...]` — AI-generated description of an image attachment
-- `[Document text: ...]` — extracted text content from a PDF or document
+- `[Image description]: ...` — AI-generated description of an image attachment
+- `[Document Digest]: ...` — AI-generated summary of a document (PDF, Office, etc.)
+- `[Video summary]: ...` — AI-generated analysis of a video attachment
+- `[Audio summary]: ...` — AI-generated transcription/summary of an audio attachment
 
-Treat these as factual content from the message. Extract facts from media descriptions
-just as you would from regular message text. When a media description contains specific
-data points (revenue numbers, chart values, dates, names), extract those as facts.
+Treat these as factual content from the message. Extract facts from media descriptions,
+video summaries, audio transcriptions, and document digests just as you would from regular
+message text. When a media description contains specific data points (revenue numbers,
+chart values, dates, names, spoken decisions, visual content), extract those as facts.
 Include the media type in entity_tags when relevant (e.g., "dashboard", "screenshot",
-"report", "document").
+"report", "document", "video", "audio recording").
 
 ### Multi-fact messages
 - If a message contains multiple distinct claims, extract each separately.
@@ -118,12 +126,22 @@ Include the media type in entity_tags when relevant (e.g., "dashboard", "screens
 - **action_tags**: action-oriented verbs (e.g. "decided", "blocked", "shipped", "reverted")
 - **importance**: "low" | "medium" | "high" | "critical" — based on business impact
 
+### Fact type classification
+Classify each fact as one of:
+- "decision": A choice was made or agreed upon ("we decided to use Redis", "approved the budget", "agreed on the API design")
+- "action_item": Something that needs to be done ("need to update the docs", "will deploy Friday", "TODO: fix the auth bug")
+- "question": An unresolved question ("should we use Redis or Memcached?", "what's the timeline?", "has anyone tested this?")
+- "opinion": A personal view not yet agreed upon ("I think we should use Redis", "maybe we should consider Go")
+- "observation": A factual observation or status update ("the build is broken", "latency is at 200ms", "v2.1 was released yesterday")
+
+When in doubt, default to "observation" — it is the safest classification.
+
 ### Per-message metadata
 For each fact, copy from the source message:
-- `source_message_id`: the message `ts` field
+- `source_message_id`: the message `msg_id` field (e.g. "msg-0", "msg-1", "msg-2"). This is REQUIRED.
 - `author_id`: the `user` field
 - `author_name`: the display name (use display name in memory_text, NOT the raw user ID)
-- `message_ts`: the `ts` field
+- `message_ts`: the `ts` field (copy the exact value from the message)
 
 ---
 
@@ -139,7 +157,9 @@ Return a single JSON object:
       "entity_tags": ["<entity>", ...],
       "action_tags": ["<action>", ...],
       "importance": "<low|medium|high|critical>",
-      "source_message_id": "<message ts>",
+      "fact_type": "<decision|opinion|observation|action_item|question>",
+      "thread_context_summary": "<1-sentence deliberation arc, or empty string>",
+      "source_message_id": "<msg_id, e.g. msg-0>",
       "author_id": "<user id>",
       "author_name": "<display name>",
       "message_ts": "<timestamp>"

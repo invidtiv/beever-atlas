@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,6 +8,12 @@ import { getPlatformBadgeStyle } from "@/lib/platform-badge";
 import { StatCards } from "@/components/dashboard/StatCards";
 import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
 import { useStats, useActivity } from "@/hooks/useStats";
+import { WelcomeScreen } from "@/components/onboarding/WelcomeScreen";
+import { ConnectionWizard } from "@/components/settings/ConnectionWizard";
+import { useUserProfile } from "@/hooks/useUserProfile";
+import type { PlatformConnection } from "@/lib/types";
+
+type Platform = "slack" | "discord" | "teams" | "telegram";
 
 interface Channel {
   channel_id: string;
@@ -22,10 +28,30 @@ interface Channel {
 export function Dashboard() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
+  const [connections, setConnections] = useState<PlatformConnection[]>([]);
+  const [connectionsLoading, setConnectionsLoading] = useState(true);
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardPlatform, setWizardPlatform] = useState<Platform>("slack");
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
   const { stats, loading: statsLoading } = useStats();
   const { events, loading: activityLoading } = useActivity(5);
+  const { profile, getGreeting } = useUserProfile();
+  const firstName = profile.displayName ? profile.displayName.split(" ")[0] : "there";
+  const greeting = getGreeting();
+
+  const fetchConnections = useCallback(() => {
+    setConnectionsLoading(true);
+    api
+      .get<PlatformConnection[]>("/api/connections")
+      .then(setConnections)
+      .catch(() => setConnections([]))
+      .finally(() => setConnectionsLoading(false));
+  }, []);
+
+  useEffect(() => {
+    fetchConnections();
+  }, [fetchConnections]);
 
   useEffect(() => {
     api
@@ -35,13 +61,37 @@ export function Dashboard() {
       .finally(() => setLoading(false));
   }, []);
 
+  if (!connectionsLoading && connections.length === 0) {
+    return (
+      <>
+        <WelcomeScreen
+          onConnect={(platform) => {
+            setWizardPlatform(platform as Platform);
+            setShowWizard(true);
+          }}
+        />
+        {showWizard && (
+          <ConnectionWizard
+            platform={wizardPlatform}
+            onClose={() => setShowWizard(false)}
+            onComplete={() => {
+              setShowWizard(false);
+              fetchConnections();
+              window.dispatchEvent(new Event("connections-changed"));
+            }}
+          />
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="min-h-full">
       <div className="max-w-[1400px] mx-auto p-6 sm:p-8 lg:p-12">
         {/* Hero Section */}
         <section className="flex flex-col items-center gap-5 py-12">
           <h1 className="font-heading text-[32px] tracking-tight text-foreground">
-            Good morning, Alan
+            {greeting}, {firstName}
           </h1>
           <p className="text-muted-foreground text-base">
             What would you like to know today?

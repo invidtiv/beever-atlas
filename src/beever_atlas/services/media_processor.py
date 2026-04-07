@@ -49,6 +49,8 @@ class MediaProcessor:
             self._settings.media_supported_doc_types.split(",")
         )
         self._max_bytes = self._settings.media_max_file_size_mb * 1024 * 1024
+        self._last_pdf_chunks: list[str] = []
+        self._http_client: httpx.AsyncClient | None = None
 
     @staticmethod
     def get_registry():
@@ -84,25 +86,27 @@ class MediaProcessor:
 
         timeout = self._settings.media_vision_timeout_seconds
 
-        for att in all_media:
+        async def _safe_process(att: dict[str, Any]) -> dict[str, str]:
+            """Process a single attachment with timeout and error handling."""
             try:
-                result = await asyncio.wait_for(
+                return await asyncio.wait_for(
                     self._process_attachment(att, message_text),
                     timeout=timeout,
                 )
-                if result["description"]:
-                    descriptions.append(result["description"])
-                if result["media_url"]:
-                    media_urls.append(result["media_url"])
-                if result["media_type"] and not media_type:
-                    media_type = result["media_type"]
             except asyncio.TimeoutError:
                 name = att.get("name", "unknown")
+                url = att.get("url", "")
+                att_type = att.get("type", "file")
                 logger.warning(
                     "MediaProcessor: timeout processing attachment %s (limit=%ds)",
                     name,
                     timeout,
                 )
+                return {
+                    "description": f"[Attachment: {name} ({att_type}, processing timed out)]",
+                    "media_url": url,
+                    "media_type": att_type,
+                }
             except Exception:
                 name = att.get("name", "unknown")
                 logger.warning(
@@ -110,94 +114,105 @@ class MediaProcessor:
                     name,
                     exc_info=True,
                 )
+                return {"description": "", "media_url": "", "media_type": ""}
 
-        return {
+        results = await asyncio.gather(*[_safe_process(att) for att in all_media])
+
+        for result in results:
+            if result["description"]:
+                descriptions.append(result["description"])
+            if result["media_url"]:
+                media_urls.append(result["media_url"])
+            if result["media_type"] and not media_type:
+                media_type = result["media_type"]
+
+        result: dict[str, Any] = {
             "description": "\n\n".join(descriptions),
             "media_urls": media_urls,
             "media_type": media_type,
         }
+        # Pass through PDF chunks for virtual message expansion
+        if hasattr(self, "_last_pdf_chunks") and self._last_pdf_chunks:
+            result["chunks"] = self._last_pdf_chunks
+            self._last_pdf_chunks = []
+        return result
 
     # ── Internal methods ────────────────────────────────────────────────
 
     async def _process_attachment(
         self, att: dict[str, Any], message_text: str
     ) -> dict[str, str]:
-        """Route a single attachment to the appropriate handler."""
+        """Route a single attachment to the appropriate extractor via registry."""
         url = att.get("url") or att.get("url_private") or ""
         name = att.get("name") or "file"
         att_type = att.get("type") or ""
         mimetype = att.get("mimetype") or ""
-
-        # Determine file extension
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-
-        is_image = (
-            att_type == "image"
-            or ext in self._supported_images
-            or mimetype.startswith("image/")
-        )
-        is_pdf = ext in self._supported_docs or mimetype == "application/pdf"
 
         if not url:
             return {"description": "", "media_url": "", "media_type": ""}
 
-        # Try registry-based extraction for new formats (office, video, audio)
+        # Infer mimetype from att_type/ext when not provided
+        if not mimetype:
+            if att_type == "image" or ext in self._supported_images:
+                mimetype = f"image/{ext}" if ext else "image/png"
+            elif ext in self._supported_docs:
+                mimetype = "application/pdf"
+
         registry = self.get_registry()
         extractor = registry.get_extractor(mimetype, name)
 
-        # For backward compatibility, use existing handlers for PDF and image
-        if is_pdf:
-            return await self._handle_pdf(url, name)
-        elif is_image:
-            return await self._handle_image(url, name, message_text)
-        elif extractor is not None:
-            # New format handled by registry (office, video, audio)
-            async with self._sem:
-                data = await self._download_file(url)
-            if not data:
-                return {
-                    "description": f"[Attachment: {name} ({att_type or ext})]",
-                    "media_url": url,
-                    "media_type": att_type or ext,
-                }
-            content = await extractor.extract(
-                data, name, metadata={"message_text": message_text}
-            )
-            return {
-                "description": content.text,
-                "media_url": url,
-                "media_type": content.media_type or att_type or ext,
-            }
-        else:
-            # Unsupported type — return metadata only
+        if extractor is None:
             return {
                 "description": f"[Attachment: {name} ({att_type or ext})]",
                 "media_url": url,
                 "media_type": att_type or ext,
             }
 
+        # Download file
+        async with self._sem:
+            data = await self._download_file(url)
+        if not data:
+            return {
+                "description": f"[Attachment: {name} ({att_type or ext})]",
+                "media_url": url,
+                "media_type": att_type or ext,
+            }
+
+        # Extract content via registry
+        content = await extractor.extract(
+            data, name, metadata={"message_text": message_text}
+        )
+
+        # Pass through PDF chunks for virtual message expansion
+        if content.chunks:
+            self._last_pdf_chunks = content.chunks
+
+        return {
+            "description": content.text,
+            "media_url": url,
+            "media_type": content.media_type or att_type or ext,
+        }
+
     async def _handle_pdf(
         self, url: str, name: str
     ) -> dict[str, str]:
-        """Download and extract text from a PDF."""
+        """Download and extract text from a PDF using chunked extraction."""
         async with self._sem:
             data = await self._download_file(url)
 
         if not data:
             return {"description": "", "media_url": url, "media_type": "pdf"}
 
-        text = self._extract_pdf_text(data)
-        size_kb = len(data) // 1024
+        from beever_atlas.services.media_extractors import PdfExtractor
+        extractor = PdfExtractor()
+        content = await extractor.extract(data, name)
 
-        if text.strip():
-            desc = (
-                f"[Attachment: {name} (PDF, {size_kb} kB)]\n"
-                f"[Document text: {text[:_MAX_PDF_TEXT_CHARS]}]"
-            )
-        else:
-            desc = f"[Attachment: {name} (PDF, {size_kb} kB, no extractable text)]"
+        # Store chunks for passthrough to preprocessor
+        if len(content.chunks) > 1:
+            self._last_pdf_chunks = content.chunks
 
-        return {"description": desc, "media_url": url, "media_type": "pdf"}
+        return {"description": content.text, "media_url": url, "media_type": "pdf"}
 
     async def _handle_image(
         self, url: str, name: str, message_text: str
@@ -227,12 +242,23 @@ class MediaProcessor:
         if description:
             desc = (
                 f"[Attachment: {name} (image, {size_kb} kB)]\n"
-                f"[Image description: {description}]"
+                f"[Image description]: {description}"
             )
         else:
             desc = f"[Attachment: {name} (image, {size_kb} kB)]"
 
         return {"description": desc, "media_url": url, "media_type": "image"}
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """Return a shared httpx client, creating it lazily."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=30.0)
+        return self._http_client
+
+    async def close(self) -> None:
+        """Close the shared httpx client."""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
 
     async def _download_file(self, url: str) -> bytes | None:
         """Download a file via the bridge file proxy."""
@@ -243,25 +269,25 @@ class MediaProcessor:
             headers["Authorization"] = f"Bearer {settings.bridge_api_key}"
 
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(proxy_url, headers=headers)
-                if resp.status_code != 200:
-                    logger.warning(
-                        "MediaProcessor: download failed status=%d url=%s",
-                        resp.status_code,
-                        url[:80],
-                    )
-                    return None
+            client = await self._get_http_client()
+            resp = await client.get(proxy_url, headers=headers)
+            if resp.status_code != 200:
+                logger.warning(
+                    "MediaProcessor: download failed status=%d url=%s",
+                    resp.status_code,
+                    url[:80],
+                )
+                return None
 
-                if len(resp.content) > self._max_bytes:
-                    logger.info(
-                        "MediaProcessor: skipping file >%dMB: %s",
-                        settings.media_max_file_size_mb,
-                        url[:80],
-                    )
-                    return None
+            if len(resp.content) > self._max_bytes:
+                logger.info(
+                    "MediaProcessor: skipping file >%dMB: %s",
+                    settings.media_max_file_size_mb,
+                    url[:80],
+                )
+                return None
 
-                return resp.content
+            return resp.content
         except Exception:
             logger.warning(
                 "MediaProcessor: download error url=%s", url[:80], exc_info=True
@@ -302,10 +328,10 @@ class MediaProcessor:
     ) -> str:
         """Describe an image using Gemini vision API."""
         try:
-            from google import genai
             from google.genai import types as genai_types
+            from beever_atlas.services.media_extractors import _get_gemini_client
 
-            client = genai.Client(api_key=self._settings.google_api_key)
+            client = await _get_gemini_client()
 
             prompt = (
                 "Describe this image concisely for a knowledge extraction system. "
@@ -316,20 +342,23 @@ class MediaProcessor:
             if message_context:
                 prompt += f"\n\nMessage context: {message_context[:200]}"
 
-            response = await client.aio.models.generate_content(
-                model=self._settings.media_vision_model,
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[
-                            genai_types.Part.from_bytes(
-                                data=data,
-                                mime_type="image/png",
-                            ),
-                            genai_types.Part.from_text(text=prompt),
-                        ],
-                    )
-                ],
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=self._settings.media_vision_model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[
+                                genai_types.Part.from_bytes(
+                                    data=data,
+                                    mime_type="image/png",
+                                ),
+                                genai_types.Part.from_text(text=prompt),
+                            ],
+                        )
+                    ],
+                ),
+                timeout=60,
             )
 
             return response.text or ""

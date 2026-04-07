@@ -1,14 +1,12 @@
 """Contradiction detection service for temporal fact lifecycle.
 
 Compares newly extracted facts against existing facts to detect
-contradictions and trigger fact supersession.
+contradictions and trigger fact supersession via ADK agent.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
 from beever_atlas.infra.config import get_settings
@@ -28,9 +26,11 @@ async def detect_contradictions(
     if not existing_facts:
         return []
 
-    settings = get_settings()
-
-    # Format existing facts for the prompt
+    # Format facts for the prompt
+    new_fact_text = (
+        f"Text: {new_fact.memory_text} | Topics: {new_fact.topic_tags} | "
+        f"Entities: {new_fact.entity_tags}"
+    )
     existing_lines: list[str] = []
     for ef in existing_facts:
         existing_lines.append(
@@ -38,45 +38,24 @@ async def detect_contradictions(
             f"Topics: {ef.topic_tags} | Entities: {ef.entity_tags}"
         )
 
-    from beever_atlas.agents.prompts.contradiction_detector import (
-        CONTRADICTION_DETECTOR_INSTRUCTION,
-    )
-
-    instruction = CONTRADICTION_DETECTOR_INSTRUCTION.replace(
-        "{new_fact}",
-        f"Text: {new_fact.memory_text} | Topics: {new_fact.topic_tags} | Entities: {new_fact.entity_tags}",
-    ).replace("{existing_facts}", "\n".join(existing_lines))
-
     try:
-        from google import genai
-        from google.genai import types as genai_types
-
-        client = genai.Client(api_key=settings.google_api_key)
-
-        response = await client.aio.models.generate_content(
-            model=settings.llm_fast_model,
-            contents=[
-                genai_types.Content(
-                    role="user",
-                    parts=[genai_types.Part.from_text(text=instruction)],
-                )
-            ],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
+        from beever_atlas.agents.ingestion.contradiction_detector import (
+            create_contradiction_detector,
         )
+        from beever_atlas.agents.runner import run_agent
 
-        result_text = response.text or ""
-        if result_text.startswith("```"):
-            result_text = re.sub(r"^```(?:json)?\n?", "", result_text)
-            result_text = re.sub(r"\n?```$", "", result_text)
+        agent = create_contradiction_detector()
+        state = await run_agent(agent, state={
+            "new_fact": new_fact_text,
+            "existing_facts": "\n".join(existing_lines),
+        })
 
-        result = json.loads(result_text)
-        return result.get("contradictions") or []
+        report = state.get("contradiction_report") or {}
+        return report.get("contradictions") or [] if isinstance(report, dict) else []
 
     except Exception:
         logger.warning(
-            "ContradictionDetector: LLM call failed",
+            "ContradictionDetector: agent call failed",
             exc_info=True,
         )
         return []

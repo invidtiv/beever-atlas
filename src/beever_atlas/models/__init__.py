@@ -3,3 +3,4 @@
 from beever_atlas.models.domain import *
 from beever_atlas.models.persistence import *
 from beever_atlas.models.api import *
+from beever_atlas.models.sync_policy import *

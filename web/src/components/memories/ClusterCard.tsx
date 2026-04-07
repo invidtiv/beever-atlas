@@ -25,38 +25,42 @@ export function ClusterCard({ cluster, facts }: ClusterCardProps) {
           <ChevronRight size={16} className="text-primary shrink-0 mt-0.5" />
         )}
         <div className="flex-1 min-w-0">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <h4 className="text-xl font-semibold text-foreground leading-tight">
-              {cluster.topic}
-            </h4>
-            <span className="text-sm text-muted-foreground shrink-0">
-              {cluster.fact_count} facts
-            </span>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h4 className="text-xl font-semibold text-foreground leading-tight line-clamp-2">
+                {cluster.topic}
+              </h4>
+              <span className="text-sm text-muted-foreground">
+                {cluster.fact_count} facts
+              </span>
+            </div>
+            <div className="hidden lg:flex flex-wrap justify-end gap-1 shrink-0 max-w-[50%]">
+              {cluster.topic_tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="px-2 py-0.5 text-xs rounded-full bg-muted text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
           </div>
-          <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+          <p className="text-sm text-muted-foreground mt-1 leading-relaxed line-clamp-3">
             {cluster.summary}
           </p>
-          <div className="mt-2 text-xs text-muted-foreground">
-            {new Date(cluster.date_range.start).toLocaleDateString(undefined, {
-              month: "short",
-              day: "numeric",
-            })}{" "}
-            -{" "}
-            {new Date(cluster.date_range.end).toLocaleDateString(undefined, {
-              month: "short",
-              day: "numeric",
-            })}
-          </div>
-        </div>
-        <div className="hidden lg:flex gap-1 shrink-0">
-          {cluster.topic_tags.map((tag) => (
-            <span
-              key={tag}
-              className="px-2 py-0.5 text-xs rounded-full bg-muted text-muted-foreground"
-            >
-              {tag}
-            </span>
-          ))}
+          {cluster.date_range.start && cluster.date_range.end && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              {new Date(cluster.date_range.start).toLocaleDateString(undefined, {
+                month: "short",
+                day: "numeric",
+              })}{" "}
+              -{" "}
+              {new Date(cluster.date_range.end).toLocaleDateString(undefined, {
+                month: "short",
+                day: "numeric",
+              })}
+            </div>
+          )}
         </div>
       </button>
 

@@ -7,6 +7,7 @@ import { useConnectionMap } from "@/hooks/useConnectionMap";
 import { ChannelBreadcrumb } from "@/components/channel/Breadcrumb";
 import { SyncButton } from "@/components/channel/SyncButton";
 import { SyncProgress } from "@/components/channel/SyncProgress";
+import { NextSyncBadge } from "@/components/channel/NextSyncBadge";
 import { useSync } from "@/hooks/useSync";
 
 interface ChannelInfo {
@@ -26,7 +27,7 @@ interface ChannelRouteState {
   connection_id?: string | null;
 }
 
-const TAB_PATHS = ["wiki", "ask", "messages", "memories", "graph", "settings"] as const;
+const TAB_PATHS = ["wiki", "ask", "messages", "memories", "graph", "sync-history", "settings"] as const;
 type TabPath = (typeof TAB_PATHS)[number];
 
 const TAB_LABELS: Record<TabPath, string> = {
@@ -35,6 +36,7 @@ const TAB_LABELS: Record<TabPath, string> = {
   messages: "Messages",
   memories: "Memories",
   graph: "Graph",
+  "sync-history": "Sync History",
   settings: "Settings",
 };
 
@@ -54,12 +56,13 @@ export function ChannelWorkspace() {
       channel_id: id,
       name: routeState.channel_name,
       platform: routeState.platform || "slack",
-      is_member: routeState.is_member ?? true,
+      is_member: routeState.is_member ?? false,
       member_count: routeState.member_count ?? null,
       connection_id: routeState.connection_id ?? null,
     };
   });
   const [refreshing, setRefreshing] = useState(false);
+  const [loadingChannel, setLoadingChannel] = useState(!routeState?.channel_name);
   const { getWorkspaceName } = useConnectionMap();
 
   const activeTab = getCurrentTab(location.pathname);
@@ -71,12 +74,13 @@ export function ChannelWorkspace() {
         channel_id: id,
         name: routeState.channel_name || prev?.name || "Channel",
         platform: routeState.platform || prev?.platform || "slack",
-        is_member: routeState.is_member ?? prev?.is_member ?? true,
+        is_member: routeState.is_member ?? prev?.is_member ?? false,
         member_count: routeState.member_count ?? prev?.member_count ?? null,
         connection_id: routeState.connection_id ?? prev?.connection_id ?? null,
       }));
     }
     const connParam = routeState?.connection_id ? `?connection_id=${routeState.connection_id}` : "";
+    setLoadingChannel(true);
     api
       .get<ChannelInfo>(`/api/channels/${id}${connParam}`)
       .then(setChannel)
@@ -86,16 +90,18 @@ export function ChannelWorkspace() {
             channel_id: id,
             name: "Channel",
             platform: "slack",
+            is_member: false,
           }
         )
-      );
+      )
+      .finally(() => setLoadingChannel(false));
   }, [id, routeState?.channel_name, routeState?.platform, routeState?.member_count, routeState?.connection_id]);
 
   function handleTabChange(value: string) {
     navigate(`/channels/${id}/${value}`);
   }
 
-  const isMember = channel?.is_member !== false;
+  const isMember = channel?.is_member === true;
   const { syncState, triggerSync, isSyncing, error: syncError } = useSync(id ?? "");
   const syncFailureMessage =
     syncError || (syncState.state === "error" ? syncState.errors?.filter(Boolean).join("; ") : null);
@@ -174,7 +180,8 @@ export function ChannelWorkspace() {
                 {channel.member_count.toLocaleString()} members
               </span>
             )}
-            <div className="ml-auto shrink-0">
+            <div className="ml-auto flex items-center gap-2 shrink-0">
+              {id && <NextSyncBadge channelId={id} />}
               {id && <SyncButton syncState={syncState} isSyncing={isSyncing} error={syncError} onSync={triggerSync} />}
             </div>
           </div>
@@ -234,7 +241,14 @@ export function ChannelWorkspace() {
       {id && <SyncProgress syncState={syncState} isSyncing={isSyncing} />}
 
       {/* Content */}
-      {isMember ? (
+      {loadingChannel ? (
+        <div className="flex items-center justify-center flex-1 min-h-0 p-6">
+          <div className="flex flex-col items-center gap-3 text-muted-foreground/50">
+            <RefreshCw className="w-6 h-6 animate-spin" />
+            <span className="text-sm">Loading channel...</span>
+          </div>
+        </div>
+      ) : isMember ? (
         <div className="overflow-auto flex-1 min-h-0 relative" key={activeTab}>
           <Outlet context={{ syncState, isSyncing, connectionId: channel?.connection_id ?? null }} />
         </div>

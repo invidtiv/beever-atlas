@@ -10,16 +10,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from google.genai import types
 from google.genai.errors import ServerError
 
 from beever_atlas.agents.ingestion import create_ingestion_pipeline
+from beever_atlas.models.sync_policy import IngestionConfig
 from beever_atlas.agents.runner import create_runner, create_session
 from beever_atlas.infra.config import get_settings
 from beever_atlas.stores import get_stores
+from beever_atlas.llm import get_llm_provider
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +30,23 @@ _LLM_RETRY_BACKOFF = [10, 30, 60]  # seconds between retries
 
 # Map ADK agent names to human-readable stage descriptions with step numbers.
 _STAGE_LABELS: dict[str, str] = {
-    "preprocessor": "Step 1/7 — Preprocessing messages",
-    "fact_extractor": "Step 2/7 — Extracting facts (LLM)",
-    "entity_extractor": "Step 2/7 — Extracting entities (LLM)",
-    "classifier_agent": "Step 3/7 — Classifying facts (LLM)",
-    "embedder": "Step 4/7 — Generating embeddings",
-    "cross_batch_validator_agent": "Step 5/7 — Validating entities",
-    "persister": "Step 6/7 — Saving to stores",
+    "preprocessor": "Step 1/6 — Preprocessing messages",
+    "fact_extractor": "Step 2/6 — Extracting facts (LLM)",
+    "entity_extractor": "Step 3/6 — Extracting entities (LLM)",
+    "embedder": "Step 4/6 — Generating embeddings",
+    "cross_batch_validator_agent": "Step 5/6 — Validating entities",
+    "persister": "Step 6/6 — Saving to stores",
 }
+
+_STAGE_ORDER: list[str] = [
+    "preprocessor", "fact_extractor", "entity_extractor",
+    "embedder", "cross_batch_validator_agent", "persister",
+]
+
+_ALL_CHECKPOINT_KEYS: list[str] = [
+    "preprocessed_messages", "extracted_facts", "extracted_entities",
+    "classified_facts", "embedded_facts", "validated_entities",
+]
 
 
 def _thread_aware_batches(messages: list[Any], batch_size: int) -> list[list[Any]]:
@@ -105,6 +116,11 @@ class BatchBreakdown:
     sample_entities: list[dict[str, str]] = field(default_factory=list)
     sample_relationships: list[dict[str, str]] = field(default_factory=list)
     duration_seconds: float = 0.0
+    error: str | None = None
+    # Fact-level tracking
+    facts_stored: int = 0
+    facts_failed: int = 0
+    facts_pending: int = 0
 
 
 @dataclass
@@ -130,6 +146,8 @@ class BatchProcessor:
         channel_id: str,
         channel_name: str,
         sync_job_id: str,
+        ingestion_config: IngestionConfig | None = None,
+        use_batch_api: bool = False,
     ) -> BatchResult:
         """Process all messages in fixed-size batches.
 
@@ -138,6 +156,7 @@ class BatchProcessor:
             channel_id: Slack/platform channel identifier.
             channel_name: Human-readable channel name.
             sync_job_id: MongoDB SyncJob ID for progress tracking.
+            ingestion_config: Per-channel ingestion overrides (optional).
 
         Returns:
             BatchResult with accumulated fact/entity counts and any errors.
@@ -146,10 +165,23 @@ class BatchProcessor:
         stores = get_stores()
         result = BatchResult()
 
-        batch_size = settings.sync_batch_size
-        batch_timeout = settings.sync_batch_timeout_seconds
+        # Use per-channel config if provided, else fall back to global settings
+        batch_size = (
+            ingestion_config.batch_size
+            if ingestion_config and ingestion_config.batch_size is not None
+            else settings.sync_batch_size
+        )
         total = len(messages)
-        batches = _thread_aware_batches(messages, batch_size)
+        # Use token-aware adaptive batching when configured, else fixed-size
+        if settings.batch_max_prompt_tokens > 0:
+            from beever_atlas.services.adaptive_batcher import token_aware_batches
+            batches = token_aware_batches(
+                [m if isinstance(m, dict) else vars(m) for m in messages],
+                max_tokens=settings.batch_max_prompt_tokens,
+                time_window_seconds=settings.batch_time_window_seconds,
+            )
+        else:
+            batches = _thread_aware_batches(messages, batch_size)
         max_batches = len(batches)
         logger.info(
             "BatchProcessor: start job_id=%s channel=%s (%s) total_messages=%d batch_size=%d total_batches=%d",
@@ -164,15 +196,14 @@ class BatchProcessor:
         runner = create_runner(create_ingestion_pipeline())
 
         processed_so_far = 0
+        known_entities: list[dict[str, Any]] = (
+            await stores.entity_registry.get_all_canonical()
+        )
+        cumulative_timings: dict[str, float] = {}
 
         for batch_num, batch in enumerate(batches):
             batch_index = batch_num + 1
             try:
-                # Re-fetch known entities each batch so later batches see
-                # entities created by earlier ones in the same run.
-                known_entities: list[dict[str, Any]] = (
-                    await stores.entity_registry.get_all_canonical()
-                )
                 logger.info(
                     "BatchProcessor: start job_id=%s channel=%s batch=%d/%d messages=%d",
                     sync_job_id,
@@ -187,53 +218,92 @@ class BatchProcessor:
                     job_id=sync_job_id,
                     processed=processed_so_far,
                     current_batch=batch_index,
+                    total_batches=max_batches,
                 )
                 # Convert NormalizedMessage objects to plain dicts for session state.
                 messages_as_dicts: list[dict[str, Any]] = [
                     m if isinstance(m, dict) else vars(m) for m in batch
                 ]
 
-                # Pre-compute embedding similarity candidates for the validator.
-                # This injects semantic dedup hints alongside string-based known_entities.
-                embedding_similarity_candidates: list[dict[str, Any]] = []
-                try:
-                    entity_names_in_batch: list[str] = []
-                    for m in messages_as_dicts:
-                        for tag in (m.get("entity_tags") or []):
-                            if tag and tag not in entity_names_in_batch:
-                                entity_names_in_batch.append(tag)
-                    if entity_names_in_batch:
-                        for name in entity_names_in_batch[:20]:  # Cap to avoid excessive API calls
-                            try:
-                                vec = await stores.entity_registry.compute_name_embedding(name)
-                                similar = await stores.entity_registry.find_similar_by_embedding(
-                                    name, vec, threshold=settings.entity_similarity_threshold
-                                )
-                                for canonical, score in similar:
-                                    if not stores.entity_registry.is_merge_rejected(name, canonical):
-                                        embedding_similarity_candidates.append({
-                                            "extracted": name,
-                                            "similar_to": canonical,
-                                            "score": score,
-                                        })
-                            except Exception:
-                                pass  # Graceful: embedding failure doesn't block validation
-                except Exception:
-                    logger.debug(
-                        "BatchProcessor: embedding similarity pre-processing failed, continuing with string matching",
-                        exc_info=True,
+                if use_batch_api:
+                    from beever_atlas.services.batch_pipeline import BatchPipelineRunner
+                    pipeline_runner = BatchPipelineRunner()
+                    breakdown = await pipeline_runner.process_batch_with_retry(
+                        messages=messages_as_dicts,
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                        sync_job_id=sync_job_id,
+                        batch_num=batch_index,
+                        max_batches=max_batches,
+                        known_entities=known_entities,
+                        ingestion_config=ingestion_config,
                     )
+                    # Accumulate results
+                    result.total_facts += breakdown.facts_count
+                    result.total_entities += breakdown.entities_count
+                    result.total_relationships += breakdown.relationships_count
+                    result.batch_breakdowns.append(breakdown)
+                    processed_so_far += len(batch)
+                    # Push batch result to MongoDB
+                    await stores.mongodb.update_sync_progress(
+                        job_id=sync_job_id,
+                        processed=processed_so_far,
+                        current_batch=batch_index,
+                        current_stage=f"Step 7/7 — Batch {batch_index} complete",
+                        batch_result=asdict(breakdown),
+                    )
+                    continue  # Skip the normal ADK pipeline for this batch
 
+                # Embedding similarity pre-computation is deferred: entity_tags
+                # are not available on raw messages before extraction runs.
+                embedding_similarity_candidates: list[dict[str, Any]] = []
+
+                _max_facts = (
+                    ingestion_config.max_facts_per_message
+                    if ingestion_config and ingestion_config.max_facts_per_message is not None
+                    else settings.max_facts_per_message
+                )
                 initial_state: dict[str, Any] = {
                     "messages": messages_as_dicts,
                     "channel_id": channel_id,
                     "channel_name": channel_name,
                     "batch_num": batch_index,
-                    "max_facts_per_message": settings.max_facts_per_message,
+                    "max_facts_per_message": _max_facts,
                     "known_entities": known_entities,
                     "embedding_similarity_candidates": embedding_similarity_candidates,
                     "sync_job_id": sync_job_id,
+                    "skip_entity_extraction": bool(
+                        ingestion_config and ingestion_config.skip_entity_extraction
+                    ),
+                    "skip_graph_writes": bool(
+                        ingestion_config and ingestion_config.skip_graph_writes
+                    ),
+                    "quality_threshold": (
+                        ingestion_config.quality_threshold
+                        if ingestion_config and ingestion_config.quality_threshold is not None
+                        else None
+                    ),
                 }
+
+                # Load checkpoint if this batch was partially processed before
+                checkpoint = await stores.mongodb.load_pipeline_checkpoint(
+                    sync_job_id=sync_job_id, batch_num=batch_index,
+                )
+                _resumed_from: str | None = None
+                _skipped_stage_count = 0
+                if checkpoint:
+                    _resumed_from = checkpoint["completed_stage"]
+                    _skipped_stage_count = checkpoint["completed_stage_index"] + 1
+                    snapshot = checkpoint.get("state_snapshot") or {}
+                    for key in _ALL_CHECKPOINT_KEYS:
+                        if key in snapshot:
+                            initial_state[key] = snapshot[key]
+                    logger.info(
+                        "BatchProcessor: resuming from checkpoint job_id=%s batch=%d/%d "
+                        "last_completed=%s skipping=%d stages",
+                        sync_job_id, batch_index, max_batches,
+                        _resumed_from, _skipped_stage_count,
+                    )
 
                 session = await create_session(
                     user_id="system",
@@ -241,138 +311,400 @@ class BatchProcessor:
                 )
 
                 # Drive the pipeline to completion with retry on transient LLM errors.
+                # Each attempt gets its own fresh timeout budget so retry sleeps
+                # don't consume pipeline time.
                 batch_stage_timings: dict[str, float] = {}
                 for attempt in range(_LLM_MAX_RETRIES + 1):
                     try:
                         # Each retry needs a fresh session since the pipeline
                         # may have partially mutated the previous one.
                         if attempt > 0:
-                            session = await create_session(
-                                user_id="system",
-                                state=initial_state,
-                            )
-                        async with asyncio.timeout(batch_timeout):
-                            batch_stage_timings = {}
-                            activity_log: list[dict[str, Any]] = []
-                            _last_stage = ""
-                            _stage_start = time.monotonic()
-                            async for _event in runner.run_async(
-                                user_id="system",
-                                session_id=session.id,
-                                new_message=types.Content(
-                                    role="user",
-                                    parts=[types.Part(text="process batch")],
-                                ),
-                            ):
-                                author = getattr(_event, "author", "") or ""
-                                label = _STAGE_LABELS.get(author)
-                                if label and author != _last_stage:
-                                    if _last_stage:
-                                        batch_stage_timings[_last_stage] = round(
-                                            time.monotonic() - _stage_start, 2
-                                        )
-                                    _last_stage = author
-                                    _stage_start = time.monotonic()
-                                    activity_log.append({
-                                        "agent": author,
-                                        "stage": label,
-                                        "type": "stage_start",
-                                    })
-
-                                # Extract meaningful content from events
-                                actions = getattr(_event, "actions", None)
-                                if actions:
-                                    delta = getattr(actions, "state_delta", None) or getattr(actions, "stateDelta", None) or {}
-                                    if isinstance(delta, dict):
-                                        # Preprocessor output
-                                        if "preprocessed_messages" in delta:
-                                            msgs = delta["preprocessed_messages"]
-                                            count = len(msgs) if isinstance(msgs, list) else 0
-                                            activity_log.append({
-                                                "type": "output", "agent": "preprocessor",
-                                                "message": f"Retained {count} messages",
-                                            })
-                                        # Fact extraction output
-                                        if "extracted_facts" in delta:
-                                            raw = delta["extracted_facts"]
-                                            facts_list = raw.get("facts", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
-                                            fact_summaries = []
-                                            for f in facts_list[:5]:
-                                                text = (f.get("memory_text") or "")[:80]
-                                                score = f.get("quality_score", 0)
-                                                fact_summaries.append(f"[{score:.1f}] {text}")
-                                            activity_log.append({
-                                                "type": "output", "agent": "fact_extractor",
-                                                "message": f"Extracted {len(facts_list)} facts",
-                                                "details": fact_summaries,
-                                            })
-                                        # Entity extraction output
-                                        if "extracted_entities" in delta:
-                                            raw = delta["extracted_entities"]
-                                            entities = raw.get("entities", []) if isinstance(raw, dict) else []
-                                            rels = raw.get("relationships", []) if isinstance(raw, dict) else []
-                                            entity_names = [e.get("name", "?") for e in entities[:8]]
-                                            activity_log.append({
-                                                "type": "output", "agent": "entity_extractor",
-                                                "message": f"Found {len(entities)} entities, {len(rels)} relationships",
-                                                "details": entity_names,
-                                            })
-                                        # Embedder output
-                                        if "embedded_facts" in delta:
-                                            embedded = delta["embedded_facts"]
-                                            count = len(embedded) if isinstance(embedded, list) else 0
-                                            activity_log.append({
-                                                "type": "output", "agent": "embedder",
-                                                "message": f"Embedded {count} facts",
-                                            })
-                                        # Persister output
-                                        if "persist_result" in delta:
-                                            pr = delta["persist_result"]
-                                            activity_log.append({
-                                                "type": "output", "agent": "persister",
-                                                "message": f"Saved {len(pr.get('weaviate_ids', []))} facts to Weaviate, {pr.get('entity_count', 0)} entities to Neo4j",
-                                            })
-
-                                    await stores.mongodb.update_sync_progress(
-                                        job_id=sync_job_id,
-                                        processed=processed_so_far,
-                                        current_batch=batch_index,
-                                        current_stage=label if label else None,
-                                        stage_timings=batch_stage_timings,
-                                        stage_details={"activity_log": activity_log[-10:]},  # keep last 10 entries
-                                    )
-
-                            if _last_stage:
-                                batch_stage_timings[_last_stage] = round(
-                                    time.monotonic() - _stage_start, 2
-                                )
-                        break  # success
-                    except TimeoutError as exc:
-                        raise TimeoutError(
-                            f"Ingestion batch timed out after {batch_timeout}s "
-                            f"(batch={batch_index}/{max_batches}, messages={len(batch)})"
-                        ) from exc
-                    except ServerError as exc:
-                        if attempt < _LLM_MAX_RETRIES:
-                            wait = _LLM_RETRY_BACKOFF[attempt]
+                            # Sleep between retries OUTSIDE the timeout scope
+                            wait = _LLM_RETRY_BACKOFF[attempt - 1]
                             logger.warning(
-                                "BatchProcessor: LLM 503/transient error job_id=%s batch=%d/%d "
-                                "attempt=%d/%d retrying in %ds: %s",
-                                sync_job_id,
-                                batch_index,
-                                max_batches,
-                                attempt + 1,
-                                _LLM_MAX_RETRIES + 1,
-                                wait,
-                                exc,
+                                "BatchProcessor: retrying job_id=%s batch=%d/%d "
+                                "attempt=%d/%d after %ds sleep",
+                                sync_job_id, batch_index, max_batches,
+                                attempt + 1, _LLM_MAX_RETRIES + 1, wait,
                             )
                             await stores.mongodb.update_sync_progress(
                                 job_id=sync_job_id,
                                 processed=processed_so_far,
                                 current_batch=batch_index,
-                                current_stage=f"LLM unavailable — retrying in {wait}s (attempt {attempt + 1}/{_LLM_MAX_RETRIES + 1})",
+                                current_stage=f"Step 0/6 — Retrying in {wait}s (attempt {attempt + 1}/{_LLM_MAX_RETRIES + 1})",
                             )
                             await asyncio.sleep(wait)
+                            session = await create_session(
+                                user_id="system",
+                                state=initial_state,
+                            )
+                        batch_stage_timings = {}
+                        activity_log: list[dict[str, Any]] = []
+                        _logged_outputs: set[str] = set()  # Track which state keys we already logged
+                        _last_stage = ""
+                        _stage_start = time.monotonic()
+                        _evt_count = 0
+                        async for _event in runner.run_async(
+                            user_id="system",
+                            session_id=session.id,
+                            new_message=types.Content(
+                                role="user",
+                                parts=[types.Part(text="process batch")],
+                            ),
+                        ):
+                            author = getattr(_event, "author", "") or ""
+                            label = _STAGE_LABELS.get(author)
+                            if label and author != _last_stage:
+                                if _last_stage:
+                                    batch_stage_timings[_last_stage] = round(
+                                        time.monotonic() - _stage_start, 2
+                                    )
+                                _last_stage = author
+                                _stage_start = time.monotonic()
+                                _provider = get_llm_provider()
+                                if author == "embedder":
+                                    _stage_model = _provider.embedding_model
+                                elif author in ("preprocessor", "persister"):
+                                    _stage_model = None
+                                else:
+                                    _stage_model = _provider.get_model_string(author)
+                                activity_log.append({
+                                    "agent": author,
+                                    "stage": label,
+                                    "type": "stage_start",
+                                    "model": _stage_model,
+                                })
+
+                                # Save checkpoint on stage transitions
+                                if _last_stage and _last_stage != "persister":
+                                    try:
+                                        from beever_atlas.agents.runner import get_session_service
+                                        _cp_svc = get_session_service()
+                                        _cp_session = await _cp_svc.get_session(
+                                            app_name="beever_atlas", user_id="system", session_id=session.id,
+                                        )
+                                        _cp_state = _cp_session.state if _cp_session else {}
+                                        _cp_snapshot = {k: _cp_state[k] for k in _ALL_CHECKPOINT_KEYS if k in _cp_state}
+                                        _cp_idx = _STAGE_ORDER.index(_last_stage) if _last_stage in _STAGE_ORDER else -1
+                                        await stores.mongodb.save_pipeline_checkpoint(
+                                            sync_job_id=sync_job_id, batch_num=batch_index,
+                                            channel_id=channel_id, completed_stage=_last_stage,
+                                            completed_stage_index=_cp_idx,
+                                            state_snapshot=_cp_snapshot, stage_timings=batch_stage_timings,
+                                        )
+                                    except Exception:
+                                        logger.warning(
+                                            "BatchProcessor: checkpoint save failed job_id=%s batch=%d stage=%s",
+                                            sync_job_id, batch_index, _last_stage, exc_info=True,
+                                        )
+
+                            # Extract meaningful content from state_delta events.
+                            # Only capture non-empty outputs to avoid duplicate/intermediate entries.
+                            actions = getattr(_event, "actions", None)
+                            if actions:
+                                delta = getattr(actions, "state_delta", None) or getattr(actions, "stateDelta", None) or {}
+                                if isinstance(delta, dict):
+                                    # ── Preprocessor output ────────────────────
+                                    if "preprocessed_messages" in delta and "preprocessed_messages" not in _logged_outputs:
+                                        msgs = delta["preprocessed_messages"]
+                                        if isinstance(msgs, list) and msgs:
+                                            _logged_outputs.add("preprocessed_messages")
+                                            import re as _re
+                                            msg_details: list[str] = []
+                                            media_count = 0
+                                            coref_count = 0
+                                            thread_count = 0
+                                            link_count = 0
+                                            for m in msgs:
+                                                author = m.get("author_name") or m.get("username") or "?"
+                                                full_text = m.get("text") or ""
+                                                first_line = full_text.split("\n")[0][:200]
+                                                badges: list[str] = []
+                                                if m.get("raw_text") and m.get("raw_text") != full_text:
+                                                    badges.append("COREF")
+                                                    coref_count += 1
+                                                if m.get("thread_context"):
+                                                    badges.append("THREAD")
+                                                    thread_count += 1
+                                                if m.get("source_link_urls"):
+                                                    badges.append(f"LINKS:{len(m['source_link_urls'])}")
+                                                    link_count += 1
+                                                if m.get("modality") == "mixed":
+                                                    mtype = m.get("source_media_type", "")
+                                                    media_icons = {"image": "🖼", "pdf": "📄", "video": "🎬", "audio": "🎵"}
+                                                    icon = media_icons.get(mtype, "📎")
+                                                    badges.append(f"{icon} {mtype.upper()}" if mtype else "📎 MEDIA")
+                                                    media_count += 1
+                                                badge_str = f" [{', '.join(badges)}]" if badges else ""
+                                                msg_details.append(f"{author}: {first_line}{'…' if len(full_text.split(chr(10))[0]) > 200 else ''}{badge_str}")
+
+                                                # Extract media observation details into structured samples
+                                                # Fix: Use re.DOTALL and properly match brackets to catch [Document Digest]:
+                                                doc_match = _re.search(r'\[Document (?:Digest|text)\]:?\s*(.+)', full_text, _re.DOTALL)
+                                                if doc_match:
+                                                    content_snippet = doc_match.group(1).strip()[:2000]
+                                                    msg_details.append({"item_type": "media", "agent": "document_digester", "content": f"{content_snippet}…", "model": get_llm_provider().get_model_string("document_digester")})
+
+                                                img_match = _re.search(r'\[Image description\]:?\s*(.+)', full_text, _re.DOTALL)
+                                                if img_match:
+                                                    content_snippet = img_match.group(1).strip().split("\n")[0][:500]
+                                                    msg_details.append({"item_type": "media", "agent": "image_describer", "content": f"{content_snippet}…", "model": get_llm_provider().get_model_string("image_describer")})
+                                                if not img_match:
+                                                    img_meta = _re.search(r'\[Attachment:.*?\(image', full_text)
+                                                    if img_meta:
+                                                        msg_details.append({"item_type": "media", "agent": "image_describer", "content": "Vision skipped (message text sufficient)", "model": get_llm_provider().get_model_string("image_describer"), "status": "skipped"})
+
+                                                vid_match = _re.search(r'\[Video (?:summary|transcript|analysis)\]:?\s*(.+)', full_text, _re.DOTALL)
+                                                if vid_match:
+                                                    content_snippet = vid_match.group(1).strip()[:2000]
+                                                    msg_details.append({"item_type": "media", "agent": "video_describer", "content": f"{content_snippet}…", "model": get_llm_provider().get_model_string("video_analyzer")})
+
+                                                vid_vis = _re.search(r'\[Video visual description\]:?\s*(.+)', full_text, _re.DOTALL)
+                                                if vid_vis:
+                                                    content_snippet = vid_vis.group(1).strip()[:2000]
+                                                    msg_details.append({"item_type": "media", "agent": "video_describer", "content": f"{content_snippet}…", "model": get_llm_provider().get_model_string("video_analyzer")})
+
+                                                aud_match = _re.search(r'\[Audio (?:summary|transcript)\]:?\s*(.+)', full_text, _re.DOTALL)
+                                                if aud_match:
+                                                    content_snippet = aud_match.group(1).strip()[:2000]
+                                                    msg_details.append({"item_type": "media", "agent": "audio_describer", "content": f"{content_snippet}…", "model": get_llm_provider().get_model_string("audio_transcriber")})
+
+                                                # Detect failed media agents (timeout or other errors)
+                                                if m.get("modality") == "mixed":
+                                                    has_media_output = bool(doc_match or img_match or vid_match or vid_vis or aud_match)
+                                                    if not has_media_output:
+                                                        media_type = m.get("source_media_type", "")
+                                                        agent_map = {"pdf": "document_digester", "image": "image_describer", "video": "video_analyzer", "audio": "audio_transcriber"}
+                                                        model_map = {"pdf": "document_digester", "image": "image_describer", "video": "video_analyzer", "audio": "audio_transcriber"}
+                                                        agent = agent_map.get(media_type, "media_processor")
+                                                        model_key = model_map.get(media_type, "document_digester")
+                                                        media_names = m.get("source_media_names", [])
+                                                        file_name = media_names[0] if media_names else "unknown"
+                                                        is_timeout = "processing timed out" in full_text.lower()
+                                                        msg_details.append({
+                                                            "item_type": "media",
+                                                            "agent": agent,
+                                                            "content": f"Processing timed out for {file_name}" if is_timeout else f"Processing failed for {file_name}",
+                                                            "model": get_llm_provider().get_model_string(model_key),
+                                                            "status": "timeout" if is_timeout else "error",
+                                                        })
+
+                                                msg_details.append({
+                                                    "item_type": "message",
+                                                    "author": author,
+                                                    "content": f"{first_line}{'…' if len(full_text.split(chr(10))[0]) > 200 else ''}",
+                                                    "tags": badges
+                                                })
+
+                                            summary_parts = [f"Retained {len(msgs)} messages"]
+                                            if media_count:
+                                                summary_parts.append(f"{media_count} media")
+                                            if coref_count:
+                                                summary_parts.append(f"{coref_count} coref")
+                                            if thread_count:
+                                                summary_parts.append(f"{thread_count} threads")
+                                            if link_count:
+                                                summary_parts.append(f"{link_count} links")
+                                            elapsed = round(time.monotonic() - _stage_start, 1)
+                                            activity_log.append({
+                                                "type": "stage_output", "agent": "preprocessor",
+                                                "message": " · ".join(summary_parts),
+                                                "metrics": {
+                                                    "messages": len(msgs),
+                                                    "media": media_count
+                                                },
+                                                "samples": msg_details[:20],
+                                                "elapsed": elapsed,
+                                            })
+
+                                    # ── Fact extraction output ─────────────────
+                                    if "extracted_facts" in delta and "extracted_facts" not in _logged_outputs:
+                                        raw = delta["extracted_facts"]
+                                        facts_list = raw.get("facts", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+                                        if facts_list:
+                                            _logged_outputs.add("extracted_facts")
+                                            fact_summaries = []
+                                            for f in facts_list[:5]:
+                                                text = (f.get("memory_text") or "")[:300]
+                                                score = f.get("quality_score", 0)
+                                                imp = f.get("importance", "?")
+                                                fact_summaries.append({
+                                                    "item_type": "fact",
+                                                    "content": text,
+                                                    "score": score,
+                                                    "tags": [imp]
+                                                })
+                                            elapsed = round(time.monotonic() - _stage_start, 1)
+                                            avg_quality = sum(f.get('quality_score', 0) for f in facts_list) / len(facts_list) if facts_list else 0
+                                            activity_log.append({
+                                                "type": "stage_output", "agent": "fact_extractor",
+                                                "message": f"Extracted {len(facts_list)} facts (avg quality {avg_quality:.2f})",
+                                                "model": get_llm_provider().get_model_string("fact_extractor"),
+                                                "metrics": {
+                                                    "count": len(facts_list),
+                                                    "avg_quality": float(f"{avg_quality:.2f}")
+                                                },
+                                                "samples": fact_summaries,
+                                                "elapsed": elapsed,
+                                            })
+
+                                    # ── Entity extraction output ───────────────
+                                    if "extracted_entities" in delta and "extracted_entities" not in _logged_outputs:
+                                        raw = delta["extracted_entities"]
+                                        entities = raw.get("entities", []) if isinstance(raw, dict) else []
+                                        rels = raw.get("relationships", []) if isinstance(raw, dict) else []
+                                        if entities or rels:
+                                            _logged_outputs.add("extracted_entities")
+                                            entity_details = [
+                                                {"item_type": "entity", "content": e.get('name', '?'), "tags": [e.get('type', '?')]} 
+                                                for e in entities[:8]
+                                            ]
+                                            rel_details = [
+                                                {"item_type": "relationship", "source": r.get('source', '?'), "rel_type": r.get('type', '?'), "target": r.get('target', '?')}
+                                                for r in rels[:5]
+                                            ]
+                                            elapsed = round(time.monotonic() - _stage_start, 1)
+                                            activity_log.append({
+                                                "type": "stage_output", "agent": "entity_extractor",
+                                                "message": f"Found {len(entities)} entities, {len(rels)} relationships",
+                                                "model": get_llm_provider().get_model_string("entity_extractor"),
+                                                "metrics": {
+                                                    "entities": len(entities),
+                                                    "relationships": len(rels)
+                                                },
+                                                "samples": entity_details + rel_details,
+                                                "elapsed": elapsed,
+                                            })
+
+                                    # ── Embedder output ────────────────────────
+                                    if "embedded_facts" in delta and "embedded_facts" not in _logged_outputs:
+                                        embedded = delta["embedded_facts"]
+                                        count = len(embedded) if isinstance(embedded, list) else 0
+                                        if count > 0:
+                                            _logged_outputs.add("embedded_facts")
+                                            elapsed = round(time.monotonic() - _stage_start, 1)
+                                            activity_log.append({
+                                                "type": "stage_output", "agent": "embedder",
+                                                "message": f"Embedded {count} facts",
+                                                "model": get_llm_provider().embedding_model,
+                                                "metrics": {"embedded": count},
+                                                "elapsed": elapsed,
+                                            })
+
+                                    # ── Validator output ───────────────────────
+                                    if "validated_entities" in delta and "validated_entities" not in _logged_outputs:
+                                        raw = delta["validated_entities"]
+                                        entities = raw.get("entities", []) if isinstance(raw, dict) else []
+                                        merges = raw.get("merges", []) if isinstance(raw, dict) else []
+                                        if entities or merges:
+                                            _logged_outputs.add("validated_entities")
+                                            merge_details = [
+                                                {"item_type": "validation", "content": f"{', '.join(mg['merged_from']) if isinstance(mg.get('merged_from'), list) else mg.get('merged_from', '?')} → {mg.get('canonical', '?')}"}
+                                                for mg in merges[:5]
+                                            ]
+                                            elapsed = round(time.monotonic() - _stage_start, 1)
+                                            activity_log.append({
+                                                "type": "stage_output", "agent": "cross_batch_validator_agent",
+                                                "message": f"Validated {len(entities)} entities" + (f", {len(merges)} merges" if merges else ""),
+                                                "model": get_llm_provider().get_model_string("cross_batch_validator_agent"),
+                                                "metrics": {"entities": len(entities), "merges": len(merges)},
+                                                "samples": merge_details if merge_details else None,
+                                                "elapsed": elapsed,
+                                            })
+
+                                    # ── Persister output ───────────────────────
+                                    if "persist_result" in delta and "persist_result" not in _logged_outputs:
+                                        pr = delta["persist_result"]
+                                        wv_count = len(pr.get("weaviate_ids", []))
+                                        neo_count = pr.get("entity_count", 0)
+                                        rel_count = pr.get("relationship_count", 0)
+                                        if wv_count > 0 or neo_count > 0:
+                                            _logged_outputs.add("persist_result")
+                                            elapsed = round(time.monotonic() - _stage_start, 1)
+                                            activity_log.append({
+                                                "type": "stage_output", "agent": "persister",
+                                                "message": f"Saved {wv_count} facts → Weaviate, {neo_count} entities + {rel_count} rels → Neo4j",
+                                                "metrics": {"weaviate_facts": wv_count, "neo4j_entities": neo_count, "neo4j_rels": rel_count},
+                                                "elapsed": elapsed,
+                                            })
+
+                            # Throttle MongoDB updates — only write on stage changes or every 5 events
+                            _evt_count += 1
+                            should_update = bool(label) or _evt_count % 5 == 0
+                            if should_update or label:
+                                await stores.mongodb.update_sync_progress(
+                                    job_id=sync_job_id,
+                                    processed=processed_so_far,
+                                    current_batch=batch_index,
+                                    current_stage=label if label else None,
+                                    stage_timings=batch_stage_timings,
+                                    stage_details={"activity_log": activity_log[-50:]},
+                                )
+
+                        if _last_stage:
+                            batch_stage_timings[_last_stage] = round(
+                                time.monotonic() - _stage_start, 2
+                            )
+                        # Final progress flush after pipeline completes
+                        await stores.mongodb.update_sync_progress(
+                            job_id=sync_job_id,
+                            processed=processed_so_far,
+                            current_batch=batch_index,
+                            current_stage=f"Step 7/7 — Batch {batch_index} complete",
+                            stage_timings=batch_stage_timings,
+                            stage_details={"activity_log": activity_log[-50:]},
+                        )
+                        # Clean up checkpoint after successful completion
+                        try:
+                            await stores.mongodb.delete_pipeline_checkpoint(
+                                sync_job_id=sync_job_id, batch_num=batch_index,
+                            )
+                        except Exception:
+                            pass
+                        break  # success
+                    except ServerError as exc:
+                        if attempt < _LLM_MAX_RETRIES:
+                            logger.warning(
+                                "BatchProcessor: LLM 503/transient error job_id=%s batch=%d/%d "
+                                "attempt=%d/%d: %s",
+                                sync_job_id, batch_index, max_batches,
+                                attempt + 1, _LLM_MAX_RETRIES + 1, exc,
+                            )
+                            # Sleep and retry happen at the top of the next loop iteration
+                        else:
+                            raise
+                    except Exception as exc:
+                        # Catch ValidationError (truncated LLM JSON) and similar parse failures.
+                        # Strategy: attempt 1 → reduce max_facts to 1, attempt 2 → halve batch.
+                        err_name = type(exc).__name__
+                        is_validation = "ValidationError" in err_name or "json_invalid" in str(exc).lower()
+                        if is_validation and attempt < _LLM_MAX_RETRIES:
+                            current_max = initial_state.get("max_facts_per_message", 2)
+                            current_msgs = initial_state.get("messages", [])
+                            if current_max > 1:
+                                # First: reduce facts per message
+                                initial_state["max_facts_per_message"] = 1
+                                logger.warning(
+                                    "BatchProcessor: LLM output truncated job_id=%s batch=%d/%d "
+                                    "attempt=%d/%d — reducing max_facts to 1 (%d messages): %s",
+                                    sync_job_id, batch_index, max_batches,
+                                    attempt + 1, _LLM_MAX_RETRIES + 1,
+                                    len(current_msgs), str(exc)[:200],
+                                )
+                            elif len(current_msgs) > 5:
+                                # Second: halve the batch (remaining messages will be missed
+                                # but the batch won't crash — user can re-sync to catch them)
+                                half = len(current_msgs) // 2
+                                initial_state["messages"] = current_msgs[:half]
+                                logger.warning(
+                                    "BatchProcessor: LLM still truncating job_id=%s batch=%d/%d "
+                                    "attempt=%d/%d — halving batch from %d to %d messages: %s",
+                                    sync_job_id, batch_index, max_batches,
+                                    attempt + 1, _LLM_MAX_RETRIES + 1,
+                                    len(current_msgs), half, str(exc)[:200],
+                                )
+                            else:
+                                raise  # Batch is tiny and still truncating — give up
                         else:
                             raise
 
@@ -469,6 +801,14 @@ class BatchProcessor:
                 result.total_entities += batch_entities
                 result.total_relationships += len(rels_list)
 
+                # Merge batch timings into cumulative totals.
+                for stage_key, duration in batch_stage_timings.items():
+                    cumulative_timings[stage_key] = cumulative_timings.get(stage_key, 0.0) + duration
+
+                # Re-fetch known entities only when new entities were persisted.
+                if persist_result.get("entity_count", 0) > 0:
+                    known_entities = await stores.entity_registry.get_all_canonical()
+
                 processed_so_far += len(batch)
 
                 await stores.mongodb.update_sync_progress(
@@ -477,7 +817,17 @@ class BatchProcessor:
                     current_batch=batch_index,
                     current_stage="Step 7/7 — Complete",
                     stage_timings=batch_stage_timings,
+                    stage_details={"activity_log": activity_log[-50:], "cumulative_timings": cumulative_timings},
+                    batch_result=asdict(breakdown),
                 )
+
+                if _resumed_from:
+                    _llm_stages = {"fact_extractor", "entity_extractor", "classifier_agent", "cross_batch_validator_agent"}
+                    _skipped_llm = len(_llm_stages.intersection(set(_STAGE_ORDER[:_skipped_stage_count])))
+                    logger.info(
+                        "BatchProcessor: resumed from checkpoint '%s' (skipped %d stages, saved ~%d LLM calls) job_id=%s batch=%d",
+                        _resumed_from, _skipped_stage_count, _skipped_llm, sync_job_id, batch_index,
+                    )
 
                 logger.info(
                     "BatchProcessor: done job_id=%s channel=%s batch=%d/%d facts=%d entities=%d processed=%d/%d",
@@ -508,12 +858,19 @@ class BatchProcessor:
                         "error": err_text,
                     }
                 )
+                # Record a breakdown for the failed batch so it appears in history.
+                failed_breakdown = BatchBreakdown(
+                    batch_num=batch_index,
+                    error=err_text,
+                )
+                result.batch_breakdowns.append(failed_breakdown)
                 # Advance progress even on failure so the UI doesn't stay stuck.
                 processed_so_far += len(batch)
                 await stores.mongodb.update_sync_progress(
                     job_id=sync_job_id,
                     processed=processed_so_far,
                     current_batch=batch_index,
+                    batch_result=asdict(failed_breakdown),
                 )
 
         logger.info(

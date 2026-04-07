@@ -65,38 +65,57 @@ function StatPill({
 }
 
 function BatchDetail({ breakdown }: { breakdown: BatchBreakdown }) {
+  const isFailed = !!breakdown.error;
+
   return (
-    <div className="rounded-lg border border-border/40 bg-background/50 p-4">
+    <div className={`rounded-lg border bg-background/50 p-4 ${isFailed ? "border-red-500/30" : "border-border/40"}`}>
       <div className="flex items-center justify-between mb-3">
-        <span className="text-xs font-semibold text-foreground tracking-tight">
-          Batch {breakdown.batch_num}
-        </span>
-        <span className="flex items-center gap-1 text-[11px] text-muted-foreground tabular-nums">
-          <Clock size={10} />
-          {formatDuration(breakdown.duration_seconds)}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-foreground tracking-tight">
+            Batch {breakdown.batch_num}
+          </span>
+          {isFailed && (
+            <span className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide bg-red-500/10 text-red-500">
+              Failed
+            </span>
+          )}
+        </div>
+        {breakdown.duration_seconds > 0 && (
+          <span className="flex items-center gap-1 text-[11px] text-muted-foreground tabular-nums">
+            <Clock size={10} />
+            {formatDuration(breakdown.duration_seconds)}
+          </span>
+        )}
       </div>
 
-      <div className="flex flex-wrap gap-1.5 mb-3">
-        <StatPill
-          icon={<Brain size={11} />}
-          value={breakdown.facts_count}
-          label="facts"
-          color="bg-violet-500/10 text-violet-400"
-        />
-        <StatPill
-          icon={<Users size={11} />}
-          value={breakdown.entities_count}
-          label="entities"
-          color="bg-blue-500/10 text-blue-400"
-        />
-        <StatPill
-          icon={<GitBranch size={11} />}
-          value={breakdown.relationships_count}
-          label="rels"
-          color="bg-amber-500/10 text-amber-400"
-        />
-      </div>
+      {isFailed && (
+        <div className="rounded-md border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/20 px-3 py-2 mb-3">
+          <div className="text-[11px] text-red-700 dark:text-red-300">{breakdown.error}</div>
+        </div>
+      )}
+
+      {!isFailed && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          <StatPill
+            icon={<Brain size={11} />}
+            value={breakdown.facts_count}
+            label="facts"
+            color="bg-violet-500/10 text-violet-400"
+          />
+          <StatPill
+            icon={<Users size={11} />}
+            value={breakdown.entities_count}
+            label="entities"
+            color="bg-blue-500/10 text-blue-400"
+          />
+          <StatPill
+            icon={<GitBranch size={11} />}
+            value={breakdown.relationships_count}
+            label="rels"
+            color="bg-amber-500/10 text-amber-400"
+          />
+        </div>
+      )}
 
       {breakdown.sample_facts.length > 0 && (
         <div className="mb-3">
@@ -159,7 +178,6 @@ function BatchDetail({ breakdown }: { breakdown: BatchBreakdown }) {
 function SyncCard({ event }: { event: SyncHistoryEvent }) {
   const [expanded, setExpanded] = useState(false);
   const batches = event.details.results_summary ?? [];
-  const hasBatches = batches.length > 0;
   const d = event.details;
   const totalFacts = (d.total_facts as number) ?? 0;
   const totalEntities = (d.total_entities as number) ?? 0;
@@ -167,14 +185,16 @@ function SyncCard({ event }: { event: SyncHistoryEvent }) {
   const totalMessages = (d.total_messages as number) ?? 0;
   const isSuccess = event.event_type === "sync_completed";
   const channelName = (d.channel_name as string) ?? event.channel_id;
+  const errorMessage = (d.error as string) ?? null;
   const totalDuration = batches.reduce((sum, b) => sum + b.duration_seconds, 0);
+  const hasExpandable = batches.length > 0 || (!isSuccess && errorMessage);
 
   return (
     <div className="rounded-xl border border-border bg-card overflow-hidden transition-shadow hover:shadow-sm">
       {/* Header */}
       <div
-        className={`flex items-start gap-3 p-4 ${hasBatches ? "cursor-pointer" : ""}`}
-        onClick={() => hasBatches && setExpanded(!expanded)}
+        className={`flex items-start gap-3 p-4 ${hasExpandable ? "cursor-pointer" : ""}`}
+        onClick={() => hasExpandable && setExpanded(!expanded)}
       >
         <div
           className={`flex h-9 w-9 items-center justify-center rounded-full shrink-0 ${
@@ -248,7 +268,7 @@ function SyncCard({ event }: { event: SyncHistoryEvent }) {
           </div>
         </div>
 
-        {hasBatches && (
+        {hasExpandable && (
           <div
             className={`mt-2 text-muted-foreground/40 transition-transform duration-200 ${
               expanded ? "rotate-180" : ""
@@ -259,18 +279,27 @@ function SyncCard({ event }: { event: SyncHistoryEvent }) {
         )}
       </div>
 
-      {/* Expandable batch details */}
-      {expanded && batches.length > 0 && (
+      {/* Expandable details */}
+      {expanded && hasExpandable && (
         <div className="border-t border-border/50 bg-muted/20 p-4">
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/50 font-medium uppercase tracking-widest mb-3">
-            <Layers size={11} />
-            {batches.length} batch{batches.length !== 1 ? "es" : ""}
-          </div>
-          <div className="space-y-3">
-            {batches.map((batch) => (
-              <BatchDetail key={batch.batch_num} breakdown={batch} />
-            ))}
-          </div>
+          {!isSuccess && errorMessage && batches.length === 0 && (
+            <div className="rounded-md border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/20 px-3 py-2 mb-3">
+              <div className="text-[11px] text-red-700 dark:text-red-300">{errorMessage}</div>
+            </div>
+          )}
+          {batches.length > 0 && (
+            <>
+              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/50 font-medium uppercase tracking-widest mb-3">
+                <Layers size={11} />
+                {batches.length} batch{batches.length !== 1 ? "es" : ""}
+              </div>
+              <div className="space-y-3">
+                {batches.map((batch) => (
+                  <BatchDetail key={batch.batch_num} breakdown={batch} />
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -396,11 +425,11 @@ export function ActivityPage() {
               <Activity size={22} className="text-muted-foreground/40" />
             </div>
             <p className="text-sm font-medium text-foreground/70">
-              {filter === "all" ? "No sync history yet" : `No ${filter} syncs`}
+              {filter === "all" ? "Sync activity" : `No ${filter} syncs`}
             </p>
             <p className="text-xs text-muted-foreground mt-1">
               {filter === "all"
-                ? "Sync a channel to see extraction results here."
+                ? "Sync events, knowledge extraction results, and topic organization history will appear here as your channels are processed."
                 : "Try changing the filter to see other results."}
             </p>
           </div>

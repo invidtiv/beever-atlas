@@ -1,0 +1,1 @@
+from beever_atlas.agents.consolidation.summarizer import create_summarizer

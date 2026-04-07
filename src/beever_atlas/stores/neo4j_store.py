@@ -850,3 +850,82 @@ class Neo4jStore:
                 name=entity_name,
                 vector=vector,
             )
+
+    # ------------------------------------------------------------------
+    # Batch operations (optimised for persister pipeline)
+    # ------------------------------------------------------------------
+
+    async def batch_create_episodic_links(self, links: list[dict[str, Any]]) -> int:
+        if not links:
+            return 0
+        async with self._driver.session() as session:
+            result = await session.run(
+                "UNWIND $links AS link "
+                "MATCH (e:Entity {name: link.entity_name}) "
+                "MERGE (ep:Event {weaviate_id: link.weaviate_fact_id}) "
+                "ON CREATE SET ep.message_ts = link.message_ts, ep.channel_id = link.channel_id "
+                "MERGE (e)-[:MENTIONED_IN]->(ep) "
+                "RETURN count(*) AS created",
+                links=links,
+            )
+            record = await result.single()
+            return int(record["created"]) if record else 0
+
+    async def batch_upsert_media(self, items: list[dict[str, Any]]) -> int:
+        if not items:
+            return 0
+        async with self._driver.session() as session:
+            result = await session.run(
+                "UNWIND $items AS item "
+                "MERGE (m:Media {url: item.url}) "
+                "ON CREATE SET m.media_type = item.media_type, m.title = item.title, "
+                "m.channel_id = item.channel_id, m.message_ts = item.message_ts "
+                "RETURN count(*) AS upserted",
+                items=items,
+            )
+            record = await result.single()
+            return int(record["upserted"]) if record else 0
+
+    async def batch_link_entities_to_media(self, links: list[dict[str, Any]]) -> int:
+        if not links:
+            return 0
+        async with self._driver.session() as session:
+            result = await session.run(
+                "UNWIND $links AS link "
+                "MATCH (e:Entity {name: link.entity_name}) "
+                "MATCH (m:Media {url: link.media_url}) "
+                "MERGE (e)-[:REFERENCES_MEDIA]->(m) "
+                "RETURN count(*) AS linked",
+                links=links,
+            )
+            record = await result.single()
+            return int(record["linked"]) if record else 0
+
+    async def batch_promote_pending(self, names: list[str]) -> int:
+        if not names:
+            return 0
+        async with self._driver.session() as session:
+            result = await session.run(
+                "UNWIND $names AS name "
+                "MATCH (e:Entity {name: name, status: 'pending'}) "
+                "SET e.status = 'active', e.pending_since = null "
+                "RETURN count(*) AS promoted",
+                names=names,
+            )
+            record = await result.single()
+            return int(record["promoted"]) if record else 0
+
+    async def batch_find_entities_by_name(self, names: list[str]) -> set[str]:
+        if not names:
+            return set()
+        async with self._driver.session() as session:
+            result = await session.run(
+                "UNWIND $names AS name "
+                "MATCH (e:Entity {name: name}) "
+                "RETURN e.name AS found",
+                names=list(names),
+            )
+            found: set[str] = set()
+            async for record in result:
+                found.add(record["found"])
+            return found

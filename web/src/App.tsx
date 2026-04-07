@@ -17,21 +17,16 @@ import { SearchPage } from "@/pages/SearchPage";
 import { GraphExplorer } from "@/pages/GraphExplorer";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { ProfilePage } from "@/pages/ProfilePage";
 import { NotFound } from "@/pages/NotFound";
 import { TierBrowser } from "@/components/memories/TierBrowser";
 import { AskTab } from "@/components/channel/AskTab";
 import { WikiTab } from "@/components/channel/WikiTab";
 import { MessagesTab } from "@/components/channel/MessagesTab";
 import { GraphTab } from "@/components/graph/GraphTab";
+import { ChannelSettingsTab } from "@/components/channel/ChannelSettingsTab";
+import { SyncHistoryTab } from "@/components/channel/SyncHistoryTab";
 import { useTheme } from "@/hooks/useTheme";
-
-function PlaceholderTab({ label }: { label: string }) {
-  return (
-    <div className="p-6 animate-fade-in">
-      <p className="text-muted-foreground text-base">{label} — coming soon.</p>
-    </div>
-  );
-}
 
 function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -85,12 +80,14 @@ function AppShell() {
                 <Route path="messages" element={<MessagesTab />} />
                 <Route path="memories" element={<TierBrowser />} />
                 <Route path="graph" element={<GraphTab />} />
-                <Route path="settings" element={<PlaceholderTab label="Channel Settings" />} />
+                <Route path="sync-history" element={<SyncHistoryTab />} />
+                <Route path="settings" element={<ChannelSettingsTab />} />
               </Route>
               <Route path="/search" element={<SearchPage />} />
               <Route path="/graph" element={<GraphExplorer />} />
               <Route path="/activity" element={<ActivityPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/profile" element={<ProfilePage />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </div>

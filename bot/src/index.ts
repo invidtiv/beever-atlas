@@ -18,17 +18,8 @@ const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const PORT = parseInt(process.env.BOT_PORT || "3001", 10);
 
 function validateEnv(): void {
-  // Warn (not exit) when Slack env vars are missing — platform connections can
-  // be loaded at runtime from the backend database.
-  const slackMissing = ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"].filter(
-    (key) => !process.env[key],
-  );
-  if (slackMissing.length > 0) {
-    console.warn(
-      `Warning: Slack env vars not set (${slackMissing.join(", ")}). ` +
-        "Bot will start without Slack until a connection is registered via the backend.",
-    );
-  }
+  // No platform-specific env vars are required — connections are loaded at
+  // runtime from the backend database or fall back to .env credentials.
 }
 
 // ── Handler registration ─────────────────────────────────────────────────────
@@ -150,9 +141,15 @@ async function syncConnectionsFromBackend(chatManager: ChatManager, label: strin
   }>;
 
   if (connections.length === 0) {
-    console.log(`${label}: no connections found in backend`);
+    if (!loggedNoConnections) {
+      console.log(`${label}: no connections found in backend — will retry silently`);
+      loggedNoConnections = true;
+    }
     return false;
   }
+
+  // Connections appeared — reset the flag so removal is logged next time
+  loggedNoConnections = false;
 
   // Build a fingerprint from incoming connections to detect changes
   const incomingKeys = connections
@@ -262,6 +259,7 @@ async function fallbackToEnvCredentials(chatManager: ChatManager): Promise<void>
 const SYNC_INTERVAL_MS = 60_000;
 let backgroundSyncTimer: ReturnType<typeof setInterval> | null = null;
 let backgroundSyncRunning = false;
+let loggedNoConnections = false;
 
 function startBackgroundSync(chatManager: ChatManager): void {
   if (backgroundSyncTimer) return;

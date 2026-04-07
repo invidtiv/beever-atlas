@@ -26,6 +26,7 @@ class _InclusiveSinceAdapter:
         channel_id: str,
         since: datetime | None,
         limit: int,
+        order: str = "desc",
     ) -> list[_Msg]:
         self.calls += 1
         if since is None:
@@ -83,6 +84,7 @@ async def test_fetch_all_messages_parses_iso_since_string(monkeypatch: pytest.Mo
             channel_id: str,
             since: datetime | None,
             limit: int,
+            order: str = "desc",
         ) -> list[_Msg]:
             nonlocal seen_since
             seen_since = since
@@ -180,17 +182,18 @@ async def test_start_sync_recovers_stale_running_job(monkeypatch: pytest.MonkeyP
         async def complete_sync_job(self, job_id: str, status: str, errors: list[str] | None = None) -> None:
             calls["complete_sync_job"] = {"job_id": job_id, "status": status, "errors": errors}
 
-        async def create_sync_job(self, channel_id: str, sync_type: str, total_messages: int, batch_size: int):
+        async def create_sync_job(self, channel_id: str, sync_type: str, total_messages: int, batch_size: int, parent_messages: int = 0):
             calls["create_sync_job"] = {
                 "channel_id": channel_id,
                 "sync_type": sync_type,
                 "total_messages": total_messages,
+                "parent_messages": parent_messages,
                 "batch_size": batch_size,
             }
             return SimpleNamespace(id="job-new")
 
     class _Adapter:
-        async def fetch_history(self, channel_id: str, since, limit: int):
+        async def fetch_history(self, channel_id: str, since, limit: int, order: str = "desc"):
             return []
 
         async def get_channel_info(self, channel_id: str):
