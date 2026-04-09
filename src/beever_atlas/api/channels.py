@@ -312,19 +312,16 @@ async def get_channel_messages(
     connection_id: str | None = Query(default=None),
 ) -> MessagesListResponse:
     """Get paginated messages for a channel."""
-    # CSV-imported channels have no live bridge — return empty message list
-    stores = get_stores()
-    synced_ids = await stores.mongodb.list_synced_channel_ids()
-    connections = await stores.platform.list_connections()
-    connected_ids = {
-        cid
-        for c in connections if c.status == "connected"
-        for cid in (c.selected_channels or [])
-    }
-    if channel_id in synced_ids and channel_id not in connected_ids:
-        sync_state = await stores.mongodb.get_channel_sync_state(channel_id)
-        total = sync_state.total_synced_messages if sync_state else None
-        return MessagesListResponse(messages=[], total_count=total)
+    # CSV-imported channels have no live bridge connection — detect by ID format.
+    # Real platform channels always have a recognisable ID (e.g. Slack C…, Discord snowflake).
+    # CSV-imported channels use arbitrary IDs (e.g. "example_chat") that don't match any platform.
+    if _detect_platform_from_channel_id(channel_id) is None and not connection_id:
+        stores = get_stores()
+        synced_ids = await stores.mongodb.list_synced_channel_ids()
+        if channel_id in synced_ids:
+            sync_state = await stores.mongodb.get_channel_sync_state(channel_id)
+            total = sync_state.total_synced_messages if sync_state else None
+            return MessagesListResponse(messages=[], total_count=total)
 
     adapter = await _resolve_adapter_for_channel(channel_id, connection_id)
 
