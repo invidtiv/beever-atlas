@@ -29,6 +29,7 @@ from beever_atlas.api.wiki import router as wiki_router
 from beever_atlas.api.policies import router as policies_router
 from beever_atlas.api.models import router as models_router
 from beever_atlas.api.dev import router as dev_router
+from beever_atlas.api.mcp import mcp as mcp_server
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
 from beever_atlas.llm.provider import init_llm_provider
@@ -124,6 +125,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logging.getLogger(__name__).warning("SyncScheduler startup failed (non-fatal): %s", exc)
 
+    # Initialize outbound MCP registry — non-blocking, skips unreachable servers
+    from beever_atlas.agents.mcp_registry import init_mcp_registry
+    try:
+        await init_mcp_registry()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("MCP registry init failed (non-fatal): %s", exc)
+
     try:
         yield
     finally:
@@ -166,6 +174,9 @@ app.include_router(policies_router)
 app.include_router(models_router)
 app.include_router(dev_router)
 app.include_router(wiki_router)
+
+# Mount MCP server — auth inherits from FastAPI middleware (Task 8.6/8.7)
+app.mount("/mcp", mcp_server.http_app(path="/"))
 
 register_health_checks()
 

@@ -57,6 +57,43 @@ async def get_wiki_structure(channel_id: str) -> dict:
     return doc
 
 
+@router.get("/versions")
+async def list_wiki_versions(channel_id: str) -> list[dict]:
+    """Return a list of archived wiki version summaries for a channel."""
+    cache = _get_cache()
+    return await cache.version_store.list_versions(channel_id)
+
+
+@router.get("/versions/{version_number}")
+async def get_wiki_version(channel_id: str, version_number: int) -> dict:
+    """Return the full content of a specific archived wiki version."""
+    cache = _get_cache()
+    version = await cache.version_store.get_version(channel_id, version_number)
+    if version is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {version_number} not found for this channel",
+        )
+    return version
+
+
+@router.get("/versions/{version_number}/pages/{page_id}")
+async def get_wiki_version_page(
+    channel_id: str, version_number: int, page_id: str
+) -> dict:
+    """Return a single page from an archived wiki version."""
+    cache = _get_cache()
+    page = await cache.version_store.get_version_page(
+        channel_id, version_number, page_id
+    )
+    if page is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Page {page_id!r} not found in version {version_number}",
+        )
+    return page
+
+
 @router.get("/download")
 async def download_wiki_markdown(channel_id: str) -> PlainTextResponse:
     """Export the full wiki as a single Markdown file."""

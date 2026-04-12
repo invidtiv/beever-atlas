@@ -28,7 +28,7 @@ export function CitationLink({ index, citation }: CitationLinkProps) {
         {index}
       </button>
       {citation && (
-        <span className="pointer-events-none invisible group-hover/cite:visible absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 rounded-lg bg-popover border border-border px-3 py-2.5 text-xs text-popover-foreground shadow-xl z-50">
+        <span className="pointer-events-none invisible group-hover/cite:visible absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 max-w-[calc(100vw-2rem)] rounded-lg bg-popover border border-border px-3 py-2.5 text-xs text-popover-foreground shadow-xl z-50">
           <div className="flex items-center gap-2 mb-1.5">
             {citation.author && (
               <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">

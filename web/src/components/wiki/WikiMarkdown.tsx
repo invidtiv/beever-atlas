@@ -182,7 +182,7 @@ function WikiImage({ src, alt }: { src: string; alt: string }) {
         </span>
       </span>
       {expanded && (
-        <div className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-sm flex items-center justify-center p-12" onClick={() => setExpanded(false)}>
+        <div className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4 sm:p-12" onClick={() => setExpanded(false)}>
           <div className="relative max-w-4xl w-full flex flex-col items-center" onClick={e => e.stopPropagation()}>
             <button onClick={() => setExpanded(false)} className="absolute -top-10 right-0 p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors">
               <X className="h-4 w-4" />

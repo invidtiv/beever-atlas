@@ -273,6 +273,34 @@ class WikiResponse(BaseModel):
     metadata: WikiMetadata
 
 
+class WikiVersionSummary(BaseModel):
+    """Lightweight metadata for a wiki version (used in list responses)."""
+
+    version_number: int
+    channel_id: str
+    generated_at: datetime
+    archived_at: datetime
+    page_count: int = 0
+    model: str = ""
+
+
+class WikiVersion(BaseModel):
+    """Full snapshot of a wiki at a point in time."""
+
+    version_number: int
+    channel_id: str
+    channel_name: str = ""
+    platform: str = ""
+    generated_at: datetime
+    archived_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    page_count: int = 0
+    model: str = ""
+    structure: dict = Field(default_factory=dict)
+    overview: dict = Field(default_factory=dict)
+    pages: dict = Field(default_factory=dict)
+    metadata: dict = Field(default_factory=dict)
+
+
 class EntityKnowledgeCard(BaseModel):
     """Cross-channel aggregation of all knowledge about a single graph entity."""
 

@@ -49,7 +49,7 @@ export function EntityPanel({
   const aliases = entity.aliases ?? [];
 
   return (
-    <div className="w-96 shrink-0 border-l border-border bg-card flex flex-col overflow-hidden">
+    <div className="w-full sm:w-96 shrink-0 border-l border-border bg-card flex flex-col overflow-hidden absolute sm:relative inset-0 sm:inset-auto z-10 sm:z-auto">
       {/* Header */}
       <div className="flex items-start justify-between gap-2 px-4 py-3 border-b border-border">
         <div className="min-w-0">

@@ -1,10 +1,11 @@
 import { type ReactNode, useState, useCallback, useRef, useEffect } from "react";
-import { Download, Search, X, ChevronUp, ChevronDown } from "lucide-react";
+import { Download, Search, X, ChevronUp, ChevronDown, History } from "lucide-react";
 import { WikiSidebar } from "./WikiSidebar";
 import { WikiBreadcrumb } from "./WikiBreadcrumb";
 import { FreshnessBadge } from "./FreshnessBadge";
 import { WikiTableOfContents } from "./WikiTableOfContents";
-import type { WikiStructure, WikiPage } from "@/lib/types";
+import { VersionHistoryPanel } from "./VersionHistoryPanel";
+import type { WikiStructure, WikiPage, WikiVersionSummary } from "@/lib/types";
 
 interface WikiLayoutProps {
   channelId: string;
@@ -14,6 +15,12 @@ interface WikiLayoutProps {
   onRefresh: () => void;
   isRefreshing: boolean;
   children: ReactNode;
+  versionCount?: number;
+  versions?: WikiVersionSummary[];
+  isVersionsLoading?: boolean;
+  viewingVersionNumber?: number | null;
+  onSelectVersion?: (versionNumber: number) => void;
+  onBackToCurrent?: () => void;
 }
 
 const MIN_WIDTH = 180;
@@ -221,8 +228,15 @@ export function WikiLayout({
   onRefresh,
   isRefreshing,
   children,
+  versionCount = 0,
+  versions = [],
+  isVersionsLoading = false,
+  viewingVersionNumber = null,
+  onSelectVersion,
+  onBackToCurrent,
 }: WikiLayoutProps) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_WIDTH);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
   const isDragging = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const searchableContentRef = useRef<HTMLDivElement>(null);
@@ -291,17 +305,52 @@ export function WikiLayout({
             showStatus={false}
             className="space-y-0"
           />
-          <a
-            href={`${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/channels/${channelId}/wiki/download`}
-            download
-            className="flex items-center justify-center gap-1.5 w-full rounded-md px-3 py-1.5 text-xs font-medium border border-border/50 bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            title="Download as Markdown"
-          >
-            <Download className="h-3.5 w-3.5" />
-            Download
-          </a>
+          <div className="flex gap-1.5">
+            <a
+              href={`${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/channels/${channelId}/wiki/download`}
+              download
+              className="flex items-center justify-center gap-1.5 flex-1 rounded-md px-3 py-1.5 text-xs font-medium border border-border/50 bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              title="Download as Markdown"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Download
+            </a>
+            <button
+              onClick={() => setShowVersionHistory(!showVersionHistory)}
+              disabled={versionCount === 0}
+              className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium border transition-colors ${
+                showVersionHistory
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : "border-border/50 bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
+              title={versionCount === 0 ? "No previous versions" : `${versionCount} previous version${versionCount !== 1 ? "s" : ""}`}
+            >
+              <History className="h-3.5 w-3.5" />
+              {versionCount > 0 && (
+                <span className="tabular-nums">{versionCount}</span>
+              )}
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* Version History Panel */}
+      {showVersionHistory && (
+        <div className="w-[240px] shrink-0 border-r border-border bg-background">
+          <VersionHistoryPanel
+            versions={versions}
+            isLoading={isVersionsLoading}
+            activeVersionNumber={viewingVersionNumber}
+            onSelectVersion={(v) => {
+              onSelectVersion?.(v);
+            }}
+            onBackToCurrent={() => {
+              onBackToCurrent?.();
+            }}
+            onClose={() => setShowVersionHistory(false)}
+          />
+        </div>
+      )}
 
       {/* Resize handle */}
       <div

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search } from "lucide-react";
@@ -26,6 +26,7 @@ interface Channel {
 }
 
 export function Dashboard() {
+  const navigate = useNavigate();
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [connections, setConnections] = useState<PlatformConnection[]>([]);
@@ -86,7 +87,7 @@ export function Dashboard() {
   }
 
   return (
-    <div className="min-h-full">
+    <div className="h-full overflow-auto">
       <div className="max-w-[1400px] mx-auto p-6 sm:p-8 lg:p-12">
         {/* Hero Section */}
         <section className="flex flex-col items-center gap-5 py-12">
@@ -98,7 +99,10 @@ export function Dashboard() {
           </p>
 
           {/* Ask bar */}
-          <div className="w-full max-w-4xl flex items-center gap-3 px-5 py-4 bg-card rounded-3xl border border-border shadow-sm">
+          <Link
+            to="/search"
+            className="w-full max-w-4xl flex items-center gap-3 px-5 py-4 bg-card rounded-3xl border border-border shadow-sm hover:border-primary/30 transition-colors cursor-text"
+          >
             <Search className="w-5 h-5 text-muted-foreground/60" />
             <span className="text-muted-foreground/60 text-base">
               Ask anything across all channels...
@@ -107,7 +111,7 @@ export function Dashboard() {
             <kbd className="px-2 py-0.5 bg-muted rounded-md border border-border text-sm text-muted-foreground font-medium">
               ⌘K
             </kbd>
-          </div>
+          </Link>
 
           {/* Suggestion pills */}
           <div className="flex gap-2 flex-wrap justify-center">
@@ -118,6 +122,7 @@ export function Dashboard() {
             ].map((q) => (
               <button
                 key={q}
+                onClick={() => navigate(`/search?q=${encodeURIComponent(q)}`)}
                 className="px-4 py-1.5 rounded-full bg-card border border-border text-sm text-muted-foreground hover:bg-muted transition-colors"
               >
                 {q}

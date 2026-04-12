@@ -618,6 +618,33 @@ class WeaviateStore:
 
         return await asyncio.to_thread(_search)
 
+    async def bm25_search(
+        self,
+        query: str,
+        channel_id: str,
+        tier: str = "atomic",
+        limit: int = 10,
+    ) -> list[AtomicFact]:
+        """BM25 keyword search over MemoryFact, scoped to a channel and tier."""
+
+        def _search() -> list[AtomicFact]:
+            collection = self._collection()
+            channel_filter = Filter.by_property("channel_id").equal(channel_id)
+            tier_filter = Filter.by_property("tier").equal(tier)
+            combined = channel_filter & tier_filter
+            result = collection.query.bm25(
+                query=query,
+                limit=limit,
+                filters=combined,
+            )
+            return [self._obj_to_fact(obj) for obj in result.objects]
+
+        try:
+            return await asyncio.to_thread(_search)
+        except Exception:
+            logger.exception("WeaviateStore.bm25_search failed for query=%r channel=%s", query, channel_id)
+            return []
+
     async def hybrid_search(
         self,
         query_vector: list[float],

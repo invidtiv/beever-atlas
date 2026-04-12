@@ -57,7 +57,7 @@ export function ProfilePage() {
   const greetingEmoji = hour < 12 ? "☀️" : hour < 17 ? "🌤" : "🌙";
 
   return (
-    <div className="p-6 sm:p-8 max-w-2xl mx-auto animate-fade-in">
+    <div className="h-full overflow-auto p-6 sm:p-8 max-w-2xl mx-auto animate-fade-in">
       {/* Page header */}
       <div className="mb-8">
         <h1 className="text-2xl font-semibold text-foreground tracking-tight">
@@ -90,7 +90,7 @@ export function ProfilePage() {
           </button>
           
           {showEmojiPicker && editing && (
-            <div ref={emojiPickerRef} className="absolute left-0 mt-3 z-50 shadow-2xl rounded-xl custom-emoji-picker">
+            <div ref={emojiPickerRef} className="absolute left-0 right-0 sm:right-auto mt-3 z-50 shadow-2xl rounded-xl custom-emoji-picker max-w-[calc(100vw-2rem)]">
               <EmojiPicker
                 onEmojiClick={(e: EmojiClickData) => {
                   setEmojiValue(e.emoji);

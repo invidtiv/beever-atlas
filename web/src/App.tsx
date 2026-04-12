@@ -50,7 +50,7 @@ function AppShell() {
   }, [routeKey, shouldAnimateRoute]);
 
   return (
-    <div className="grid grid-cols-[auto_1fr] h-dvh min-h-screen bg-background">
+    <div className="grid grid-cols-[auto_1fr] h-screen h-dvh bg-background">
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       {/* Mobile overlay */}
       {sidebarOpen && (
@@ -60,11 +60,11 @@ function AppShell() {
         />
       )}
       {/* Right column: header row + main row */}
-      <div className="grid grid-rows-[auto_1fr] min-w-0 overflow-hidden">
+      <div className="flex flex-col min-w-0 overflow-hidden">
         <Header onMenuClick={() => setSidebarOpen(true)} />
-        <main className="relative min-h-0 overflow-hidden bg-muted/30">
+        <main className="relative flex-1 min-h-0 overflow-hidden bg-muted/30">
           <div
-            className={`h-full overflow-auto transition-[opacity,transform,filter] duration-280 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+            className={`h-full overflow-hidden transition-[opacity,transform,filter] duration-280 ease-[cubic-bezier(0.22,1,0.36,1)] ${
               shouldAnimateRoute && !routeVisible
                 ? "opacity-0 translate-y-1.5 blur-[0.5px]"
                 : "opacity-100 translate-y-0 blur-0"

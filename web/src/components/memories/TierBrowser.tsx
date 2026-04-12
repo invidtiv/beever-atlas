@@ -52,7 +52,7 @@ export function TierBrowser() {
   }
 
   return (
-    <div className="p-4 sm:p-6 space-y-5 animate-fade-in max-w-6xl mx-auto">
+    <div className="h-full overflow-auto p-4 sm:p-6 space-y-5 animate-fade-in max-w-6xl mx-auto">
       {/* Actions bar */}
       <div className="flex items-center justify-end gap-2">
         {showRefresh && (

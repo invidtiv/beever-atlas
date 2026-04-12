@@ -188,7 +188,7 @@ export function ChannelSettingsTab() {
   }
 
   return (
-    <div className="p-4 sm:p-6 space-y-6 animate-fade-in max-w-2xl">
+    <div className="h-full overflow-auto p-4 sm:p-6 space-y-6 animate-fade-in max-w-2xl">
       {/* Header */}
       <div>
         <h3 className="font-heading text-[28px] leading-tight text-foreground">Channel Settings</h3>

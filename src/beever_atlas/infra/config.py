@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     ollama_enabled: bool = Field(default=False)
     ollama_api_base: str = Field(default="http://localhost:11434")
 
+    # QA agent configuration
+    qa_confidence_threshold: float = Field(default=0.4, alias="QA_CONFIDENCE_THRESHOLD")
+    external_mcp_servers: str = Field(default="", alias="EXTERNAL_MCP_SERVERS")
+
     # Credential encryption
     credential_master_key: str = Field(default="")
 

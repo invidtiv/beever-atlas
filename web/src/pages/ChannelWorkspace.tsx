@@ -9,7 +9,6 @@ import { SyncButton } from "@/components/channel/SyncButton";
 import { SyncProgress } from "@/components/channel/SyncProgress";
 import { NextSyncBadge } from "@/components/channel/NextSyncBadge";
 import { useSync } from "@/hooks/useSync";
-import { useChannelMemoryCount } from "@/hooks/useChannelMemoryCount";
 
 interface ChannelInfo {
   channel_id: string;
@@ -65,7 +64,6 @@ export function ChannelWorkspace() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadingChannel, setLoadingChannel] = useState(!routeState?.channel_name);
   const { getWorkspaceName } = useConnectionMap();
-  const { hasMemories, isLoading: isMemoryCountLoading } = useChannelMemoryCount(id);
 
   const activeTab = getCurrentTab(location.pathname);
 
@@ -101,19 +99,7 @@ export function ChannelWorkspace() {
       .finally(() => setLoadingChannel(false));
   }, [id, routeState?.channel_name, routeState?.platform, routeState?.member_count, routeState?.connection_id]);
 
-  useEffect(() => {
-    if (!id || isMemoryCountLoading) return;
-    // If user navigates directly to wiki tab but channel has no wiki, redirect to messages
-    if (!hasMemories && activeTab === "wiki") {
-      navigate(`/channels/${id}/messages`, { replace: true });
-    }
-  }, [id, hasMemories, isMemoryCountLoading, activeTab, navigate]);
-
   function handleTabChange(value: string) {
-    if (value === "wiki" && !isMemoryCountLoading && !hasMemories) {
-      navigate(`/channels/${id}/messages`);
-      return;
-    }
     navigate(`/channels/${id}/${value}`);
   }
 
@@ -167,9 +153,9 @@ export function ChannelWorkspace() {
   const instructions = platformInstructions[channel?.platform ?? "slack"] ?? platformInstructions.slack;
 
   return (
-    <div className="grid grid-rows-[auto_1fr] h-full min-h-0">
+    <div className="flex flex-col h-full min-h-0">
       {/* Compact channel bar: title + tabs in one layer */}
-      <div className="px-3 sm:px-6 py-2 sm:py-2.5 border-b border-border bg-background">
+      <div className="shrink-0 px-3 sm:px-6 py-2 sm:py-2.5 border-b border-border bg-background">
         <div className="flex flex-col gap-2 sm:gap-2.5">
           <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
             <Link
@@ -224,11 +210,7 @@ export function ChannelWorkspace() {
                   className="w-full h-9 px-3 rounded-lg border border-border bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/20"
                 >
                   {TAB_PATHS.map((tab) => (
-                    <option
-                      key={tab}
-                      value={tab}
-                      disabled={tab === "wiki" && !isMemoryCountLoading && !hasMemories}
-                    >
+                    <option key={tab} value={tab}>
                       {TAB_LABELS[tab]}
                     </option>
                   ))}
@@ -240,14 +222,11 @@ export function ChannelWorkspace() {
                     <button
                       key={tab}
                       onClick={() => handleTabChange(tab)}
-                      disabled={tab === "wiki" && !isMemoryCountLoading && !hasMemories}
-                      title={tab === "wiki" && !isMemoryCountLoading && !hasMemories ? "Wiki is available after your first sync creates memories." : undefined}
                       className={cn(
                         "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
                         activeTab === tab
                           ? "bg-primary/10 text-primary"
                           : "text-muted-foreground hover:text-foreground hover:bg-muted",
-                        tab === "wiki" && !isMemoryCountLoading && !hasMemories && "opacity-50 cursor-not-allowed hover:text-muted-foreground hover:bg-transparent"
                       )}
                     >
                       {TAB_LABELS[tab]}
@@ -255,18 +234,13 @@ export function ChannelWorkspace() {
                   ))}
                 </div>
               </div>
-              {!isMemoryCountLoading && !hasMemories && (
-                <p className="text-xs text-muted-foreground">
-                  Wiki unlocks after the first synced memories are captured.
-                </p>
-              )}
             </>
           )}
         </div>
       </div>
 
       {/* Sync progress bar — always visible when syncing */}
-      {id && <SyncProgress syncState={syncState} isSyncing={isSyncing} />}
+      <div className="shrink-0">{id && <SyncProgress syncState={syncState} isSyncing={isSyncing} />}</div>
 
       {/* Content */}
       {loadingChannel ? (
@@ -277,7 +251,7 @@ export function ChannelWorkspace() {
           </div>
         </div>
       ) : isMember ? (
-        <div className="overflow-auto flex-1 min-h-0 relative" key={activeTab}>
+        <div className="flex-1 min-h-0 relative bg-muted/10 overflow-hidden" key={activeTab}>
           <Outlet context={{ syncState, isSyncing, connectionId: channel?.connection_id ?? null }} />
         </div>
       ) : (
@@ -337,12 +311,8 @@ export function ChannelWorkspace() {
 }
 
 /**
- * Index route redirect — wiki if channel has memories, messages otherwise.
+ * Index route redirect — always land on wiki; WikiTab handles its own empty state.
  */
 export function ChannelDefaultRedirect() {
-  const { id } = useParams<{ id: string }>();
-  const { hasMemories, isLoading } = useChannelMemoryCount(id);
-
-  if (isLoading) return null; // brief wait for the check
-  return <Navigate to={hasMemories ? "wiki" : "messages"} replace />;
+  return <Navigate to="wiki" replace />;
 }
