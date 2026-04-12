@@ -326,7 +326,7 @@ export function SyncHistoryTab() {
   })();
 
   return (
-    <div className="p-4 sm:p-6 lg:p-8 space-y-5 max-w-7xl mx-auto w-full">
+    <div className="h-full overflow-auto p-4 sm:p-6 lg:p-8 space-y-5 max-w-7xl mx-auto w-full">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-semibold text-foreground">Sync History</h2>

@@ -599,7 +599,7 @@ export function MessagesTab() {
   }
 
   return (
-    <div className="animate-fade-in bg-muted/10 min-h-full">
+    <div className="animate-fade-in bg-muted/10 h-full overflow-auto">
       <div className="p-4 sm:p-6 py-6">
         <div className="max-w-4xl mx-auto space-y-4">
 

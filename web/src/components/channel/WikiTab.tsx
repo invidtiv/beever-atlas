@@ -1,9 +1,11 @@
 import { useState, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, Database } from "lucide-react";
+import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, ArrowRight, FolderSync, History as HistoryIcon } from "lucide-react";
 import { useWiki } from "@/hooks/useWiki";
 import { useWikiPage } from "@/hooks/useWikiPage";
 import { useWikiRefresh, type WikiGenerationStatus } from "@/hooks/useWikiRefresh";
+import { useWikiVersions } from "@/hooks/useWikiVersions";
+import { useWikiVersion } from "@/hooks/useWikiVersion";
 import { useChannelMemoryCount } from "@/hooks/useChannelMemoryCount";
 import { WikiLayout } from "@/components/wiki/WikiLayout";
 import { OverviewPage } from "@/components/wiki/OverviewPage";
@@ -16,20 +18,20 @@ import type { WikiPage, WikiPageNode } from "@/lib/types";
 function WikiLoadingSkeleton() {
   return (
     <div className="flex h-full">
-      <div className="w-[220px] shrink-0 border-r border-slate-200 bg-white p-4 space-y-2">
-        <div className="h-4 bg-slate-100 rounded animate-pulse w-3/4" />
-        <div className="h-3 bg-slate-100 rounded animate-pulse w-1/2 mt-3" />
+      <div className="w-[220px] shrink-0 border-r border-border bg-card p-4 space-y-2">
+        <div className="h-4 bg-muted rounded animate-pulse w-3/4" />
+        <div className="h-3 bg-muted rounded animate-pulse w-1/2 mt-3" />
         {Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="h-7 bg-slate-100 rounded animate-pulse" />
+          <div key={i} className="h-7 bg-muted rounded animate-pulse" />
         ))}
       </div>
       <div className="flex-1 p-8 space-y-4">
-        <div className="h-3 bg-slate-100 rounded animate-pulse w-1/4" />
-        <div className="h-7 bg-slate-100 rounded animate-pulse w-1/2" />
-        <div className="h-3 bg-slate-100 rounded animate-pulse w-1/6" />
+        <div className="h-3 bg-muted rounded animate-pulse w-1/4" />
+        <div className="h-7 bg-muted rounded animate-pulse w-1/2" />
+        <div className="h-3 bg-muted rounded animate-pulse w-1/6" />
         <div className="space-y-2 mt-6">
           {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="h-4 bg-slate-100 rounded animate-pulse" style={{ width: `${70 + (i % 3) * 10}%` }} />
+            <div key={i} className="h-4 bg-muted rounded animate-pulse" style={{ width: `${70 + (i % 3) * 10}%` }} />
           ))}
         </div>
       </div>
@@ -275,82 +277,102 @@ function WikiEmptyState({
   const showGenerateCta = !hasError && !isNoMemory;
 
   return (
-    <div className="h-full min-h-0 bg-muted/10 px-6 py-8">
-      <div className="mx-auto w-full max-w-2xl rounded-2xl border border-border/70 bg-card/80 shadow-sm backdrop-blur-sm">
-        <div className="px-6 py-8 text-center sm:px-10 sm:py-10">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10">
-            {hasError ? (
-              <AlertTriangle className="h-7 w-7 text-amber-500" />
-            ) : isNoMemory ? (
-              <Database className="h-7 w-7 text-primary" />
-            ) : (
-              <BookOpen className="h-7 w-7 text-primary" />
-            )}
-          </div>
-
-          <h3 className="text-xl font-semibold tracking-tight text-foreground">
-            {hasError
-              ? "Could not load wiki"
-              : isNoMemory
-                ? "No channel knowledge yet"
-                : "Wiki not generated yet"}
-          </h3>
-          <p className="mx-auto mt-2 max-w-xl text-sm text-muted-foreground">
-            {hasError
-              ? errorMessage || "The wiki is unavailable right now. Retry generation to rebuild this channel knowledge view."
-              : isNoMemory
-                ? "Sync this channel first to capture memories. Once data is available, the wiki can be generated from real channel knowledge."
-                : "Generate a structured wiki to turn this channel history into topics, references, and easy-to-scan summaries."}
-          </p>
-
-          {showGenerateCta && (
-            <div className="mx-auto mt-6 grid max-w-xl gap-2.5 text-left sm:grid-cols-3">
-              <div className="rounded-xl border border-border/70 bg-muted/25 p-3">
-                <Sparkles className="mb-2 h-4 w-4 text-primary" />
-                <p className="text-xs font-medium text-foreground">Auto summaries</p>
-                <p className="mt-1 text-xs text-muted-foreground">High-signal channel recap</p>
-              </div>
-              <div className="rounded-xl border border-border/70 bg-muted/25 p-3">
-                <Network className="mb-2 h-4 w-4 text-primary" />
-                <p className="text-xs font-medium text-foreground">Topic map</p>
-                <p className="mt-1 text-xs text-muted-foreground">Related pages and relationships</p>
-              </div>
-              <div className="rounded-xl border border-border/70 bg-muted/25 p-3">
-                <FileText className="mb-2 h-4 w-4 text-primary" />
-                <p className="text-xs font-medium text-foreground">Reference pages</p>
-                <p className="mt-1 text-xs text-muted-foreground">Context with source-backed detail</p>
-              </div>
-            </div>
+    <div className="flex h-full min-h-0 items-center justify-center px-6 py-12">
+      <div className="mx-auto w-full max-w-md text-center">
+        {/* Icon */}
+        <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+          {hasError ? (
+            <AlertTriangle className="h-5 w-5 text-amber-500" />
+          ) : isNoMemory ? (
+            <FolderSync className="h-5 w-5 text-muted-foreground" />
+          ) : (
+            <BookOpen className="h-5 w-5 text-muted-foreground" />
           )}
+        </div>
 
-          <div className="mt-7 flex justify-center gap-2">
-            {showGenerateCta || hasError ? (
-              <Button
-                onClick={onRefresh}
-                disabled={isRefreshing}
-                size="lg"
-                className="px-5"
-              >
-                <RefreshCw className={isRefreshing ? "animate-spin" : ""} />
-                {isRefreshing
-                  ? hasError
-                    ? "Retrying..."
-                    : "Generating..."
-                  : hasError
-                    ? "Retry Wiki Generation"
-                    : "Generate Wiki"}
-              </Button>
-            ) : (
-              <>
-                <Button variant="outline" size="lg" className="px-5" onClick={onGoToMessages}>
-                  Open Messages
-                </Button>
-                <Button variant="outline" size="lg" className="px-5" onClick={onGoToSyncHistory}>
-                  View Sync History
-                </Button>
-              </>
-            )}
+        {/* Heading */}
+        <h3 className="text-base font-semibold text-foreground">
+          {hasError
+            ? "Could not load wiki"
+            : isNoMemory
+              ? "Sync to unlock the wiki"
+              : "Ready to generate"}
+        </h3>
+
+        {/* Body */}
+        <p className="mx-auto mt-1.5 max-w-xs text-sm text-muted-foreground">
+          {hasError
+            ? errorMessage || "Something went wrong. Retry to rebuild this channel's wiki."
+            : isNoMemory
+              ? "Sync this channel to start building its wiki from real conversations."
+              : "Turn this channel's history into topics, summaries, and references."}
+        </p>
+
+        {/* Two-step flow for no-memory state */}
+        {isNoMemory && (
+          <div className="mx-auto mt-6 flex max-w-xs items-center justify-center gap-3">
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">1</span>
+              <span className="text-xs font-medium text-foreground">Sync channel</span>
+            </div>
+            <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+            <div className="flex items-center gap-2 rounded-lg border border-border/50 bg-card/50 px-3 py-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-bold text-muted-foreground">2</span>
+              <span className="text-xs font-medium text-muted-foreground">Generate wiki</span>
+            </div>
           </div>
+        )}
+
+        {/* Feature pills for generate CTA */}
+        {showGenerateCta && (
+          <div className="mx-auto mt-5 flex flex-wrap items-center justify-center gap-2">
+            {[
+              { icon: Sparkles, label: "Summaries" },
+              { icon: Network, label: "Topic map" },
+              { icon: FileText, label: "References" },
+            ].map(({ icon: Icon, label }) => (
+              <span
+                key={label}
+                className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/30 px-2.5 py-1 text-xs text-muted-foreground"
+              >
+                <Icon className="h-3 w-3" />
+                {label}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="mt-6 flex flex-col items-center gap-2">
+          {showGenerateCta || hasError ? (
+            <Button
+              onClick={onRefresh}
+              disabled={isRefreshing}
+              size="lg"
+              className="px-5"
+            >
+              <RefreshCw className={isRefreshing ? "animate-spin" : ""} />
+              {isRefreshing
+                ? hasError
+                  ? "Retrying..."
+                  : "Generating..."
+                : hasError
+                  ? "Retry Generation"
+                  : "Generate Wiki"}
+            </Button>
+          ) : (
+            <>
+              <Button variant="default" size="lg" className="px-5" onClick={onGoToMessages}>
+                Open Messages
+              </Button>
+              <button
+                onClick={onGoToSyncHistory}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                View sync history
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -378,12 +400,20 @@ export function WikiTab() {
   const { id: channelId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [activePageId, setActivePageId] = useState<string>("overview");
+  const [viewingVersionNumber, setViewingVersionNumber] = useState<number | null>(null);
 
   const { data: wiki, isLoading, error, refetch } = useWiki(channelId);
   const { hasMemories, isLoading: isMemoryCountLoading } = useChannelMemoryCount(channelId);
 
-  // Only fetch non-overview pages lazily
-  const lazyPageId = activePageId !== "overview" ? activePageId : undefined;
+  // Version history
+  const { data: versions, isLoading: isVersionsLoading, refetch: refetchVersions } = useWikiVersions(channelId);
+  const { data: versionData, isLoading: isVersionLoading } = useWikiVersion(
+    channelId,
+    viewingVersionNumber ?? undefined,
+  );
+
+  // Only fetch non-overview pages lazily (when not viewing a version)
+  const lazyPageId = viewingVersionNumber === null && activePageId !== "overview" ? activePageId : undefined;
   const { data: pageData, isLoading: isPageLoading } = useWikiPage(channelId, lazyPageId);
 
   const {
@@ -395,13 +425,23 @@ export function WikiTab() {
 
   const handleRefresh = useCallback(() => {
     triggerRefresh(() => {
-      // Called when generation is done — refetch the wiki
       refetch();
+      refetchVersions();
     });
-  }, [triggerRefresh, refetch]);
+  }, [triggerRefresh, refetch, refetchVersions]);
 
   const handleNavigate = useCallback((pageId: string) => {
     setActivePageId(pageId);
+  }, []);
+
+  const handleSelectVersion = useCallback((versionNumber: number) => {
+    setViewingVersionNumber(versionNumber);
+    setActivePageId("overview");
+  }, []);
+
+  const handleBackToCurrent = useCallback(() => {
+    setViewingVersionNumber(null);
+    setActivePageId("overview");
   }, []);
 
   if (isLoading) {
@@ -433,17 +473,31 @@ export function WikiTab() {
     );
   }
 
-  // Resolve the active page
-  const activePage: WikiPage | null =
-    activePageId === "overview" ? wiki.overview : (pageData ?? null);
+  // When viewing a version, use that version's data
+  const isViewingVersion = viewingVersionNumber !== null && versionData !== null;
 
-  const topicPages = wiki.structure.pages.filter((p) => p.page_type === "topic");
+  const activeStructure = isViewingVersion ? versionData.structure : wiki.structure;
+  const activeOverview = isViewingVersion ? versionData.overview : wiki.overview;
+
+  // Resolve the active page
+  let activePage: WikiPage | null;
+  if (isViewingVersion) {
+    activePage = activePageId === "overview"
+      ? activeOverview
+      : (versionData.pages[activePageId] ?? null);
+  } else {
+    activePage = activePageId === "overview" ? wiki.overview : (pageData ?? null);
+  }
+
+  const topicPages = activeStructure.pages.filter((p) => p.page_type === "topic");
+
+  const showPageLoading = isViewingVersion ? isVersionLoading : isPageLoading;
 
   // Show a loading indicator inside the layout when fetching a non-overview page
   const pageContent =
-    isPageLoading || !activePage ? (
+    showPageLoading || !activePage ? (
       <div className="flex items-center justify-center py-16">
-        <RefreshCw className="w-5 h-5 animate-spin text-slate-400" />
+        <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
       </div>
     ) : (
       renderPage(activePage, topicPages, handleNavigate)
@@ -452,14 +506,38 @@ export function WikiTab() {
   return (
     <WikiLayout
       channelId={channelId!}
-      structure={wiki.structure}
-      activePage={activePage ?? wiki.overview}
+      structure={activeStructure}
+      activePage={activePage ?? activeOverview}
       onNavigate={handleNavigate}
       onRefresh={handleRefresh}
       isRefreshing={isRefreshing}
+      versionCount={wiki.version_count ?? 0}
+      versions={versions}
+      isVersionsLoading={isVersionsLoading}
+      viewingVersionNumber={viewingVersionNumber}
+      onSelectVersion={handleSelectVersion}
+      onBackToCurrent={handleBackToCurrent}
     >
       <>
-        {isRefreshing && generationStatus && generationStatus.status === "running" && (
+        {viewingVersionNumber !== null && versionData && (
+          <div className="mb-5 flex items-center justify-between rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3">
+            <div className="flex items-center gap-2 text-sm text-blue-600 dark:text-blue-400">
+              <HistoryIcon className="h-4 w-4" />
+              <span>
+                Viewing <span className="font-semibold">Version {versionData.version_number}</span>
+                {" — "}
+                generated {new Date(versionData.generated_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+              </span>
+            </div>
+            <button
+              onClick={handleBackToCurrent}
+              className="rounded-md bg-blue-500/20 px-3 py-1 text-xs font-medium text-blue-600 hover:bg-blue-500/30 dark:text-blue-400 transition-colors"
+            >
+              Back to current
+            </button>
+          </div>
+        )}
+        {viewingVersionNumber === null && isRefreshing && generationStatus && generationStatus.status === "running" && (
           <WikiRegeneratingBanner status={generationStatus} />
         )}
         {pageContent}

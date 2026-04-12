@@ -20,11 +20,13 @@ class TestToolStubs:
         with pytest.raises(NotImplementedError, match="Weaviate"):
             search_weaviate_hybrid(query="test", channel_id="ch1")
 
-    def test_get_tier0_summary_raises(self):
+    @pytest.mark.asyncio
+    async def test_get_tier0_summary_is_callable(self):
         from beever_atlas.agents.tools import get_tier0_summary
+        import inspect
 
-        with pytest.raises(NotImplementedError, match="Weaviate"):
-            get_tier0_summary(channel_id="ch1")
+        # get_tier0_summary is now implemented (async, uses weaviate store)
+        assert inspect.iscoroutinefunction(get_tier0_summary)
 
     def test_traverse_neo4j_raises(self):
         from beever_atlas.agents.tools import traverse_neo4j

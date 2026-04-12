@@ -35,6 +35,8 @@ def _make_mock_event(text: str, partial: bool = False, turn_complete: bool = Fal
     event.turn_complete = turn_complete
     event.error_code = None
     event.error_message = None
+    event.get_function_calls.return_value = []
+    event.get_function_responses.return_value = []
     return event
 
 
@@ -55,6 +57,14 @@ async def _mock_run_async_error(**kwargs):
     yield event
 
 
+async def _noop_decomposed_prompt(question: str, channel_id: str) -> str:
+    return f"[Channel: {channel_id}]\n\n{question}"
+
+
+async def _noop_chat_history(session_id: str):
+    return []
+
+
 @pytest.fixture
 def mock_runner():
     """Patch the ADK Runner and session creation for tests."""
@@ -63,8 +73,11 @@ def mock_runner():
     mock_session.id = "test_session_id"
 
     with (
+        patch("beever_atlas.api.ask.get_root_agent", return_value=MagicMock()),
         patch("beever_atlas.api.ask.create_runner") as mock_cr,
         patch("beever_atlas.api.ask.create_session", new_callable=AsyncMock) as mock_cs,
+        patch("beever_atlas.api.ask._build_decomposed_prompt", side_effect=_noop_decomposed_prompt),
+        patch("beever_atlas.api.ask._load_chat_history_parts", side_effect=_noop_chat_history),
     ):
         runner_instance = MagicMock()
         runner_instance.run_async = _mock_run_async_success
@@ -81,8 +94,11 @@ def mock_runner_error():
     mock_session.id = "test_session_id"
 
     with (
+        patch("beever_atlas.api.ask.get_root_agent", return_value=MagicMock()),
         patch("beever_atlas.api.ask.create_runner") as mock_cr,
         patch("beever_atlas.api.ask.create_session", new_callable=AsyncMock) as mock_cs,
+        patch("beever_atlas.api.ask._build_decomposed_prompt", side_effect=_noop_decomposed_prompt),
+        patch("beever_atlas.api.ask._load_chat_history_parts", side_effect=_noop_chat_history),
     ):
         runner_instance = MagicMock()
         runner_instance.run_async = _mock_run_async_error
@@ -203,4 +219,143 @@ class TestSSEErrorHandling:
                 data = json.loads(line[5:].strip())
                 assert data["message"] == "Something went wrong"
                 assert data["code"] == "TEST_ERROR"
+                break
+
+
+# ── Done-event guarantee tests ────────────────────────────────────────────────
+
+
+async def _mock_run_async_no_turn_complete(**kwargs):
+    """Mock ADK Runner that yields text but never sets turn_complete.
+
+    This simulates the bug where the ADK generator exhausts without
+    the turn_complete flag, which previously left the frontend stuck.
+    """
+    part = MagicMock()
+    part.text = "partial response"
+    content = MagicMock()
+    content.parts = [part]
+    event = MagicMock()
+    event.content = content
+    event.partial = True
+    event.turn_complete = False
+    event.error_code = None
+    event.error_message = None
+    event.get_function_calls.return_value = []
+    event.get_function_responses.return_value = []
+    yield event
+
+
+async def _mock_run_async_exception(**kwargs):
+    """Mock ADK Runner that raises an unexpected exception mid-stream."""
+    part = MagicMock()
+    part.text = "before crash"
+    content = MagicMock()
+    content.parts = [part]
+    event = MagicMock()
+    event.content = content
+    event.partial = True
+    event.turn_complete = False
+    event.error_code = None
+    event.error_message = None
+    event.get_function_calls.return_value = []
+    event.get_function_responses.return_value = []
+    yield event
+    raise RuntimeError("Unexpected agent crash")
+
+
+@pytest.fixture
+def mock_runner_no_turn_complete():
+    """Patch runner to simulate stream ending without turn_complete."""
+    mock_session = MagicMock()
+    mock_session.user_id = "test_user"
+    mock_session.id = "test_session_id"
+
+    with (
+        patch("beever_atlas.api.ask.get_root_agent", return_value=MagicMock()),
+        patch("beever_atlas.api.ask.create_runner") as mock_cr,
+        patch("beever_atlas.api.ask.create_session", new_callable=AsyncMock) as mock_cs,
+        patch("beever_atlas.api.ask._build_decomposed_prompt", side_effect=_noop_decomposed_prompt),
+        patch("beever_atlas.api.ask._load_chat_history_parts", side_effect=_noop_chat_history),
+    ):
+        runner_instance = MagicMock()
+        runner_instance.run_async = _mock_run_async_no_turn_complete
+        mock_cr.return_value = runner_instance
+        mock_cs.return_value = mock_session
+        yield runner_instance
+
+
+@pytest.fixture
+def mock_runner_exception():
+    """Patch runner to simulate an unexpected exception during streaming."""
+    mock_session = MagicMock()
+    mock_session.user_id = "test_user"
+    mock_session.id = "test_session_id"
+
+    with (
+        patch("beever_atlas.api.ask.get_root_agent", return_value=MagicMock()),
+        patch("beever_atlas.api.ask.create_runner") as mock_cr,
+        patch("beever_atlas.api.ask.create_session", new_callable=AsyncMock) as mock_cs,
+        patch("beever_atlas.api.ask._build_decomposed_prompt", side_effect=_noop_decomposed_prompt),
+        patch("beever_atlas.api.ask._load_chat_history_parts", side_effect=_noop_chat_history),
+    ):
+        runner_instance = MagicMock()
+        runner_instance.run_async = _mock_run_async_exception
+        mock_cr.return_value = runner_instance
+        mock_cs.return_value = mock_session
+        yield runner_instance
+
+
+class TestDoneEventGuarantee:
+    """Verify that the SSE stream always emits a terminal event (done or error)
+    regardless of how the ADK runner terminates."""
+
+    @pytest.mark.asyncio
+    async def test_done_emitted_without_turn_complete(
+        self, client: AsyncClient, mock_runner_no_turn_complete
+    ):
+        """When the ADK runner exhausts without turn_complete, the backend
+        safety-net finally block should emit a done event."""
+        response = await client.post(
+            "/api/channels/C123/ask",
+            json={"question": "hello"},
+        )
+        body = response.text
+        assert "event: done" in body, (
+            "Stream ended without turn_complete but no done event was emitted"
+        )
+
+    @pytest.mark.asyncio
+    async def test_done_emitted_after_runner_exception(
+        self, client: AsyncClient, mock_runner_exception
+    ):
+        """When the ADK runner raises an exception, the stream should emit
+        an error event (which counts as a terminal event for the frontend)."""
+        response = await client.post(
+            "/api/channels/C123/ask",
+            json={"question": "hello"},
+        )
+        body = response.text
+        # Should have either an error event or a done event (or both)
+        has_terminal = "event: error" in body or "event: done" in body
+        assert has_terminal, (
+            "Runner exception did not produce any terminal SSE event"
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_event_contains_error_details(
+        self, client: AsyncClient, mock_runner_exception
+    ):
+        """Exception-path error events should include the error message."""
+        response = await client.post(
+            "/api/channels/C123/ask",
+            json={"question": "hello"},
+        )
+        body = response.text
+        assert "event: error" in body
+        for line in body.split("\n"):
+            if line.startswith("data:") and "AGENT_ERROR" in line:
+                data = json.loads(line[5:].strip())
+                assert data["code"] == "AGENT_ERROR"
+                assert "Unexpected agent crash" in data["message"]
                 break

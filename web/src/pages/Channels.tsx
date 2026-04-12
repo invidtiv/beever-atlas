@@ -104,7 +104,7 @@ export function Channels() {
   const hasFilter = workspaceFilter !== "all" || query.trim() !== "";
 
   return (
-    <div className="min-h-full">
+    <div className="h-full overflow-auto">
       <div className="max-w-5xl mx-auto px-4 py-6 sm:px-6 sm:py-8 lg:px-10 lg:py-10">
 
         {/* Header */}

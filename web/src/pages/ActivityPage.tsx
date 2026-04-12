@@ -325,7 +325,7 @@ export function ActivityPage() {
   const totalRels = filtered.reduce((s, e) => s + ((e.details.total_relationships as number) ?? 0), 0);
 
   return (
-    <div className="min-h-full">
+    <div className="h-full overflow-auto">
       <div className="max-w-[960px] mx-auto p-6 sm:p-8 lg:p-12">
         {/* Page header */}
         <div className="flex items-center gap-3 mb-2">

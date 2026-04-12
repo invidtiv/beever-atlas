@@ -4,6 +4,35 @@ Each function has the correct signature and docstring for its target store metho
 In M1, all raise NotImplementedError — implementations arrive in M3/M4.
 """
 
+# --- QA Agent tools (implemented) ---
+from beever_atlas.agents.tools.wiki_tools import get_wiki_page, get_topic_overview
+from beever_atlas.agents.tools.memory_tools import (
+    search_qa_history,
+    search_channel_facts,
+    search_media_references,
+    get_recent_activity,
+)
+from beever_atlas.agents.tools.graph_tools import (
+    search_relationships,
+    trace_decision_history,
+    find_experts,
+)
+from beever_atlas.agents.tools.external_tools import search_external_knowledge
+
+# All 10 QA tools in priority order (wiki → overview → history → facts → media → activity → graph → decisions → experts → external)
+QA_TOOLS = [
+    get_wiki_page,
+    get_topic_overview,
+    search_qa_history,
+    search_channel_facts,
+    search_media_references,
+    get_recent_activity,
+    search_relationships,
+    trace_decision_history,
+    find_experts,
+    search_external_knowledge,
+]
+
 
 # --- Semantic Memory (Weaviate) tools ---
 

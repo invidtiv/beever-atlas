@@ -106,6 +106,31 @@ export interface WikiResponse {
   structure: WikiStructure;
   overview: WikiPage;
   metadata: WikiMetadata;
+  version_count: number;
+}
+
+export interface WikiVersionSummary {
+  version_number: number;
+  channel_id: string;
+  generated_at: string;
+  archived_at: string;
+  page_count: number;
+  model: string;
+}
+
+export interface WikiVersionResponse {
+  version_number: number;
+  channel_id: string;
+  channel_name: string;
+  platform: string;
+  generated_at: string;
+  archived_at: string;
+  page_count: number;
+  model: string;
+  structure: WikiStructure;
+  overview: WikiPage;
+  pages: Record<string, WikiPage>;
+  metadata: WikiMetadata;
 }
 
 export interface SyncResponse {

@@ -8,6 +8,8 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from beever_atlas.wiki.version_store import WikiVersionStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,15 +20,24 @@ class WikiCache:
         self._db = AsyncIOMotorClient(mongodb_uri)[db_name]
         self._collection = self._db["wiki_cache"]
         self._status_collection = self._db["wiki_generation_status"]
+        self._version_store = WikiVersionStore(mongodb_uri, db_name)
+
+    @property
+    def version_store(self) -> WikiVersionStore:
+        return self._version_store
 
     async def ensure_indexes(self) -> None:
         await self._collection.create_index("channel_id", unique=True)
         await self._status_collection.create_index("channel_id", unique=True)
+        await self._version_store.ensure_indexes()
 
     async def get_wiki(self, channel_id: str) -> dict | None:
-        return await self._collection.find_one(
+        doc = await self._collection.find_one(
             {"channel_id": channel_id}, {"_id": 0}
         )
+        if doc is not None:
+            doc["version_count"] = await self._version_store.count_versions(channel_id)
+        return doc
 
     async def get_page(self, channel_id: str, page_id: str) -> dict | None:
         doc = await self._collection.find_one(
@@ -44,6 +55,17 @@ class WikiCache:
         )
 
     async def save_wiki(self, channel_id: str, wiki_data: dict) -> None:
+        # Archive the current wiki before overwriting
+        try:
+            existing = await self._collection.find_one(
+                {"channel_id": channel_id}, {"_id": 0}
+            )
+            if existing:
+                await self._version_store.archive(channel_id, existing)
+                await self._version_store.cleanup(channel_id)
+        except Exception:
+            logger.exception("Failed to archive wiki version for channel %s", channel_id)
+
         await self._collection.update_one(
             {"channel_id": channel_id},
             {"$set": wiki_data},

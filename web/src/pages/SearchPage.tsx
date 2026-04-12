@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { Search, Brain, Tag, User, Sparkles } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Search, Brain, Tag, User, Sparkles, ExternalLink } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 
@@ -45,7 +46,10 @@ function SimilarityBar({ score }: { score: number }) {
 
 function ResultCard({ item }: { item: SearchResultItem }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-4 hover:shadow-sm transition-shadow">
+    <Link
+      to={`/channels/${item.channel_id}/memories`}
+      className="block rounded-xl border border-border bg-card p-4 hover:shadow-sm hover:border-primary/30 transition-all group"
+    >
       <div className="flex items-start justify-between gap-3 mb-2">
         <p className="text-sm text-foreground leading-relaxed flex-1">{item.memory_text}</p>
         <span
@@ -66,7 +70,10 @@ function ResultCard({ item }: { item: SearchResultItem }) {
         )}
 
         {item.channel_id && (
-          <span className="text-xs text-muted-foreground">#{item.channel_id}</span>
+          <span className="inline-flex items-center gap-1 text-xs text-muted-foreground group-hover:text-primary transition-colors">
+            <ExternalLink size={10} />
+            View in channel
+          </span>
         )}
       </div>
 
@@ -91,7 +98,7 @@ function ResultCard({ item }: { item: SearchResultItem }) {
           ))}
         </div>
       )}
-    </div>
+    </Link>
   );
 }
 
@@ -115,8 +122,10 @@ function ResultsSkeleton() {
 }
 
 export function SearchPage() {
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [searchParams] = useSearchParams();
+  const initialQuery = searchParams.get("q") ?? "";
+  const [query, setQuery] = useState(initialQuery);
+  const [debouncedQuery, setDebouncedQuery] = useState(initialQuery);
   const [results, setResults] = useState<SearchResultItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -161,7 +170,7 @@ export function SearchPage() {
   }, [debouncedQuery]);
 
   return (
-    <div className="min-h-full">
+    <div className="h-full overflow-auto">
       <div className="max-w-[800px] mx-auto p-6 sm:p-8 lg:p-12">
         {/* Page header */}
         <div className="flex items-center gap-3 mb-6">
