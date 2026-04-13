@@ -22,6 +22,7 @@ from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import types as genai_types
 
 from beever_atlas.agents.runner import create_runner, create_session
+from beever_atlas.infra.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -1132,9 +1133,10 @@ class FeedbackV2Request(BaseModel):
 
 
 @router.post("/api/ask")
+@limiter.limit("30/minute")
 async def ask_v2(
-    body: AskV2Request,
     request: Request,
+    body: AskV2Request,
 ) -> StreamingResponse:
     """Session-scoped SSE streaming. `channel_id` scopes retrieval for this turn only.
 
