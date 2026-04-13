@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import type { Message, MessageCitations, AskMetadata, ToolCallEvent, AnswerMode, AttachmentFile, DecompositionPlan } from "../types/askTypes";
 import type { ToolDescriptor } from "../types/toolTypes";
+import { authFetch } from "../lib/api";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -14,7 +15,7 @@ let _toolDescriptorPromise: Promise<ToolDescriptor[]> | null = null;
 function fetchToolDescriptors(): Promise<ToolDescriptor[]> {
   if (_toolDescriptorCache !== null) return Promise.resolve(_toolDescriptorCache);
   if (_toolDescriptorPromise !== null) return _toolDescriptorPromise;
-  _toolDescriptorPromise = fetch(`${API_BASE}/api/ask/tools`)
+  _toolDescriptorPromise = authFetch(`${API_BASE}/api/ask/tools`)
     .then((res) => {
       if (!res.ok) throw new Error(`GET /api/ask/tools returned ${res.status}`);
       return res.json() as Promise<{ tools: ToolDescriptor[] }>;
@@ -298,7 +299,7 @@ export function useAskSession(): UseAskSessionReturn {
       });
 
       try {
-        const res = await fetch(`${API_BASE}/api/ask`, {
+        const res = await authFetch(`${API_BASE}/api/ask`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
