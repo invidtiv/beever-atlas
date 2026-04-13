@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-router = APIRouter(prefix="/api/dev", tags=["dev"])
+from beever_atlas.infra.auth import require_admin
+
+router = APIRouter(
+    prefix="/api/dev",
+    tags=["dev"],
+    dependencies=[Depends(require_admin)],
+)
 logger = logging.getLogger(__name__)
 
 
