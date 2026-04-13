@@ -89,7 +89,10 @@ async def _run_consolidation(channel_id: str) -> None:
             stores.weaviate, settings, graph=stores.graph,
             consolidation_config=effective.consolidation,
         )
-        result = await service.on_sync_complete(channel_id)
+        # Resolve display name so ChannelSummary is written with a human-
+        # readable heading, not the raw channel_id.
+        channel_name = await stores.mongodb.get_channel_display_name(channel_id) or ""
+        result = await service.on_sync_complete(channel_id, channel_name=channel_name)
 
         # Reset sync counter after successful consolidation
         await stores.mongodb.reset_sync_counter(channel_id)

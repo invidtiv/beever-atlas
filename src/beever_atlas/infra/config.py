@@ -6,6 +6,10 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
+class ConfigurationError(RuntimeError):
+    """Raised when feature-flag coupling or settings are invalid."""
+
+
 class Settings(BaseSettings):
     """Beever Atlas configuration — all values from env vars."""
 
@@ -160,6 +164,14 @@ class Settings(BaseSettings):
     qa_confidence_threshold: float = Field(default=0.4, alias="QA_CONFIDENCE_THRESHOLD")
     external_mcp_servers: str = Field(default="", alias="EXTERNAL_MCP_SERVERS")
     qa_new_prompt: bool = Field(default=False, alias="QA_NEW_PROMPT")
+
+    # QA Agent Skills (progressive disclosure via ADK SkillToolset).
+    # When ON, create_qa_agent() wires an 8-skill pack into the QA LlmAgent
+    # so the model can load_skill / load_resource on demand for richer
+    # formatted output (timelines, profile cards, comparison tables, etc.).
+    # REQUIRES qa_new_prompt=True; agent-build raises ConfigurationError if
+    # this flag is on while qa_new_prompt is off. DEFAULT OFF.
+    qa_skills_enabled: bool = Field(default=False, alias="QA_SKILLS_ENABLED")
 
     # Onboarding response length monitor.
     # When ON, a warning is logged if a non-deep response exceeds 1500 chars.

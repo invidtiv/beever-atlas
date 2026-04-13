@@ -12,8 +12,64 @@ from beever_atlas.agents.query.prompts import (
     QA_SUMMARIZE_SUFFIX,
 )
 from beever_atlas.agents.tools import QA_TOOLS
+from beever_atlas.infra.config import ConfigurationError
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_name(tool) -> str:
+    """Best-effort extraction of a callable tool's __name__."""
+    return (
+        getattr(tool, "__name__", None)
+        or getattr(tool, "name", None)
+        or getattr(getattr(tool, "func", None), "__name__", "")
+    )
+
+
+def _maybe_wrap_with_skills(tools_list: list) -> list:
+    """If `qa_skills_enabled` is on, wrap `tools_list` in a `SkillToolset`
+    carrying only skills whose `allowed_tools` are a subset of the enabled
+    tool names. Skills with no `allowed_tools` (pure-formatting) always pass.
+
+    Precondition: `qa_skills_enabled` requires `qa_new_prompt=True`.
+    Returns the original `tools_list` unchanged when the flag is off.
+    """
+    try:
+        from beever_atlas.infra.config import get_settings
+        settings = get_settings()
+    except Exception:
+        return tools_list
+
+    if not getattr(settings, "qa_skills_enabled", False):
+        return tools_list
+
+    if not getattr(settings, "qa_new_prompt", False):
+        raise ConfigurationError(
+            "qa_skills_enabled requires qa_new_prompt=True"
+        )
+
+    from google.adk.tools.skill_toolset import SkillToolset
+
+    from beever_atlas.agents.query.skills import build_qa_skill_pack
+
+    enabled_tool_names = {n for n in (_tool_name(t) for t in tools_list) if n}
+    overlap_skills = []
+    for skill in build_qa_skill_pack():
+        allowed = skill.frontmatter.allowed_tools
+        if not allowed:
+            overlap_skills.append(skill)
+            continue
+        required = set(allowed.split())
+        if required.issubset(enabled_tool_names):
+            overlap_skills.append(skill)
+
+    toolset = SkillToolset(skills=overlap_skills, additional_tools=tools_list)
+    logger.info(
+        "QA skills enabled: %d/%d skills survived tool-overlap filter",
+        len(overlap_skills),
+        len(build_qa_skill_pack()),
+    )
+    return [toolset]
 
 # Tool subsets for each answer mode
 _WIKI_TOOLS_NAMES = {"get_wiki_page", "get_topic_overview"}
@@ -83,11 +139,12 @@ def create_qa_agent(mode: str = "deep") -> LlmAgent:
         # Quick: 2 tools, no thinking, concise prompt
         tools_list = [t for t in QA_TOOLS if getattr(t, '__name__', '') in _WIKI_TOOLS_NAMES]
         prompt = build_qa_system_prompt(max_tool_calls=2, include_follow_ups=False, mode="quick") + QA_QUICK_SUFFIX
+        agent_tools = _maybe_wrap_with_skills(tools_list)
         agent = LlmAgent(
             name="qa_agent_quick",
             model=model,
             instruction=prompt,
-            tools=tools_list,
+            tools=agent_tools,
         )
     elif mode == "summarize":
         # Summarize: 4 tools, thinking, structured output
@@ -96,11 +153,12 @@ def create_qa_agent(mode: str = "deep") -> LlmAgent:
         tools_list = _maybe_add_follow_ups_tool(tools_list, include_follow_ups=True)
         prompt = build_qa_system_prompt(max_tool_calls=4, include_follow_ups=True, mode="summarize") + QA_SUMMARIZE_SUFFIX
         planner = _create_thinking_planner()
+        agent_tools = _maybe_wrap_with_skills(tools_list)
         agent = LlmAgent(
             name="qa_agent_summarize",
             model=model,
             instruction=prompt,
-            tools=tools_list,
+            tools=agent_tools,
             planner=planner,
         )
     else:
@@ -109,11 +167,12 @@ def create_qa_agent(mode: str = "deep") -> LlmAgent:
         all_tools = _maybe_add_follow_ups_tool(all_tools, include_follow_ups=True)
         prompt = build_qa_system_prompt(max_tool_calls=8, include_follow_ups=True)
         planner = _create_thinking_planner()
+        agent_tools = _maybe_wrap_with_skills(all_tools)
         agent = LlmAgent(
             name="qa_agent_deep",
             model=model,
             instruction=prompt,
-            tools=all_tools,
+            tools=agent_tools,
             planner=planner,
         )
 

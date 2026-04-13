@@ -167,6 +167,14 @@ async def get_channel_summary(channel_id: str) -> ChannelSummaryResponse:
     summary = await stores.weaviate.get_channel_summary(channel_id)
     if summary is None:
         raise HTTPException(status_code=404, detail="No channel summary available yet")
+    # Backfill empty channel_name from MongoDB sync state. Older summaries
+    # were written with channel_name="" because the consolidation entry
+    # points defaulted it; without this fallback the UI shows the raw
+    # channel_id as the heading. Final fallback is channel_id itself.
+    resolved_name = summary.channel_name
+    if not resolved_name:
+        display = await stores.mongodb.get_channel_display_name(channel_id)
+        resolved_name = display or channel_id
     return ChannelSummaryResponse(
         text=summary.text,
         cluster_count=summary.cluster_count,
@@ -179,7 +187,7 @@ async def get_channel_summary(channel_id: str) -> ChannelSummaryResponse:
         media_count=summary.media_count,
         author_count=summary.author_count,
         worst_staleness=summary.worst_staleness,
-        channel_name=summary.channel_name,
+        channel_name=resolved_name,
         description=summary.description,
         themes=summary.themes,
         momentum=summary.momentum,
@@ -254,7 +262,12 @@ async def trigger_consolidation(channel_id: str) -> dict:
 
     async def _run() -> None:
         try:
-            result = await service.full_reconsolidate(channel_id)
+            channel_name = (
+                await stores.mongodb.get_channel_display_name(channel_id) or ""
+            )
+            result = await service.full_reconsolidate(
+                channel_id, channel_name=channel_name,
+            )
             logger.info(
                 "Consolidation complete channel=%s created=%d updated=%d facts=%d errors=%d",
                 channel_id, result.clusters_created, result.clusters_updated,

@@ -152,7 +152,14 @@ FOLLOW_UPS: ["first follow-up question?", "second follow-up question?", "third f
 OUTPUT_CONTRACT = """\
 Your final message is the answer the user reads. It contains only the answer. \
 No preamble, no process narration, no phrase like 'let me', 'I\'ll start by', \
-'my approach', 'okay so', 'first I will'. Write the answer directly."""
+'my approach', 'okay so', 'first I will'. Write the answer directly.
+
+Structure rules:
+- Use markdown structure: `##` headings to group distinct sub-topics.
+- Prefer bullet lists over prose when listing 2+ items.
+- Use a markdown table when comparing 2+ entities across 2+ attributes.
+- Bold key entity names and technical terms on first mention.
+- Do not write prose blocks longer than ~150 words without a heading, list, or table."""
 
 RETRIEVAL_GUIDANCE = """\
 Retrieve enough evidence to cite every non-trivial claim. \
@@ -176,7 +183,9 @@ Never describe your reasoning, plan, or next steps in the final answer. \
 Never write 'my approach', 'let me kick off', 'okay so', 'I\'ll start by', \
 'first I will', 'now synthesizing', 'tier 0/1/2'. \
 Do not restate the user's question. Do not narrate tool calls. \
-Emit the finished answer only."""
+Emit the finished answer only. \
+Do not emit raw untitled paragraphs back-to-back. \
+Do not dump unstructured lists of more than 7 items without grouping."""
 
 EMPTY_SIGNAL_HANDLING = """\
 If a tool returns a row with `_empty: true`, disclose that the knowledge graph \
