@@ -1,5 +1,54 @@
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_KEY = import.meta.env.VITE_BEEVER_API_KEY as string | undefined;
 const REQUEST_TIMEOUT_MS = 15000;
+
+let _missingKeyWarned = false;
+function warnIfMissingKey(): void {
+  if (!API_KEY && !_missingKeyWarned) {
+    _missingKeyWarned = true;
+    console.warn(
+      "[api] VITE_BEEVER_API_KEY is not set — /api/* requests will omit the Authorization header. " +
+        "Set it in web/.env.local to match a value in BEEVER_API_KEYS server-side.",
+    );
+  }
+}
+
+/**
+ * Returns true when a URL targets a path that must not carry the
+ * Authorization header (only /api/health is exempt server-side).
+ */
+function isAuthExempt(path: string): boolean {
+  // Strip origin + query
+  const pathname = path.replace(/^https?:\/\/[^/]+/, "").split("?")[0];
+  return pathname === "/api/health" || pathname.endsWith("/api/health");
+}
+
+function hasAuthHeader(headers: HeadersInit | undefined): boolean {
+  if (!headers) return false;
+  if (headers instanceof Headers) return headers.has("Authorization");
+  if (Array.isArray(headers)) return headers.some(([k]) => k.toLowerCase() === "authorization");
+  return Object.keys(headers).some((k) => k.toLowerCase() === "authorization");
+}
+
+/**
+ * fetch() wrapper that injects `Authorization: Bearer <VITE_BEEVER_API_KEY>`
+ * on every /api/* request unless the caller supplied an Authorization header
+ * or the request targets /api/health (exempt server-side).
+ *
+ * Accepts the same arguments as the global fetch. Use this instead of raw
+ * fetch() for any call into the backend API.
+ */
+export function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  warnIfMissingKey();
+  const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  const shouldInject = !!API_KEY && !isAuthExempt(urlStr) && !hasAuthHeader(init?.headers);
+  if (!shouldInject) {
+    return fetch(input, init);
+  }
+  const merged = new Headers(init?.headers);
+  merged.set("Authorization", `Bearer ${API_KEY}`);
+  return fetch(input, { ...init, headers: merged });
+}
 
 class ApiError extends Error {
   status: number;
@@ -19,7 +68,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await authFetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
