@@ -11,10 +11,13 @@ from dotenv import load_dotenv
 # Load .env into os.environ so all modules (adapters, etc.) can read env vars
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from beever_atlas.adapters import close_adapter
+from beever_atlas.infra.rate_limit import limiter
 from beever_atlas.api.ask import router as ask_router
 from beever_atlas.api.channels import router as channels_router
 from beever_atlas.api.connections import router as connections_router
@@ -153,6 +156,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Per-IP rate limit. Limiter instance lives in infra.rate_limit so route
+# modules can share it; here we wire it into the FastAPI app.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS for React dev server and production
 app.add_middleware(
     CORSMiddleware,
@@ -186,7 +194,8 @@ register_health_checks()
 
 
 @app.get("/api/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
+@limiter.limit("60/minute")
+async def health_check(request: Request) -> HealthResponse:
     """Check connectivity to all data stores."""
     results = await health_registry.check_all()
     status = health_registry.overall_status(results)
