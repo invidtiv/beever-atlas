@@ -151,7 +151,7 @@ export function WikiRegenerateButton({
               setOpen(false);
               onRegenerateInLang(lang);
             }}
-            anchor="center"
+            placement="top"
           />
         )}
       </div>
@@ -211,7 +211,7 @@ export function WikiRegenerateButton({
             setOpen(false);
             onRegenerateInLang(lang);
           }}
-          anchor="right"
+          placement="bottom"
         />
       )}
     </div>
@@ -227,7 +227,7 @@ interface LanguageMenuProps {
   options: string[];
   currentLang: string;
   onPick: (lang: string) => void;
-  anchor: "right" | "center";
+  placement: "top" | "bottom";
 }
 
 function LanguageMenu({
@@ -235,23 +235,24 @@ function LanguageMenu({
   options,
   currentLang,
   onPick,
-  anchor,
+  placement,
 }: LanguageMenuProps) {
-  // "right" anchors to the right edge of the trigger (sidebar).
-  // "center" centers under the trigger (empty-state CTA).
-  const anchorClass =
-    anchor === "right"
-      ? "right-0"
-      : "left-1/2 -translate-x-1/2";
+  // Always right-anchored so the menu grows leftward from the chevron —
+  // avoids off-center clashes and right-edge bleed. "top" opens upward
+  // (above the button), "bottom" opens downward.
+  const placementClass =
+    placement === "top"
+      ? "bottom-full mb-2"
+      : "top-full mt-2";
 
   return (
     <div
       role="menu"
-      className={`absolute ${anchorClass} top-full z-50 mt-2 w-64 max-h-80 overflow-y-auto rounded-xl border border-border/80 bg-popover p-1.5 shadow-lg ring-1 ring-black/5`}
+      className={`absolute right-0 ${placementClass} z-50 w-60 max-h-80 overflow-y-auto rounded-xl border border-border bg-popover p-1.5 shadow-xl`}
     >
       <div className="flex items-center gap-1.5 px-2.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
         <Languages className="h-3 w-3" />
-        {label} in…
+        {label} wiki in
       </div>
       <div className="flex flex-col">
         {options.map((lang) => {
@@ -261,24 +262,26 @@ function LanguageMenu({
               key={lang}
               role="menuitem"
               onClick={() => onPick(lang)}
-              className={`group flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors ${
+              className={`group flex items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors ${
                 isCurrent
                   ? "bg-primary/10 text-foreground"
                   : "text-foreground hover:bg-muted"
               }`}
             >
+              <span className="flex-1 truncate font-medium">
+                {langName(lang)}
+              </span>
               <span
-                className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${
-                  isCurrent
-                    ? "bg-primary/20 text-primary"
-                    : "bg-muted text-muted-foreground group-hover:bg-background group-hover:text-foreground"
+                className={`shrink-0 font-mono text-[10px] tracking-wide ${
+                  isCurrent ? "text-primary" : "text-muted-foreground"
                 }`}
               >
                 {lang.toUpperCase()}
               </span>
-              <span className="flex-1 truncate">{langName(lang)}</span>
-              {isCurrent && (
+              {isCurrent ? (
                 <Check className="h-3.5 w-3.5 shrink-0 text-primary" />
+              ) : (
+                <span aria-hidden className="h-3.5 w-3.5 shrink-0" />
               )}
             </button>
           );

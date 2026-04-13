@@ -38,7 +38,7 @@ def _skill(
     instructions: str,
     resource_files: tuple[str, ...] = (),
 ) -> Skill:
-    refs = {fn: load_resource(fn) for fn in resource_files}
+    assets = {fn: load_resource(fn) for fn in resource_files}
     return Skill(
         frontmatter=Frontmatter(
             name=name,
@@ -46,7 +46,7 @@ def _skill(
             allowed_tools=allowed_tools,
         ),
         instructions=instructions,
-        resources=Resources(references=refs) if refs else Resources(),
+        resources=Resources(assets=assets) if assets else Resources(),
     )
 
 
