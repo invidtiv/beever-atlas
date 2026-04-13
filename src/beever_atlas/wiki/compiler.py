@@ -144,6 +144,40 @@ def _format_relationship_edges(persons: list[dict]) -> list[dict]:
 
 
 # Well-known generic terms to exclude from glossary (OS, common apps, hardware, generic dev tools, common infra)
+# Localized titles for fixed wiki pages. Keyed by BCP-47 tag then page id.
+# Missing tags fall back to English. Keep ids in sync with the WikiPage(id=...)
+# values used throughout _compile_* methods.
+WIKI_PAGE_TITLES: dict[str, dict[str, str]] = {
+    "en":    {"overview": "Overview", "people": "People & Experts",
+              "decisions": "Decisions", "faq": "FAQ", "glossary": "Glossary",
+              "activity": "Recent Activity", "resources": "Resources & Media"},
+    "zh-HK": {"overview": "概覽", "people": "人物與專家",
+              "decisions": "決策", "faq": "常見問題", "glossary": "詞彙表",
+              "activity": "近期活動", "resources": "資源與媒體"},
+    "zh-TW": {"overview": "概覽", "people": "人物與專家",
+              "decisions": "決策", "faq": "常見問題", "glossary": "詞彙表",
+              "activity": "近期活動", "resources": "資源與媒體"},
+    "zh-CN": {"overview": "概览", "people": "人物与专家",
+              "decisions": "决策", "faq": "常见问题", "glossary": "词汇表",
+              "activity": "近期活动", "resources": "资源与媒体"},
+    "ja":    {"overview": "概要", "people": "メンバーと専門家",
+              "decisions": "意思決定", "faq": "よくある質問", "glossary": "用語集",
+              "activity": "最近のアクティビティ", "resources": "リソースとメディア"},
+    "ko":    {"overview": "개요", "people": "인물 및 전문가",
+              "decisions": "의사결정", "faq": "자주 묻는 질문", "glossary": "용어집",
+              "activity": "최근 활동", "resources": "리소스 및 미디어"},
+    "es":    {"overview": "Resumen", "people": "Personas y expertos",
+              "decisions": "Decisiones", "faq": "Preguntas frecuentes", "glossary": "Glosario",
+              "activity": "Actividad reciente", "resources": "Recursos y medios"},
+    "fr":    {"overview": "Vue d'ensemble", "people": "Personnes et experts",
+              "decisions": "Décisions", "faq": "FAQ", "glossary": "Glossaire",
+              "activity": "Activité récente", "resources": "Ressources et médias"},
+    "de":    {"overview": "Übersicht", "people": "Personen & Experten",
+              "decisions": "Entscheidungen", "faq": "FAQ", "glossary": "Glossar",
+              "activity": "Letzte Aktivität", "resources": "Ressourcen & Medien"},
+}
+
+
 GENERIC_GLOSSARY_TERMS: set[str] = {
     # Operating systems
     "windows", "macos", "linux", "ubuntu", "android", "ios",
@@ -183,6 +217,54 @@ Produce this wiki page's content in **{target_language}** (BCP-47).
 """
 
 
+_CODE_FENCE_RE = re.compile(
+    r"^\s*```(?:json|JSON)?\s*(.*?)\s*```\s*$", re.DOTALL,
+)
+
+
+def _parse_llm_json(raw: str | None) -> dict | list | None:
+    """Parse an LLM JSON response tolerantly.
+
+    Handles the common failure modes that block Cantonese/CJK wiki
+    generation: markdown-fenced JSON (```json ... ```), leading/trailing
+    prose, and truncation. Returns a parsed object or None on failure.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+
+    # Strip a surrounding ```json ... ``` fence if present.
+    fence_match = _CODE_FENCE_RE.match(text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Fast path.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Cut to the outermost JSON object/array span and retry.
+    first_brace = min(
+        (i for i in (text.find("{"), text.find("[")) if i >= 0),
+        default=-1,
+    )
+    last_brace = max(text.rfind("}"), text.rfind("]"))
+    if first_brace >= 0 and last_brace > first_brace:
+        candidate = text[first_brace : last_brace + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+        # Last resort: reuse the ingestion-side truncation recovery.
+        try:
+            from beever_atlas.services.json_recovery import recover_truncated_json
+            return recover_truncated_json(candidate)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
 class WikiCompiler:
     """Compiles gathered channel data into WikiPage objects using the LLM."""
 
@@ -209,6 +291,10 @@ class WikiCompiler:
             source_language=self._source_lang,
         )
         return header + template.format(**kwargs)
+
+    def _page_title(self, page_id: str) -> str:
+        lang_map = WIKI_PAGE_TITLES.get(self._target_lang) or WIKI_PAGE_TITLES["en"]
+        return lang_map.get(page_id) or WIKI_PAGE_TITLES["en"].get(page_id, page_id.title())
 
     @staticmethod
     def _is_topic_relevant(cluster, channel_themes: list[str], cluster_facts: dict) -> tuple[bool, str]:
@@ -382,11 +468,16 @@ class WikiCompiler:
         data: dict = {}
         for attempt in range(1 + max_retries):
             raw = await self._llm_generate_json(prompt, temperature=0.2 + (attempt * 0.1))
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning("WikiCompiler: failed to parse LLM JSON (attempt %d)", attempt + 1)
+            parsed = _parse_llm_json(raw)
+            if parsed is None:
+                logger.warning(
+                    "WikiCompiler: failed to parse LLM JSON (attempt %d). raw_head=%r",
+                    attempt + 1,
+                    (raw or "")[:200],
+                )
                 data = {}
+            else:
+                data = parsed if isinstance(parsed, dict) else {}
             content = data.get("content", "").strip()
             summary = data.get("summary", "").strip()
             if content and len(content) > 50:
@@ -483,7 +574,7 @@ class WikiCompiler:
         return WikiPage(
             id="overview",
             slug="overview",
-            title="Overview",
+            title=self._page_title("overview"),
             page_type="fixed",
             section_number="1",
             content=self._postprocess_content(result.content),
@@ -725,7 +816,7 @@ class WikiCompiler:
         return WikiPage(
             id="people",
             slug="people",
-            title="People & Experts",
+            title=self._page_title("people"),
             page_type="fixed",
             content=self._postprocess_content(result.content),
             summary=result.summary,
@@ -742,7 +833,7 @@ class WikiCompiler:
         return WikiPage(
             id="decisions",
             slug="decisions",
-            title="Decisions",
+            title=self._page_title("decisions"),
             page_type="fixed",
             content=self._postprocess_content(result.content),
             summary=result.summary,
@@ -771,7 +862,7 @@ class WikiCompiler:
         return WikiPage(
             id="faq",
             slug="faq",
-            title="FAQ",
+            title=self._page_title("faq"),
             page_type="fixed",
             content=self._postprocess_content(result.content),
             summary=result.summary,
@@ -828,7 +919,7 @@ class WikiCompiler:
         return WikiPage(
             id="glossary",
             slug="glossary",
-            title="Glossary",
+            title=self._page_title("glossary"),
             page_type="fixed",
             content=self._postprocess_content(result.content),
             summary=result.summary,
@@ -848,7 +939,7 @@ class WikiCompiler:
         return WikiPage(
             id="resources",
             slug="resources",
-            title="Resources & Media",
+            title=self._page_title("resources"),
             page_type="fixed",
             content=self._postprocess_content(result.content),
             summary=result.summary,
@@ -880,7 +971,7 @@ class WikiCompiler:
         return WikiPage(
             id="activity",
             slug="activity",
-            title="Recent Activity",
+            title=self._page_title("activity"),
             page_type="fixed",
             content=self._postprocess_content(result.content),
             summary=result.summary,
@@ -1005,27 +1096,27 @@ class WikiCompiler:
 
         # Ordered list of fixed pages (before topics)
         _FIXED_BEFORE_TOPICS = [
-            ("overview", "Overview", "overview"),
+            ("overview", "overview"),
         ]
         # Fixed pages after topics (order matters)
         _FIXED_AFTER_TOPICS = [
-            ("people", "People & Experts", "people"),
-            ("decisions", "Decisions", "decisions"),
-            ("faq", "FAQ", "faq"),
-            ("glossary", "Glossary", "glossary"),
-            ("activity", "Recent Activity", "activity"),
-            ("resources", "Resources & Media", "resources"),
+            ("people", "people"),
+            ("decisions", "decisions"),
+            ("faq", "faq"),
+            ("glossary", "glossary"),
+            ("activity", "activity"),
+            ("resources", "resources"),
         ]
 
         # 1. Fixed pages before topics (Overview)
-        for page_id, title, slug in _FIXED_BEFORE_TOPICS:
+        for page_id, slug in _FIXED_BEFORE_TOPICS:
             if page_id in pages:
                 sec = _next_section()
                 p = pages[page_id]
                 p.section_number = sec
                 nodes.append(
                     WikiPageNode(
-                        id=page_id, title=title, slug=slug,
+                        id=page_id, title=self._page_title(page_id), slug=slug,
                         section_number=sec, page_type="fixed",
                         memory_count=p.memory_count,
                     )
@@ -1064,14 +1155,14 @@ class WikiCompiler:
                 nodes.append(topic_node)
 
         # Remaining fixed pages after topics — dynamic numbering, only if page was generated
-        for page_id, title, slug in _FIXED_AFTER_TOPICS:
+        for page_id, slug in _FIXED_AFTER_TOPICS:
             if page_id in pages:
                 sec = _next_section()
                 p = pages[page_id]
                 p.section_number = sec
                 nodes.append(
                     WikiPageNode(
-                        id=page_id, title=title, slug=slug,
+                        id=page_id, title=self._page_title(page_id), slug=slug,
                         section_number=sec, page_type="fixed",
                         memory_count=p.memory_count,
                     )

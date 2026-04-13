@@ -37,7 +37,16 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
           mermaidInitialized = true;
         }
 
+        // Validate first so bad syntax throws instead of producing an
+        // error-SVG that slips past the catch branch. Mermaid v10+ may
+        // return a valid SVG containing "Syntax error" rather than throw.
+        await mermaid.parse(code, { suppressErrors: false });
         const { svg: rendered } = await mermaid.render(diagramId, code);
+        // Belt-and-braces: reject SVGs that mermaid emitted as an error
+        // banner (some versions swallow the throw inside render()).
+        if (rendered.includes("Syntax error in text") || rendered.includes("mermaid version")) {
+          throw new Error("Mermaid render produced a syntax-error SVG.");
+        }
         if (!cancelled) {
           setSvg(rendered);
           setError(null);
