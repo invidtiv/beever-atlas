@@ -182,6 +182,40 @@ def run_extractor_build_check() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Section 4 — production call site forwards output budget (regression guard)
+# ---------------------------------------------------------------------------
+
+def run_call_site_ast_check() -> dict[str, bool]:
+    """Assert that batch_processor.py passes the output budget kwargs into
+    `token_aware_batches`. Closes the coverage blind spot that let the
+    original eof-fix ship with the kwargs un-wired."""
+    import ast
+    import pathlib
+
+    src_path = pathlib.Path("src/beever_atlas/services/batch_processor.py")
+    tree = ast.parse(src_path.read_text())
+
+    found: dict[str, bool] = {
+        "forwards_max_output_tokens": False,
+        "forwards_max_facts_per_message": False,
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "attr", None) or getattr(func, "id", None)
+        if name != "token_aware_batches":
+            continue
+        kwargs = {kw.arg for kw in node.keywords if kw.arg}
+        if "max_output_tokens" in kwargs:
+            found["forwards_max_output_tokens"] = True
+        if "max_facts_per_message" in kwargs:
+            found["forwards_max_facts_per_message"] = True
+
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -205,16 +239,40 @@ def main() -> None:
         print(f"  {ok} {row['case']:<25} expected={row['expected']} got={row['got']}")
     assert det["all_pass"], "truncation detector coverage gap"
 
-    print("\n[3/3] Extractor construction under both flag settings")
+    print("\n[3/4] Extractor construction under both flag settings")
     built = run_extractor_build_check()
     for label, cfg in built.items():
         print(f"  {label}:")
         for k, v in cfg.items():
             print(f"    {k:<20} {v}")
-    assert built["flag=True"]["fact_has_schema"], "flag=True should attach schema"
-    assert built["flag=True"]["entity_has_schema"], "flag=True should attach schema"
-    assert not built["flag=False"]["fact_has_schema"], "flag=False must not attach schema"
-    assert not built["flag=False"]["entity_has_schema"], "flag=False must not attach schema"
+    # Contract (post eof-fix): schema-constrained decoding is intentionally
+    # disabled for extractors regardless of flag. ADK's `output_schema` hard-
+    # raises on truncation before the recovery callback runs, and ADK refuses
+    # `response_schema` on `GenerateContentConfig`. EOF safety chain is now:
+    # output-aware batching → recovery callback → retry ladder.
+    assert not built["flag=True"]["fact_has_schema"], (
+        "regression: fact extractor attached output_schema "
+        "(would bypass fact_extraction_with_recovery on truncation)"
+    )
+    assert not built["flag=True"]["entity_has_schema"], (
+        "regression: entity extractor attached output_schema "
+        "(would bypass entity_extraction_with_recovery on truncation)"
+    )
+    assert built["flag=True"]["fact_mime"] == "application/json"
+    assert built["flag=True"]["entity_mime"] == "application/json"
+
+    print("\n[4/4] Production call site forwards output budget")
+    ast_check = run_call_site_ast_check()
+    for k, v in ast_check.items():
+        print(f"  {k:<35} {v}")
+    assert ast_check["forwards_max_output_tokens"], (
+        "regression: batch_processor.py must pass max_output_tokens "
+        "to token_aware_batches"
+    )
+    assert ast_check["forwards_max_facts_per_message"], (
+        "regression: batch_processor.py must pass max_facts_per_message "
+        "to token_aware_batches"
+    )
 
     print("\n" + "=" * 70)
     print("OK — all dry-run checks passed")
