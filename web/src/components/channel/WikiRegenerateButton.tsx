@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from "react";
 import { RefreshCw, ChevronDown, Check, Languages } from "lucide-react";
+import { wikiT } from "@/lib/wikiI18n";
 
 interface WikiRegenerateButtonProps {
   currentLang: string;
@@ -11,8 +12,13 @@ interface WikiRegenerateButtonProps {
   onRegenerateInLang: (lang: string) => void;
   /** Verb shown on the main button. "Regenerate" in header, "Generate" in empty state. */
   label?: "Regenerate" | "Generate";
-  /** Size variant. "sm" fits the sidebar header; "lg" is for the empty-state CTA. */
-  size?: "sm" | "lg";
+  /** Size variant. "sm" for compact toolbar use, "md" for primary sidebar action,
+   *  "lg" for the empty-state CTA. */
+  size?: "sm" | "md" | "lg";
+  /** Stretch to the parent container's full width (sidebar bottom primary action). */
+  fullWidth?: boolean;
+  /** BCP-47 tag for UI label localization. Defaults to currentLang. */
+  lang?: string;
 }
 
 // Human-readable names for BCP-47 tags we're likely to support.
@@ -60,6 +66,8 @@ export function WikiRegenerateButton({
   onRegenerateInLang,
   label = "Regenerate",
   size = "sm",
+  fullWidth = false,
+  lang,
 }: WikiRegenerateButtonProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -94,8 +102,84 @@ export function WikiRegenerateButton({
   );
 
   const isLg = size === "lg";
-  const verbIng = label === "Generate" ? "Generating" : "Regenerating";
+  const isMd = size === "md";
+  const uiLang = lang ?? currentLang;
+  const labelText = label === "Generate" ? wikiT(uiLang, "generate") : wikiT(uiLang, "regenerate");
+  const verbIng = label === "Generate" ? wikiT(uiLang, "generating") : wikiT(uiLang, "regenerating");
+  const menuHeader = label === "Generate" ? wikiT(uiLang, "generateInLabel") : wikiT(uiLang, "regenerateInLabel");
+  const anotherLangTooltip = wikiT(uiLang, "anotherLanguage");
   const currentTag = currentLang.toUpperCase();
+
+  // ---- Medium (primary sidebar action) ----------------------------------
+  if (isMd) {
+    return (
+      <div
+        ref={containerRef}
+        className={`relative ${fullWidth ? "flex" : "inline-flex"}`}
+      >
+        <div
+          className={`${
+            fullWidth ? "flex w-full" : "inline-flex"
+          } items-stretch overflow-hidden rounded-lg bg-primary shadow-sm ring-1 ring-primary/30 transition-shadow hover:shadow-md`}
+        >
+          <button
+            onClick={onRegenerate}
+            disabled={isRefreshing}
+            className="flex flex-1 items-center justify-center gap-2 px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-60"
+            title={
+              isRefreshing
+                ? `${verbIng} wiki…`
+                : `${labelText} wiki in ${langName(currentLang)}`
+            }
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
+            />
+            <span>{isRefreshing ? verbIng + "…" : labelText}</span>
+            <span className="rounded bg-primary-foreground/15 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide">
+              {currentTag}
+            </span>
+          </button>
+
+          {options.length > 1 && (
+            <>
+              <div
+                aria-hidden
+                className="w-px self-stretch bg-primary-foreground/25"
+              />
+              <button
+                onClick={() => setOpen((v) => !v)}
+                disabled={isRefreshing}
+                className="flex items-center justify-center px-2.5 text-primary-foreground transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-60"
+                aria-haspopup="true"
+                aria-expanded={open}
+                title={anotherLangTooltip}
+              >
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${
+                    open ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+            </>
+          )}
+        </div>
+
+        {open && (
+          <LanguageMenu
+            menuHeader={menuHeader}
+            options={options}
+            currentLang={currentLang}
+            onPick={(lang) => {
+              setOpen(false);
+              onRegenerateInLang(lang);
+            }}
+            placement="top"
+          />
+        )}
+      </div>
+    );
+  }
 
   // ---- Large (empty-state CTA) ------------------------------------------
   if (isLg) {
@@ -111,7 +195,7 @@ export function WikiRegenerateButton({
               className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
             />
             <span>
-              {isRefreshing ? `${verbIng}…` : label}
+              {isRefreshing ? `${verbIng}…` : labelText}
             </span>
             <span className="ml-0.5 rounded-full bg-primary-foreground/15 px-2 py-0.5 text-[11px] font-semibold tracking-wide">
               {currentTag}
@@ -130,7 +214,7 @@ export function WikiRegenerateButton({
                 className="inline-flex items-center justify-center rounded-r-full bg-primary pl-3 pr-3.5 text-primary-foreground transition-colors hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-60"
                 aria-haspopup="true"
                 aria-expanded={open}
-                title={`${label} in another language`}
+                title={anotherLangTooltip}
               >
                 <ChevronDown
                   className={`h-4 w-4 transition-transform ${
@@ -144,7 +228,7 @@ export function WikiRegenerateButton({
 
         {open && (
           <LanguageMenu
-            label={label}
+            menuHeader={menuHeader}
             options={options}
             currentLang={currentLang}
             onPick={(lang) => {
@@ -169,13 +253,13 @@ export function WikiRegenerateButton({
           title={
             isRefreshing
               ? `${verbIng} wiki…`
-              : `${label} wiki in ${langName(currentLang)}`
+              : `${labelText} wiki in ${langName(currentLang)}`
           }
         >
           <RefreshCw
             className={`h-3 w-3 ${isRefreshing ? "animate-spin" : ""}`}
           />
-          <span>{isRefreshing ? verbIng + "…" : label}</span>
+          <span>{isRefreshing ? verbIng + "…" : labelText}</span>
           <span className="rounded bg-background/60 px-1 py-px text-[10px] font-semibold tracking-wide text-foreground/80">
             {currentTag}
           </span>
@@ -190,7 +274,7 @@ export function WikiRegenerateButton({
               className="inline-flex items-center justify-center px-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-60"
               aria-haspopup="true"
               aria-expanded={open}
-              title={`${label} in another language`}
+              title={anotherLangTooltip}
             >
               <ChevronDown
                 className={`h-3 w-3 transition-transform ${
@@ -204,7 +288,7 @@ export function WikiRegenerateButton({
 
       {open && (
         <LanguageMenu
-          label={label}
+          menuHeader={menuHeader}
           options={options}
           currentLang={currentLang}
           onPick={(lang) => {
@@ -223,7 +307,7 @@ export function WikiRegenerateButton({
 // ---------------------------------------------------------------------------
 
 interface LanguageMenuProps {
-  label: string;
+  menuHeader: string;
   options: string[];
   currentLang: string;
   onPick: (lang: string) => void;
@@ -231,7 +315,7 @@ interface LanguageMenuProps {
 }
 
 function LanguageMenu({
-  label,
+  menuHeader,
   options,
   currentLang,
   onPick,
@@ -252,7 +336,7 @@ function LanguageMenu({
     >
       <div className="flex items-center gap-1.5 px-2.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
         <Languages className="h-3 w-3" />
-        {label} wiki in
+        {menuHeader}
       </div>
       <div className="flex flex-col">
         {options.map((lang) => {

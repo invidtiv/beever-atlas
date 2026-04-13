@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { wikiT } from "@/lib/wikiI18n";
 import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, ArrowRight, FolderSync, History as HistoryIcon } from "lucide-react";
 import { useWiki } from "@/hooks/useWiki";
 import { useWikiPage } from "@/hooks/useWikiPage";
@@ -511,10 +512,10 @@ export function WikiTab() {
             <BookOpen className="h-5 w-5 text-muted-foreground" />
           </div>
           <h3 className="text-base font-semibold text-foreground">
-            No Wiki Yet
+            {wikiT(targetLang, "noWikiYet")}
           </h3>
           <p className="mx-auto mt-1.5 max-w-xs text-sm text-muted-foreground">
-            Generate a wiki for this channel. Pick a language from the dropdown to generate in another language.
+            {wikiT(targetLang, "noWikiEmptySubtitle")}
           </p>
           <div className="mt-6 flex justify-center">
             <WikiRegenerateButton
@@ -595,25 +596,8 @@ export function WikiTab() {
           ? versionData.target_lang
           : targetLang
       }
-      headerExtra={
-        langConfig ? (
-          <WikiRegenerateButton
-            currentLang={targetLang}
-            supportedLanguages={langConfig.supported_languages}
-            isRefreshing={isRefreshing}
-            onRegenerate={handleRefresh}
-            onRegenerateInLang={handleRegenerateInLang}
-          />
-        ) : (
-          <WikiRegenerateButton
-            currentLang={targetLang}
-            supportedLanguages={[targetLang]}
-            isRefreshing={isRefreshing}
-            onRegenerate={handleRefresh}
-            onRegenerateInLang={handleRegenerateInLang}
-          />
-        )
-      }
+      supportedLanguages={langConfig?.supported_languages ?? [targetLang]}
+      onRegenerateInLang={handleRegenerateInLang}
     >
       <>
         {viewingVersionNumber !== null && versionData && (

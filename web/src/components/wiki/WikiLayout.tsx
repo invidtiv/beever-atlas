@@ -5,7 +5,9 @@ import { WikiBreadcrumb } from "./WikiBreadcrumb";
 import { FreshnessBadge } from "./FreshnessBadge";
 import { WikiTableOfContents } from "./WikiTableOfContents";
 import { VersionHistoryPanel } from "./VersionHistoryPanel";
+import { WikiRegenerateButton } from "@/components/channel/WikiRegenerateButton";
 import type { WikiStructure, WikiPage, WikiVersionSummary } from "@/lib/types";
+import { wikiT } from "@/lib/wikiI18n";
 
 interface WikiLayoutProps {
   channelId: string;
@@ -25,6 +27,10 @@ interface WikiLayoutProps {
   /** BCP-47 tag of the language currently displayed. Shown as a chip in the
    *  sidebar header so users can see at a glance which rendering they're viewing. */
   currentLang?: string;
+  /** Full list of supported BCP-47 tags for the regenerate language picker. */
+  supportedLanguages?: string[];
+  /** Called when the user picks a different language from the regenerate menu. */
+  onRegenerateInLang?: (lang: string) => void;
 }
 
 const MIN_WIDTH = 180;
@@ -129,9 +135,10 @@ function setActiveSearchMatch(marks: HTMLElement[], activeIndex: number) {
 
 interface WikiContentSearchProps {
   contentRef: React.RefObject<HTMLDivElement | null>;
+  lang?: string;
 }
 
-function WikiContentSearch({ contentRef }: WikiContentSearchProps) {
+function WikiContentSearch({ contentRef, lang }: WikiContentSearchProps) {
   const [query, setQuery] = useState("");
   const [matchCount, setMatchCount] = useState(0);
   const [activeMatchIndex, setActiveMatchIndex] = useState(-1);
@@ -186,7 +193,7 @@ function WikiContentSearch({ contentRef }: WikiContentSearchProps) {
           setQuery(nextQuery);
           runSearch(nextQuery);
         }}
-        placeholder="Search this page..."
+        placeholder={wikiT(lang, "searchPlaceholder") + "..."}
         className="w-full rounded-lg border border-border/40 bg-muted/60 py-1.5 pl-8 pr-20 text-[13px] text-foreground placeholder:text-muted-foreground/50 focus:bg-muted/80 focus:border-primary/40 focus:outline-none focus:ring-1 focus:ring-primary/20 transition-all"
         aria-label="Search current wiki page"
       />
@@ -240,6 +247,8 @@ export function WikiLayout({
   onBackToCurrent,
   headerExtra,
   currentLang,
+  supportedLanguages,
+  onRegenerateInLang,
 }: WikiLayoutProps) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_WIDTH);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
@@ -284,7 +293,7 @@ export function WikiLayout({
         <div className="p-4 pb-2 shrink-0">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 min-w-0">
-              <h3 className="text-sm font-semibold text-foreground truncate">Wiki</h3>
+              <h3 className="text-sm font-semibold text-foreground truncate">{wikiT(currentLang, "wiki")}</h3>
               {currentLang && (
                 <span
                   className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary"
@@ -303,9 +312,10 @@ export function WikiLayout({
             isRefreshing={isRefreshing}
             showRefreshButton={false}
             className="mt-2"
+            lang={currentLang}
           />
           <div className="mt-2">
-            <WikiContentSearch key={activePage.id} contentRef={searchableContentRef} />
+            <WikiContentSearch key={activePage.id} contentRef={searchableContentRef} lang={currentLang} />
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -313,26 +323,33 @@ export function WikiLayout({
             pages={structure.pages}
             activePageId={activePage.id}
             onNavigate={onNavigate}
+            lang={currentLang}
           />
         </div>
         <div className="shrink-0 border-t border-border/70 p-3 space-y-2">
-          <FreshnessBadge
-            isStale={structure.is_stale}
-            generatedAt={structure.generated_at}
-            onRefresh={onRefresh}
-            isRefreshing={isRefreshing}
-            showStatus={false}
-            className="space-y-0"
-          />
+          {/* Primary action: Regenerate (with language picker). */}
+          {currentLang && supportedLanguages && onRegenerateInLang && (
+            <WikiRegenerateButton
+              currentLang={currentLang}
+              supportedLanguages={supportedLanguages}
+              isRefreshing={isRefreshing}
+              onRegenerate={onRefresh}
+              onRegenerateInLang={onRegenerateInLang}
+              size="md"
+              fullWidth
+              lang={currentLang}
+            />
+          )}
+          {/* Secondary actions: Download + Version History. */}
           <div className="flex gap-1.5">
             <a
               href={`${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api/channels/${channelId}/wiki/download`}
               download
-              className="flex items-center justify-center gap-1.5 flex-1 rounded-md px-3 py-1.5 text-xs font-medium border border-border/50 bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              className="flex items-center justify-center gap-1.5 flex-1 rounded-md px-3 py-1.5 text-xs font-medium border border-border/50 bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
               title="Download as Markdown"
             >
               <Download className="h-3.5 w-3.5" />
-              Download
+              {wikiT(currentLang, "download")}
             </a>
             <button
               onClick={() => setShowVersionHistory(!showVersionHistory)}
@@ -340,7 +357,7 @@ export function WikiLayout({
               className={`flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium border transition-colors ${
                 showVersionHistory
                   ? "border-primary/30 bg-primary/10 text-primary"
-                  : "border-border/50 bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  : "border-border/50 bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground"
               } disabled:opacity-40 disabled:cursor-not-allowed`}
               title={versionCount === 0 ? "No previous versions" : `${versionCount} previous version${versionCount !== 1 ? "s" : ""}`}
             >
@@ -367,6 +384,7 @@ export function WikiLayout({
               onBackToCurrent?.();
             }}
             onClose={() => setShowVersionHistory(false)}
+            lang={currentLang}
           />
         </div>
       )}

@@ -170,8 +170,11 @@ class WikiCache:
             logger.exception("Failed to archive wiki version for channel %s", channel_id)
 
         # Stamp the live wiki doc with its target_lang so future archive calls
-        # can read it back to label older versions correctly.
-        wiki_data = {**wiki_data, "target_lang": target_lang}
+        # can read it back to label older versions correctly. Force the stored
+        # ``channel_id`` to the suffixed cache key — otherwise the raw id from
+        # the builder output clashes with other-language rows on the unique
+        # ``channel_id_1`` index (E11000 duplicate key).
+        wiki_data = {**wiki_data, "channel_id": key, "target_lang": target_lang}
         await self._collection.update_one(
             {"channel_id": key},
             {"$set": wiki_data},

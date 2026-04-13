@@ -2,11 +2,13 @@ import { useState } from "react";
 import { ChevronRight, ChevronDown } from "lucide-react";
 import type { WikiPageNode } from "@/lib/types";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { wikiT } from "@/lib/wikiI18n";
 
 interface WikiSidebarProps {
   pages: WikiPageNode[];
   activePageId: string;
   onNavigate: (pageId: string) => void;
+  lang?: string;
 }
 
 interface SidebarItemProps {
@@ -110,7 +112,7 @@ function TopicItemWithChildren({ node, activePageId, onNavigate, indent }: Topic
   );
 }
 
-export function WikiSidebar({ pages, activePageId, onNavigate }: WikiSidebarProps) {
+export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSidebarProps) {
   const [topicsExpanded, setTopicsExpanded] = useState(true);
   const topicPages = pages.filter((p) => p.page_type === "topic");
   const fixedPages = pages.filter((p) => p.page_type === "fixed");
@@ -139,7 +141,7 @@ export function WikiSidebar({ pages, activePageId, onNavigate }: WikiSidebarProp
             ) : (
               <ChevronRight className="h-3 w-3" />
             )}
-            Topics
+            {wikiT(lang, "topics")}
             <span className="ml-auto text-muted-foreground/70 normal-case font-normal">
               ({topicPages.length})
             </span>

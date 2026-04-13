@@ -1,17 +1,18 @@
 import { History, X, Loader2, ArrowLeft } from "lucide-react";
 import type { WikiVersionSummary } from "@/lib/types";
+import { wikiT } from "@/lib/wikiI18n";
 
-function getTimeAgo(dateStr: string): string {
+function getTimeAgo(dateStr: string, lang?: string): string {
   const date = new Date(dateStr);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffMin < 1) return wikiT(lang, "justNow");
+  if (diffMin < 60) return wikiT(lang, "minutesAgo", { n: diffMin });
   const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
+  if (diffHr < 24) return wikiT(lang, "hoursAgo", { n: diffHr });
   const diffDays = Math.floor(diffHr / 24);
-  return `${diffDays}d ago`;
+  return wikiT(lang, "daysAgo", { n: diffDays });
 }
 
 function formatDate(dateStr: string): string {
@@ -31,6 +32,7 @@ interface VersionHistoryPanelProps {
   onSelectVersion: (versionNumber: number) => void;
   onBackToCurrent: () => void;
   onClose: () => void;
+  lang?: string;
 }
 
 export function VersionHistoryPanel({
@@ -40,13 +42,14 @@ export function VersionHistoryPanel({
   onSelectVersion,
   onBackToCurrent,
   onClose,
+  lang,
 }: VersionHistoryPanelProps) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
           <History className="h-4 w-4 text-muted-foreground" />
-          <h4 className="text-sm font-semibold text-foreground">Version History</h4>
+          <h4 className="text-sm font-semibold text-foreground">{wikiT(lang, "versionHistory")}</h4>
         </div>
         <button
           onClick={onClose}
@@ -64,7 +67,7 @@ export function VersionHistoryPanel({
           </div>
         ) : versions.length === 0 ? (
           <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No previous versions yet.
+            {wikiT(lang, "noPreviousVersions")}
           </div>
         ) : (
           <div className="py-2">
@@ -78,7 +81,7 @@ export function VersionHistoryPanel({
               }`}
             >
               <ArrowLeft className="h-3.5 w-3.5 shrink-0" />
-              <span>Current version</span>
+              <span>{wikiT(lang, "currentVersion")}</span>
             </button>
 
             <div className="mx-4 my-1 border-t border-border/50" />
@@ -96,7 +99,7 @@ export function VersionHistoryPanel({
               >
                 <div className="flex items-center justify-between">
                   <span className="flex items-center gap-1.5 text-sm font-medium">
-                    Version {v.version_number}
+                    {wikiT(lang, "versionLabel", { n: v.version_number })}
                     {v.target_lang && (
                       <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                         {v.target_lang}
@@ -104,11 +107,11 @@ export function VersionHistoryPanel({
                     )}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    {v.page_count} pages
+                    {wikiT(lang, "pagesSuffix", { n: v.page_count })}
                   </span>
                 </div>
                 <span className="text-xs text-muted-foreground" title={formatDate(v.generated_at)}>
-                  Generated {getTimeAgo(v.generated_at)}
+                  {wikiT(lang, "generatedAgo", { ago: getTimeAgo(v.generated_at, lang) })}
                 </span>
               </button>
             ))}

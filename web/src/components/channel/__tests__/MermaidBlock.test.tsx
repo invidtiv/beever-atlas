@@ -6,6 +6,7 @@ import { MermaidBlock } from "../MermaidBlock";
 vi.mock("mermaid", () => ({
   default: {
     initialize: vi.fn(),
+    parse: vi.fn().mockResolvedValue(true),
     render: vi.fn(),
   },
 }));
@@ -46,5 +47,32 @@ describe("MermaidBlock", () => {
     const pre = document.querySelector("pre");
     expect(pre).not.toBeNull();
     expect(pre?.textContent).toBe(code);
+  });
+
+  it("falls back when mermaid.parse rejects (pre-render validation)", async () => {
+    const { default: mermaid } = await import("mermaid");
+    vi.mocked(mermaid.parse).mockRejectedValueOnce(new Error("Syntax error"));
+
+    render(<MermaidBlock code="not-a-diagram %%%" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Could not render diagram.")).toBeInTheDocument();
+    });
+    expect(mermaid.render).not.toHaveBeenCalled();
+  });
+
+  it("falls back when render returns a syntax-error SVG (v11 swallow)", async () => {
+    const { default: mermaid } = await import("mermaid");
+    vi.mocked(mermaid.render).mockResolvedValueOnce({
+      svg: "<svg><text>Syntax error in text</text><text>mermaid version 11.14.0</text></svg>",
+      bindFunctions: undefined,
+      diagramType: "flowchart",
+    });
+
+    render(<MermaidBlock code="graph TD; A---" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Could not render diagram.")).toBeInTheDocument();
+    });
   });
 });

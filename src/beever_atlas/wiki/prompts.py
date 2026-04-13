@@ -168,7 +168,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 - Add [N] citation markers on factual claims. **Maximum 3 citations per sentence** — never list long chains like [1][2][5][6][8][9][10]. Pick the 2-3 most relevant citations only.
 - **CRITICAL: Each bullet point may have at most 3 citation markers total.** A person entry like "Thomas Chong: drives architecture [1][2][3]" is correct. "Thomas Chong: drives architecture [1][2][5][6][8][9][10]..." is FORBIDDEN.
 - Do NOT use @, #, $ prefixes — write names normally
-- Activity chart JSON (use ```chart code block, NOT ```json): `{"type":"bar","title":"Contributor Activity","data":[{"name":"Alice","contributions":15}],"xKey":"name","series":["contributions"]}`
+- Activity chart JSON (use ```chart code block, NOT ```json): `{{"type":"bar","title":"Contributor Activity","data":[{{"name":"Alice","contributions":15}}],"xKey":"name","series":["contributions"]}}`
 - Use ONLY inline [N] markers for citations. Do NOT generate any source list, reference section, citation block, or numbered bibliography — the UI renders citations separately. FORBIDDEN at end of content: `## Sources`, `### Sources`, `- [1] @Author...`, `[1]: Author...`.
 - **Maximum 10 edges** in the contributor network mermaid diagram. Show only the most significant collaboration relationships.
 
