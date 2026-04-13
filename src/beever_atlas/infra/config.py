@@ -138,10 +138,6 @@ class Settings(BaseSettings):
     bridge_url: str = Field(default="http://localhost:3001")
     bridge_api_key: str = Field(default="")
     # When True, accept both constant-time and legacy `==` bridge auth paths
-    # for one release cycle. Owned by the bridge-ssrf branch; pre-declared
-    # here to avoid merge conflicts on the shared Settings class.
-    bridge_hmac_dual: bool = Field(default=False, alias="BEEVER_BRIDGE_HMAC_DUAL")
-    # When True, accept both constant-time and legacy `==` bridge auth paths
     # for one release cycle. Every legacy accept logs a warning.
     bridge_hmac_dual: bool = Field(default=False, alias="BEEVER_BRIDGE_HMAC_DUAL")
     # Allowlist of external hostnames reachable by outbound MCP tool calls.
