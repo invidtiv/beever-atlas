@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     batch_max_wait_seconds: int = Field(default=3600)
     batch_max_prompt_tokens: int = Field(default=6000)
     batch_time_window_seconds: int = Field(default=600)
+    # Output-token ceiling for adaptive batching. Projects expected response
+    # size per batch so we split BEFORE Gemini hits its max_output_tokens
+    # ceiling (entity=65536, fact=131072). Default ~70% of entity ceiling
+    # leaves headroom for schema overhead and estimator drift.
+    # Set to 0 to disable output-aware batching (input-only, legacy behaviour).
+    batch_max_output_tokens: int = Field(default=45000, alias="BATCH_MAX_OUTPUT_TOKENS")
     fact_max_retries: int = Field(default=3)
     stale_job_threshold_hours: float = Field(default=1.0)
 

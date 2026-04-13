@@ -197,10 +197,24 @@ class BatchProcessor:
         # Use token-aware adaptive batching when configured, else fixed-size
         if settings.batch_max_prompt_tokens > 0:
             from beever_atlas.services.adaptive_batcher import token_aware_batches
+            # Resolve max_facts_per_message once so batcher's output estimator
+            # matches what the extractor is actually told to produce.
+            _max_facts_for_batching = (
+                ingestion_config.max_facts_per_message
+                if ingestion_config and ingestion_config.max_facts_per_message is not None
+                else settings.max_facts_per_message
+            )
+            _output_budget = (
+                settings.batch_max_output_tokens
+                if settings.batch_max_output_tokens > 0
+                else None
+            )
             batches = token_aware_batches(
                 [m if isinstance(m, dict) else vars(m) for m in messages],
                 max_tokens=settings.batch_max_prompt_tokens,
                 time_window_seconds=settings.batch_time_window_seconds,
+                max_output_tokens=_output_budget,
+                max_facts_per_message=_max_facts_for_batching,
             )
         else:
             batches = _thread_aware_batches(messages, batch_size)
