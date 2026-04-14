@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from beever_atlas.agents.query.decomposer import QueryPlan, SubQuery, decompose, _is_simple
+from beever_atlas.agents.query.decomposer import decompose, _is_simple
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +188,6 @@ async def test_ollama_fallback_returns_is_simple_false():
 @pytest.mark.asyncio
 async def test_timeout_fallback_returns_is_simple_false():
     """A timeout during LLM call must yield is_simple=False with 1 query."""
-    import asyncio
 
     mock_provider = MagicMock()
     mock_provider.resolve_model = MagicMock(return_value="gemini-1.5-flash-lite")

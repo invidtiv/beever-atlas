@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from beever_atlas.services.json_recovery import (
     recover_entities_from_truncated,

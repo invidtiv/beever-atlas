@@ -72,7 +72,6 @@ async def test_all_facts_checked_in_parallel():
     settings = _make_settings(concurrency=4)
 
     call_order: list[str] = []
-    original_detect = None
 
     async def _fake_detect(new_fact, candidates):
         call_order.append(new_fact.id)

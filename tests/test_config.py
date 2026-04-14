@@ -1,6 +1,5 @@
 """Tests for config system and LiteLLM model routing."""
 
-import os
 
 
 class TestSettings:

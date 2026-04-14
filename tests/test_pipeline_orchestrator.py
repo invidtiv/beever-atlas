@@ -10,7 +10,6 @@ import pytest
 from beever_atlas.models.sync_policy import (
     ConsolidationConfig,
     ConsolidationStrategy,
-    GlobalPolicyDefaults,
     IngestionConfig,
     ResolvedPolicy,
     SyncConfig,

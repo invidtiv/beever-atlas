@@ -11,7 +11,7 @@ Covers:
 from __future__ import annotations
 
 import secrets
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -97,7 +97,7 @@ class TestStoreMultiConnection:
         store = _make_store(monkeypatch)
 
         env_slack = _minimal_conn(platform="slack", source="env", display_name="Slack (env)")
-        ui_slack = _minimal_conn(platform="slack", source="ui", display_name="My Slack")
+        _minimal_conn(platform="slack", source="ui", display_name="My Slack")
 
         # Mock the find cursor
         async def mock_find_iter(query):

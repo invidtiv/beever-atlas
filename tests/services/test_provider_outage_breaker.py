@@ -22,7 +22,7 @@ def _make_server_error(status: int = 503) -> ServerError:
     err = ServerError.__new__(ServerError)
     # ServerError accepts a message string; status attribute varies by SDK version.
     # Build the minimal object the code checks: isinstance(exc, ServerError).
-    Exception.__init__(err, f"503 UNAVAILABLE")
+    Exception.__init__(err, "503 UNAVAILABLE")
     return err
 
 
@@ -83,7 +83,7 @@ async def test_breaker_trips_after_threshold():
         mock_stores.entity_registry.get_all_canonical = AsyncMock(return_value=[])
         mock_get_stores.return_value = mock_stores
 
-        processor = bp_module.BatchProcessor()
+        bp_module.BatchProcessor()
 
         # Patch _run_single_batch at the closure level by patching the inner
         # definition. We do this by replacing the sem-guarded logic via

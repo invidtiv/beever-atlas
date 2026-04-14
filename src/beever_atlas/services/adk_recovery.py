@@ -13,12 +13,10 @@ from typing import Any, Callable, TYPE_CHECKING
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
-from google.genai import types
 from pydantic import BaseModel, ValidationError
 
 from beever_atlas.services.json_recovery import (
     TruncationReport,
-    recover_truncated_json_with_report,
     _close_open_structures,
 )
 

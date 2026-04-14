@@ -68,8 +68,6 @@ def test_higher_averages_yield_smaller_batches_near_ceiling() -> None:
     We synthesise messages just below the old ceiling and verify the new
     constants force an earlier split.
     """
-    import importlib
-    import types as _types
     import beever_atlas.services.adaptive_batcher as _mod
 
     messages = _make_messages(40)

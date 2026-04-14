@@ -69,7 +69,7 @@ async def _run_batch_api_dry_run(args: Any, settings: Any) -> None:
     )
 
     print(f"\n{'='*60}")
-    print(f"  BATCH API DRY-RUN ESTIMATE")
+    print("  BATCH API DRY-RUN ESTIMATE")
     print(f"{'='*60}")
     print(f"  Total messages:  {len(raw_messages)}")
     print(f"  Token budget:    {settings.batch_max_prompt_tokens} tokens/batch")
@@ -107,12 +107,12 @@ async def _run_batch_api_dry_run(args: Any, settings: Any) -> None:
         print()
 
     print(f"{'='*60}")
-    print(f"  TOTALS")
+    print("  TOTALS")
     print(f"{'='*60}")
     print(f"  Message tokens (est):   {total_tokens}")
     print(f"  Batch API requests:     {len(batches) * 2}")
-    print(f"  (Each request = 1 Gemini Batch API job submission)")
-    print(f"\n  Run without --batch-api to execute actual extraction.\n")
+    print("  (Each request = 1 Gemini Batch API job submission)")
+    print("\n  Run without --batch-api to execute actual extraction.\n")
 
 
 async def main() -> None:
@@ -325,7 +325,7 @@ async def main() -> None:
 
     # --- 4. Summary ---
     print(f"\n{'='*60}")
-    print(f"  SUMMARY")
+    print("  SUMMARY")
     print(f"{'='*60}")
     print(f"  Messages processed: {len(preprocessed)}")
     print(f"  Facts extracted:    {len(all_facts)}")
@@ -347,7 +347,7 @@ async def main() -> None:
         "relationships": all_relationships,
     }, default=str, indent=2))
     print(f"  📄 Full results saved to {results_file}")
-    print(f"  💡 Re-run with --cached to skip bridge fetch\n")
+    print("  💡 Re-run with --cached to skip bridge fetch\n")
 
 
 if __name__ == "__main__":

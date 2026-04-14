@@ -48,7 +48,7 @@ class TestSessionDelete:
     @pytest.mark.anyio
     async def test_delete_then_list_excludes_session(self, client: AsyncClient):
         """DELETE a session → LIST returns empty (session not present)."""
-        doc = _make_session_doc(SESSION_ID, USER_ID)
+        _make_session_doc(SESSION_ID, USER_ID)
 
         # Simulate the DB: update_one matches 1 doc; find returns nothing after delete.
         mock_update_result = MagicMock()

@@ -211,7 +211,7 @@ async def main() -> None:
     )
 
     print(f"\n{'='*60}")
-    print(f"  INGESTION COMPLETE")
+    print("  INGESTION COMPLETE")
     print(f"{'='*60}")
     print(f"  Status:        {sync_status}")
     print(f"  Messages:      {len(messages)}")
@@ -235,7 +235,7 @@ async def main() -> None:
     print("Consolidation triggered.")
     print()
     print(f"  Channel '{channel_name}' ({channel_id}) is now available in the dashboard.")
-    print(f"  Open the Wiki tab on that channel to generate the wiki.")
+    print("  Open the Wiki tab on that channel to generate the wiki.")
     print()
 
 

@@ -845,7 +845,6 @@ async def ask_history(
     Supports optional search filtering and excludes soft-deleted sessions.
     """
     from beever_atlas.infra.config import get_settings
-    from beever_atlas.stores.chat_history_store import ChatHistoryStore
     from motor.motor_asyncio import AsyncIOMotorClient
 
     user_id = _extract_user_id(request)
