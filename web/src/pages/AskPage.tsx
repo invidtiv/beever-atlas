@@ -56,6 +56,9 @@ export function AskPage() {
   // the live stream) and (b) the history-loader effect must skip the GET
   // (which would 404 before the session finishes persisting).
   const [mintedSessionId, setMintedSessionId] = useState<string | null>(null);
+  // Id of the session whose messages AskCore has committed to local state.
+  // Drives the overlay-off signal — replaces brittle timing heuristics.
+  const [loadedSessionId, setLoadedSessionId] = useState<string | null>(null);
   // Foreign/unknown session-id state — derived from loadStatus. Redundant-fetch
   // guard: when the just-minted sessionId matches paramSessionId AND context
   // already has it as active (AskCore set it after stream metadata), the
@@ -134,6 +137,7 @@ export function AskPage() {
     }
     if (activeSessionId === paramSessionId) return;
     clearLoadStatus();
+    setLoadedSessionId(null);
     setActiveSessionId(paramSessionId);
   }, [
     paramSessionId,
@@ -177,7 +181,10 @@ export function AskPage() {
   const rawSessionSwitchLoading =
     !!paramSessionId &&
     paramSessionId !== mintedSessionId &&
-    (activeSessionId !== paramSessionId || loadStatus === "idle");
+    loadedSessionId !== paramSessionId &&
+    (activeSessionId !== paramSessionId ||
+      loadStatus === "idle" ||
+      loadStatus === "ok");
   // Hold the overlay visible for a short tail after the conditions above
   // clear. loadStatus flips to "ok" inside the context's loadSession (before
   // AskCore's .then callback commits the fetched messages to its local
@@ -190,10 +197,17 @@ export function AskPage() {
       return;
     }
     setTailActive(true);
-    const t = setTimeout(() => setTailActive(false), 120);
+    // Small tail so the fade-out animation has time to play. The overlay's
+    // exit condition is now driven by `loadedSessionId === paramSessionId`,
+    // which fires synchronously after AskCore commits messages — so there's
+    // no empty-state gap to cover, only the fade.
+    const t = setTimeout(() => setTailActive(false), 80);
     return () => clearTimeout(t);
   }, [rawSessionSwitchLoading]);
-  const sessionSwitchLoading = rawSessionSwitchLoading || tailActive;
+  // `shouldMount` keeps the overlay in the DOM long enough to fade out.
+  // `visible` drives the opacity so both enter and exit are smooth.
+  const shouldMount = rawSessionSwitchLoading || tailActive;
+  const visible = rawSessionSwitchLoading;
 
   if (loading || (!paramSessionId && bareResolved === "pending")) {
     return (
@@ -239,7 +253,7 @@ export function AskPage() {
 
   return (
     <div className="relative h-full">
-      {sessionSwitchLoading && <ConversationSkeleton />}
+      {shouldMount && <ConversationSkeleton visible={visible} />}
       <AskCore
       // Remount when a fresh `?q=` or `?new=1` arrives so AskCorePicker's
       // internal `initialQuerySent` / `sessionIdRef` reset and the fresh
@@ -268,6 +282,7 @@ export function AskPage() {
       initialQuery={initialQuery || undefined}
       availableChannels={channels}
       urlSessionId={paramSessionId}
+      onSessionLoaded={(id) => setLoadedSessionId(id)}
       onSessionMinted={(id) => {
         // creating → streaming: navigate(replace) so refresh is safe.
         // Record the minted id BEFORE navigating so the URL-sync effect and
@@ -283,63 +298,19 @@ export function AskPage() {
   );
 }
 
-function ConversationSkeleton() {
-  // Shimmer palette matches the chat surface so the skeleton reads as "the
-  // same conversation is loading" rather than a different empty page.
-  const bubble =
-    "rounded-2xl bg-muted/60 motion-safe:animate-pulse";
-  const line = "h-3 rounded bg-muted/70 motion-safe:animate-pulse";
+function ConversationSkeleton({ visible }: { visible: boolean }) {
+  // Neutral full-surface cover that matches the chat background. No fake
+  // bubbles — those read as "a different, broken chat". Just a soft centered
+  // indicator so the user knows the new conversation is loading, while the
+  // underlying AskCore mounts silently.
   return (
     <div
-      className="absolute inset-0 z-10 bg-background flex flex-col"
+      className={`absolute inset-0 z-10 bg-background flex items-center justify-center transition-opacity duration-150 ease-out ${visible ? "opacity-100" : "opacity-0"} pointer-events-none`}
       aria-busy="true"
       aria-label="Loading conversation"
       role="status"
     >
-      <div className="flex-1 overflow-hidden">
-        <div className="mx-auto w-full max-w-3xl px-4 sm:px-6 py-6 space-y-6">
-          {/* User bubble (right) */}
-          <div className="flex justify-end">
-            <div className={`${bubble} px-4 py-3 w-[55%] max-w-[420px]`}>
-              <div className={`${line} w-[80%] mb-2`} />
-              <div className={`${line} w-[45%]`} />
-            </div>
-          </div>
-
-          {/* Assistant bubble (left, wider) */}
-          <div className="flex justify-start">
-            <div className={`${bubble} px-4 py-3 w-[80%] max-w-[640px]`}>
-              <div className={`${line} w-[95%] mb-2`} />
-              <div className={`${line} w-[88%] mb-2`} />
-              <div className={`${line} w-[72%] mb-2`} />
-              <div className={`${line} w-[60%]`} />
-            </div>
-          </div>
-
-          {/* User bubble (right) */}
-          <div className="flex justify-end">
-            <div className={`${bubble} px-4 py-3 w-[40%] max-w-[320px]`}>
-              <div className={`${line} w-[70%]`} />
-            </div>
-          </div>
-
-          {/* Assistant bubble (left) */}
-          <div className="flex justify-start">
-            <div className={`${bubble} px-4 py-3 w-[70%] max-w-[560px]`}>
-              <div className={`${line} w-[90%] mb-2`} />
-              <div className={`${line} w-[65%]`} />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Composer placeholder at the bottom matches AskCore's input bar. */}
-      <div className="border-t border-border/60 px-4 sm:px-6 py-4">
-        <div className="mx-auto w-full max-w-3xl">
-          <div className="h-11 rounded-full bg-muted/50 motion-safe:animate-pulse" />
-        </div>
-      </div>
-
+      <div className="h-6 w-6 rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/60 motion-safe:animate-spin" />
       <span className="sr-only">Loading conversation…</span>
     </div>
   );

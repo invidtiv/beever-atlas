@@ -28,6 +28,8 @@ interface AskCoreProps {
   urlSessionId?: string;
   /** Picker mode: called once when a new session id is minted from SSE metadata. */
   onSessionMinted?: (sessionId: string) => void;
+  /** Picker mode: fires after a loaded session's messages are committed to local state. */
+  onSessionLoaded?: (sessionId: string) => void;
 }
 
 export function AskCore({
@@ -37,6 +39,7 @@ export function AskCore({
   availableChannels = [],
   urlSessionId,
   onSessionMinted,
+  onSessionLoaded,
 }: AskCoreProps) {
   if (channelMode === "fixed") {
     return (
@@ -53,6 +56,7 @@ export function AskCore({
       availableChannels={availableChannels}
       urlSessionId={urlSessionId}
       onSessionMinted={onSessionMinted}
+      onSessionLoaded={onSessionLoaded}
     />
   );
 }
@@ -218,12 +222,14 @@ function AskCorePicker({
   availableChannels,
   urlSessionId,
   onSessionMinted,
+  onSessionLoaded,
 }: {
   initialChannelId: string;
   initialQuery?: string;
   availableChannels: ChannelOption[];
   urlSessionId?: string;
   onSessionMinted?: (sessionId: string) => void;
+  onSessionLoaded?: (sessionId: string) => void;
 }) {
   const {
     ask,
@@ -327,6 +333,7 @@ function AskCorePicker({
         if (seq !== loadSeqRef.current) return;
         if (msgs.length === 0) return;
         loadSession(msgs as Message[], targetSessionId);
+        onSessionLoaded?.(targetSessionId);
         // Prefer the most recent turn's channel that is still available.
         // Falls back to the first available channel; never overwrites with
         // an unavailable id (user may have left that channel).
