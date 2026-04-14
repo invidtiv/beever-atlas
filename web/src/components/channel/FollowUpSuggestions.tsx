@@ -1,5 +1,3 @@
-import React from "react";
-
 interface FollowUpSuggestionsProps {
   suggestions: string[];
   onSelect?: (question: string) => void;

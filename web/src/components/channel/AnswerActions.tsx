@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { Copy, ThumbsUp, ThumbsDown, Check } from "lucide-react";
 import type { Message } from "../../types/askTypes";
 
