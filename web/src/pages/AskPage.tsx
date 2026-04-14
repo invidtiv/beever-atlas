@@ -176,6 +176,16 @@ export function AskPage() {
     );
   }
 
+  // Session-switch loading state. When the URL carries a :sessionId we did not
+  // just mint in this tab and loadStatus hasn't settled yet, overlay a neutral
+  // skeleton on top of AskCore so the user doesn't see a brief "new chat"
+  // flash before the conversation's messages paint. AskCore still mounts
+  // underneath so its picker fires loadSession and advances loadStatus.
+  const sessionSwitchLoading =
+    !!paramSessionId &&
+    paramSessionId !== mintedSessionId &&
+    loadStatus === "idle";
+
   if (channels.length === 0) {
     return <NoChannelsState />;
   }
@@ -211,7 +221,16 @@ export function AskPage() {
   }
 
   return (
-    <AskCore
+    <div className="relative h-full">
+      {sessionSwitchLoading && (
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center bg-background text-muted-foreground/60 text-sm"
+          aria-busy="true"
+        >
+          Loading conversation…
+        </div>
+      )}
+      <AskCore
       // Remount when a fresh `?q=` or `?new=1` arrives so AskCorePicker's
       // internal `initialQuerySent` / `sessionIdRef` reset and the fresh
       // session is used instead of appending to the previous one.
@@ -250,6 +269,7 @@ export function AskPage() {
         }
       }}
     />
+    </div>
   );
 }
 
