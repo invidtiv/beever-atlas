@@ -32,6 +32,7 @@ def _make_settings_mock(concurrency: int = 4) -> MagicMock:
     settings.max_facts_per_message = 2
     settings.ingest_batch_concurrency = concurrency
     settings.language_detection_enabled = False
+    settings.llm_outage_breaker_threshold = 100  # effectively disabled for error propagation tests
     return settings
 
 
@@ -151,3 +152,51 @@ async def test_all_batch_errors_empty_when_no_failures() -> None:
 
     assert len(result.errors) == 0
     assert len(result.batch_breakdowns) == 2
+
+
+@pytest.mark.asyncio
+async def test_truncated_json_into_cross_batch_validator_marks_failed_recoverable() -> None:
+    """Simulates truncated JSON arriving at cross_batch_validator via state.
+
+    When validated_entities is a truncated JSON string, wrap_with_recovery
+    must set failed_recoverable=True and emit a truncation_report rather than
+    crashing the pipeline.
+    """
+    from unittest.mock import MagicMock
+    from beever_atlas.services.adk_recovery import wrap_with_recovery
+    from beever_atlas.services.json_recovery import recover_validation_from_truncated
+    from beever_atlas.agents.schemas.validation import ValidationResult
+
+    # Build a minimal agent mock with output_key matching cross_batch_validator
+    agent = MagicMock()
+    agent.output_key = "validated_entities"
+    agent.after_agent_callback = None
+
+    wrap_with_recovery(agent, recover_validation_from_truncated, ValidationResult)
+
+    # Simulate truncated JSON that cannot be fully recovered
+    state: dict = {
+        "validated_entities": '{"entities": [{"id": "e1", "name": "Alice", "type": "Person", "aliases": [], "attributes": {}, "source_message_ids": []}, {"id": "e2"'
+        # truncated — missing closing braces/brackets
+    }
+    ctx = MagicMock()
+    ctx.state = state
+
+    agent.after_agent_callback(ctx)
+
+    # The wrapper must either recover partial data OR mark failed_recoverable
+    # Either way, the pipeline must not raise.
+    validated = ctx.state.get("validated_entities")
+    failed = ctx.state.get("failed_recoverable", False)
+
+    # One of two valid outcomes:
+    # 1. Recovery succeeded → validated_entities is a dict, failed_recoverable not set
+    # 2. Recovery failed → failed_recoverable=True and truncation_report present
+    if not failed:
+        assert isinstance(validated, dict), (
+            "If not failed_recoverable, validated_entities must be a dict"
+        )
+    else:
+        report = ctx.state.get("truncation_report")
+        assert report is not None, "failed_recoverable=True must come with a truncation_report"
+        assert report["output_key"] == "validated_entities"

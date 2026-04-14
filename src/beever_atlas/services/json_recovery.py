@@ -235,6 +235,57 @@ def recover_entities_from_truncated(text: str) -> dict | None:
     return {"entities": entities, "relationships": relationships}
 
 
+def recover_validation_from_truncated(text: str) -> dict | None:
+    """Recover a ``ValidationResult``-shaped response that may be truncated.
+
+    Expects ``{"entities": [...], "relationships": [...], "merges": [...]}``.
+    Returns a dict with whatever complete objects were found, or ``None``.
+
+    Args:
+        text: Raw LLM output, possibly truncated mid-JSON.
+
+    Returns:
+        A dict with ``entities``, ``relationships``, and ``merges`` keys,
+        or ``None`` if nothing could be recovered.
+    """
+    result, report = recover_truncated_json_with_report(text)
+    if result is None:
+        logger.warning(
+            "json_recovery: could not recover any validation result from truncated JSON"
+        )
+        return None
+
+    if not isinstance(result, dict):
+        logger.warning(
+            "json_recovery: expected dict at top level, got %s", type(result).__name__
+        )
+        return None
+
+    entities = result.get("entities", [])
+    relationships = result.get("relationships", [])
+    merges = result.get("merges", [])
+    if not isinstance(entities, list):
+        entities = []
+    if not isinstance(relationships, list):
+        relationships = []
+    if not isinstance(merges, list):
+        merges = []
+
+    total = len(entities) + len(relationships) + len(merges)
+    estimated_lost = max(report.estimated_lost, 1 if report.last_boundary_offset > 0 else 0)
+    if total > 0 or report.estimated_lost > 0:
+        logger.warning(
+            "json_recovery: truncated validation result recovered=%d lost_estimate=%d "
+            "raw_bytes=%d last_boundary_offset=%d",
+            total,
+            estimated_lost,
+            report.raw_bytes,
+            report.last_boundary_offset,
+        )
+
+    return {"entities": entities, "relationships": relationships, "merges": merges}
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
