@@ -1,5 +1,6 @@
 {
   "title": "Getting Started",
+  "icon": "Rocket",
   "root": true,
   "pages": [
     "index",

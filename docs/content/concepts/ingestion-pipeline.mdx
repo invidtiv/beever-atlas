@@ -7,6 +7,8 @@ description: How Beever Atlas transforms raw messages into structured knowledge 
 
 The ingestion pipeline is the heart of Beever Atlas — it transforms raw messages from Slack, Discord, and Teams into structured knowledge that populates both memory systems. Every message passes through **6 stages** before becoming part of your team's knowledge base.
 
+<AutoTOC />
+
 ## Pipeline Overview
 
 ```mermaid
@@ -244,31 +246,40 @@ Creates the 3-tier hierarchy:
 
 ### Wiki Structure
 
-```
-Channel Wiki
-├── Overview (from Tier 0 summary)
-├── Topics (from Tier 1 clusters)
-│   ├── Authentication
-│   │   ├── Summary
-│   │   ├── Key Facts
-│   │   ├── Related Decisions
-│   │   └── People Involved
-│   └── Deployment
-│       ├── Summary
-│       └── Key Facts
-└── Entities (from Neo4j)
-    ├── People
-    │   └── Alice Chen
-    │       ├── Role
-    │       ├── Projects
-    │       └── Decisions
-    └── Decisions
-        └── JWT Authentication
-            ├── Summary
-            ├── Status
-            ├── Rationale
-            └── Related Entities
-```
+<Files>
+  <Folder name="Channel Wiki" defaultOpen>
+    <File name="Overview (from Tier 0 summary)" />
+    <Folder name="Topics (from Tier 1 clusters)" defaultOpen>
+      <Folder name="Authentication" defaultOpen>
+        <File name="Summary" />
+        <File name="Key Facts" />
+        <File name="Related Decisions" />
+        <File name="People Involved" />
+      </Folder>
+      <Folder name="Deployment">
+        <File name="Summary" />
+        <File name="Key Facts" />
+      </Folder>
+    </Folder>
+    <Folder name="Entities (from Neo4j)" defaultOpen>
+      <Folder name="People">
+        <Folder name="Alice Chen">
+          <File name="Role" />
+          <File name="Projects" />
+          <File name="Decisions" />
+        </Folder>
+      </Folder>
+      <Folder name="Decisions">
+        <Folder name="JWT Authentication">
+          <File name="Summary" />
+          <File name="Status" />
+          <File name="Rationale" />
+          <File name="Related Entities" />
+        </Folder>
+      </Folder>
+    </Folder>
+  </Folder>
+</Files>
 
 ### Wiki Dirty Flag
 

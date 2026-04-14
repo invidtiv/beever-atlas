@@ -8,6 +8,8 @@ description: Learn how to write and run tests for Beever Atlas
 
 This guide covers how to write, run, and understand tests in Beever Atlas.
 
+<AutoTOC />
+
 ## Test Framework
 
 Beever Atlas uses **pytest** as its testing framework with these plugins:
@@ -40,18 +42,20 @@ uv run pytest --cov=beever_atlas --cov-report=html
 
 Tests are organized by module:
 
-```
-tests/
-├── conftest.py              # Shared fixtures
-├── test_adapters.py         # Adapter tests
-├── test_services.py         # Service tests
-├── test_config.py           # Configuration tests
-├── test_health.py           # Health endpoint tests
-├── agents/                  # Agent tests
-│   ├── query/               # Query agent tests
-│   └── citations/           # Citation tests
-└── api/                     # API endpoint tests
-```
+<Files>
+  <Folder name="tests" defaultOpen>
+    <File name="conftest.py" />
+    <File name="test_adapters.py" />
+    <File name="test_services.py" />
+    <File name="test_config.py" />
+    <File name="test_health.py" />
+    <Folder name="agents" defaultOpen>
+      <Folder name="query" />
+      <Folder name="citations" />
+    </Folder>
+    <Folder name="api" />
+  </Folder>
+</Files>
 
 ## Test Categories
 

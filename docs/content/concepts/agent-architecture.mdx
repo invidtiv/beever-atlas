@@ -7,6 +7,8 @@ description: How Google ADK agents orchestrate ingestion, queries, and wiki gene
 
 Beever Atlas uses **Google ADK (Agent Development Kit)** to orchestrate complex multi-stage processes. Each major function — ingestion, querying, wiki generation — is implemented as a hierarchy of specialized agents that collaborate to produce results.
 
+<AutoTOC />
+
 ## Why Agent-Based Architecture?
 
 Traditional monolithic systems are brittle: one component failure can break the entire pipeline. Agent-based architecture provides:
@@ -58,8 +60,8 @@ graph TB
 
 ## Ingestion Pipeline Agents
 
-### Preprocessor Agent
-
+<Accordions>
+<Accordion title="Preprocessor Agent">
 **Purpose**: Normalize messages from all platforms into a unified format
 
 **Responsibilities**:
@@ -72,9 +74,8 @@ graph TB
 **Tools**: None (local processing)
 
 **Model**: None (deterministic)
-
-### Fact Extractor Agent
-
+</Accordion>
+<Accordion title="Fact Extractor Agent">
 **Purpose**: Extract atomic facts from messages and media
 
 **LLM**: Gemini 2.0 Flash Lite (primary) → Claude Haiku (fallback)
@@ -95,9 +96,8 @@ graph TB
 - Quality score
 - Source message metadata
 - Extracted timestamp
-
-### Entity Extractor Agent
-
+</Accordion>
+<Accordion title="Entity Extractor Agent">
 **Purpose**: Extract entities and relationships from messages
 
 **LLM**: Gemini 2.0 Flash Lite (primary) → Claude Haiku (fallback)
@@ -117,9 +117,8 @@ graph TB
 - Entity type, name, properties
 - Relationship type, context, confidence
 - Aliases for deduplication
-
-### Embedder Agent
-
+</Accordion>
+<Accordion title="Embedder Agent">
 **Purpose**: Generate embeddings for semantic search
 
 **Model**: Jina v4 (2048-dim)
@@ -132,9 +131,8 @@ graph TB
 **Fallback**: If Jina unavailable, queue for backfill and continue with BM25-only
 
 **Output**: Named vectors attached to facts in Weaviate
-
-### Cross-Batch Validator Agent
-
+</Accordion>
+<Accordion title="Cross-Batch Validator Agent">
 **Purpose**: Resolve entities and validate relationships across message batches
 
 **Responsibilities**:
@@ -146,9 +144,8 @@ graph TB
 **Model**: Gemini 2.0 Flash Lite
 
 **Output**: Consolidated entity mappings
-
-### Persister Agent
-
+</Accordion>
+<Accordion title="Persister Agent">
 **Purpose**: Write facts and entities to memory systems via outbox pattern
 
 **Responsibilities**:
@@ -163,11 +160,13 @@ graph TB
 - `mark_write_intent_status` → MongoDB
 
 **Model**: None (database operations)
+</Accordion>
+</Accordions>
 
 ## Query Pipeline Agents
 
-### Query Router Agent
-
+<Accordions>
+<Accordion title="Query Router Agent">
 **Purpose**: Decompose complex questions and route to appropriate memory systems
 
 **LLM**: Gemini 2.0 Flash Lite
@@ -181,9 +180,8 @@ graph TB
 **Output**: Query plan with routed sub-queries
 
 **Fallback**: Regex fast-path classifier if LLM unavailable
-
-### Decomposer Agent
-
+</Accordion>
+<Accordion title="Decomposer Agent">
 **Purpose**: Break complex questions into focused sub-queries
 
 **LLM**: Gemini 2.0 Flash Lite
@@ -194,9 +192,8 @@ graph TB
 - Parallelizable focused queries
 
 **Output**: Internal and external sub-queries
-
-### Semantic Agent
-
+</Accordion>
+<Accordion title="Semantic Agent">
 **Purpose**: Retrieve relevant facts from Weaviate
 
 **Tools**:
@@ -211,9 +208,8 @@ graph TB
 - detail → Tier 2 directly (embedding search)
 
 **Output**: Ranked list of relevant facts with citations
-
-### Graph Agent
-
+</Accordion>
+<Accordion title="Graph Agent">
 **Purpose**: Traverse Neo4j for entity relationships
 
 **Tools**:
@@ -228,9 +224,8 @@ graph TB
 4. Fetch full fact text and citations
 
 **Output**: Graph paths + enriched memory content
-
-### Response Agent
-
+</Accordion>
+<Accordion title="Response Agent">
 **Purpose**: Generate grounded answer from retrieved context
 
 **LLM**: Gemini 2.0 Flash (primary) → Claude Sonnet (fallback)
@@ -247,11 +242,13 @@ graph TB
 - Citations to source messages
 - Confidence score
 - Missing information warnings
+</Accordion>
+</Accordions>
 
 ## Wiki Service Agents
 
-### Consolidation Agent
-
+<Accordions>
+<Accordion title="Consolidation Agent">
 **Purpose**: Manage cluster building and wiki refresh
 
 **Sub-agents**:
@@ -270,9 +267,8 @@ graph TB
 - Mark wiki dirty
 
 **Model**: Gemini 2.0 Flash Lite
-
-### Cluster Assigner Agent
-
+</Accordion>
+<Accordion title="Cluster Assigner Agent">
 **Purpose**: Assign facts to topic clusters
 
 **Algorithm**:
@@ -284,9 +280,8 @@ graph TB
 3. Promote seeds with 3+ members to clusters
 
 **Output**: Updated cluster assignments
-
-### Wiki Builder Agent
-
+</Accordion>
+<Accordion title="Wiki Builder Agent">
 **Purpose**: Generate wiki pages from clusters and entities
 
 **LLM**: Gemini 2.0 Flash
@@ -298,6 +293,8 @@ graph TB
 - Create cross-references
 
 **Output**: Structured wiki content in Markdown
+</Accordion>
+</Accordions>
 
 ## Agent Communication
 

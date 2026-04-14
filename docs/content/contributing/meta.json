@@ -1,1 +1,6 @@
-{"title":"Contributing","root":true,"pages":["index","development-setup","architecture-tour","testing-guide","code-of-conduct"]}
+{
+  "title": "Contributing",
+  "icon": "GitPullRequest",
+  "root": true,
+  "pages": ["index", "development-setup", "architecture-tour", "testing-guide", "code-of-conduct"]
+}

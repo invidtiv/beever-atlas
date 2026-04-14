@@ -34,13 +34,34 @@ Perform a hybrid search across memories and facts.
 
 ### Parameters
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `query` | string | Yes | Natural language search query |
-| `channel_id` | string | Yes | Channel to search (or `null` for all channels) |
-| `limit` | int | No | Max results (default: 10, max: 50) |
-| `filters` | object | No | Search filters (see below) |
-| `include_citations` | boolean | No | Include source citations (default: true) |
+<TypeTable
+  type={{
+    query: {
+      type: 'string',
+      description: 'Natural language search query',
+      required: true,
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Channel to search (or null for all channels)',
+      required: true,
+    },
+    limit: {
+      type: 'int',
+      description: 'Max results (max: 50)',
+      default: '10',
+    },
+    filters: {
+      type: 'object',
+      description: 'Search filters (see below)',
+    },
+    include_citations: {
+      type: 'boolean',
+      description: 'Include source citations',
+      default: 'true',
+    },
+  }}
+/>
 
 ### Filters
 
@@ -93,12 +114,26 @@ Perform a hybrid search across memories and facts.
 
 ### Response Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `results` | array | Search results with scores and highlights |
-| `total` | int | Total matching results |
-| `query_time_ms` | float | Query execution time |
-| `search_method` | string | `"vector" \| "keyword" \| "hybrid"` |
+<TypeTable
+  type={{
+    results: {
+      type: 'array',
+      description: 'Search results with scores and highlights',
+    },
+    total: {
+      type: 'int',
+      description: 'Total matching results',
+    },
+    query_time_ms: {
+      type: 'float',
+      description: 'Query execution time',
+    },
+    search_method: {
+      type: 'string',
+      description: '"vector" | "keyword" | "hybrid"',
+    },
+  }}
+/>
 
 ## Search Methods
 

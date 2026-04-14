@@ -7,6 +7,8 @@ description: How Beever Atlas handles failures gracefully and maintains availabi
 
 Beever Atlas depends on 6 external services (Weaviate, Neo4j, MongoDB, Gemini, Jina, Tavily). A critical design principle is that **any component failure must degrade gracefully** — not cause total system failure.
 
+<AutoTOC />
+
 ## Dependency Health Registry
 
 Each external dependency has a **circuit breaker** with three states:
@@ -315,25 +317,28 @@ GET /api/health
 
 ### User Experience During Failures
 
-**Neo4j down**:
+<Accordions>
+<Accordion title="Neo4j down">
 - ✅ Factual queries work
 - ❌ Relational queries fail with clear message
 - ⚠️ Wiki entity pages show "temporarily unavailable"
-
-**Gemini down**:
+</Accordion>
+<Accordion title="Gemini down">
 - ✅ Queries work (fallback to Claude)
 - ⚠️ Ingestion pauses (messages queued)
 - ✅ Wiki serves cached content
-
-**Weaviate down**:
+</Accordion>
+<Accordion title="Weaviate down">
 - ❌ Ingestion paused
 - ⚠️ Queries return cached wiki only
 - ❌ No new content until recovery
-
-**MongoDB down**:
+</Accordion>
+<Accordion title="MongoDB down">
 - ❌ Full system offline
 - ❌ No ingestion or queries
 - 🚨 Critical alert
+</Accordion>
+</Accordions>
 
 ### Recovery Time Objectives
 

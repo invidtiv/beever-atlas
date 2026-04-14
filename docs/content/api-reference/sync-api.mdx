@@ -24,10 +24,20 @@ Trigger synchronization for a channel.
 
 ### Parameters
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel to sync |
-| `force` | boolean | No | Force full re-sync (default: false) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel to sync',
+      required: true,
+    },
+    force: {
+      type: 'boolean',
+      description: 'Force full re-sync',
+      default: 'false',
+    },
+  }}
+/>
 
 ### Response
 
@@ -47,10 +57,19 @@ Get sync status for a channel.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
-| `job_id` | string | No | Specific sync job ID |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+    job_id: {
+      type: 'string',
+      description: 'Specific sync job ID',
+    },
+  }}
+/>
 
 ### Response
 
@@ -92,10 +111,20 @@ Get sync history for a channel.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
-| `limit` | int | No | Max results (default: 10) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+    limit: {
+      type: 'int',
+      description: 'Max results',
+      default: '10',
+    },
+  }}
+/>
 
 ### Response
 

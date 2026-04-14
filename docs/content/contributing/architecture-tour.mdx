@@ -8,25 +8,29 @@ description: Explore the Beever Atlas codebase structure and module organization
 
 This guide walks you through the Beever Atlas codebase structure, explaining the purpose of each module and how they work together.
 
+<AutoTOC />
+
 ## Project Structure
 
-```
-beever-atlas/
-├── src/beever_atlas/          # Main Python package
-│   ├── adapters/              # Platform adapters (Slack, Discord, Teams)
-│   ├── agents/                # Google ADK agents for extraction and routing
-│   ├── api/                   # FastAPI route handlers
-│   ├── infra/                 # Infrastructure (config, health, logging)
-│   ├── llm/                   # LLM provider abstraction
-│   ├── models/                # Pydantic data models
-│   ├── retrieval/             # Hybrid search and retrieval
-│   ├── services/              # Business logic layer
-│   ├── stores/                # Data store clients (Weaviate, Neo4j, MongoDB)
-│   └── wiki/                  # Wiki generation engine
-├── bot/                       # TypeScript bot service
-├── tests/                     # Test suite
-└── docker-compose.yml         # Infrastructure services
-```
+<Files>
+  <Folder name="beever-atlas" defaultOpen>
+    <Folder name="src/beever_atlas" defaultOpen>
+      <Folder name="adapters" />
+      <Folder name="agents" />
+      <Folder name="api" />
+      <Folder name="infra" />
+      <Folder name="llm" />
+      <Folder name="models" />
+      <Folder name="retrieval" />
+      <Folder name="services" />
+      <Folder name="stores" />
+      <Folder name="wiki" />
+    </Folder>
+    <Folder name="bot" />
+    <Folder name="tests" />
+    <File name="docker-compose.yml" />
+  </Folder>
+</Files>
 
 ## Core Modules
 
@@ -34,14 +38,15 @@ beever-atlas/
 
 Platform adapters provide a unified interface for fetching messages from different platforms.
 
-```
-adapters/
-├── __init__.py
-├── base.py           # BaseAdapter abstract class + data models
-├── mock.py           # Mock adapter for testing
-├── bridge.py         # Chat SDK bridge integration
-└── file_adapter.py   # File content extraction
-```
+<Files>
+  <Folder name="adapters" defaultOpen>
+    <File name="__init__.py" />
+    <File name="base.py" />
+    <File name="mock.py" />
+    <File name="bridge.py" />
+    <File name="file_adapter.py" />
+  </Folder>
+</Files>
 
 **Key Types:**
 - `BaseAdapter`: Abstract interface for all platforms
@@ -58,18 +63,22 @@ adapters/
 
 Google ADK (Agent Development Kit) agents for specialized tasks.
 
-```
-agents/
-├── __init__.py
-├── extraction/       # Content extraction agents
-│   ├── file_extractor.py
-│   └── message_extractor.py
-├── routing/          # Query routing agents
-│   └── query_router.py
-└── wiki/             # Wiki generation agents
-    ├── wiki_builder.py
-    └── wiki_compiler.py
-```
+<Files>
+  <Folder name="agents" defaultOpen>
+    <File name="__init__.py" />
+    <Folder name="extraction" defaultOpen>
+      <File name="file_extractor.py" />
+      <File name="message_extractor.py" />
+    </Folder>
+    <Folder name="routing" defaultOpen>
+      <File name="query_router.py" />
+    </Folder>
+    <Folder name="wiki" defaultOpen>
+      <File name="wiki_builder.py" />
+      <File name="wiki_compiler.py" />
+    </Folder>
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Extract structured data from unstructured content
@@ -81,18 +90,20 @@ agents/
 
 FastAPI route handlers organized by feature.
 
-```
-api/
-├── __init__.py
-├── mcp.py            # Model Context Protocol server
-├── channels.py       # Channel CRUD operations
-├── connections.py    # Platform connection management
-├── sync.py           # Sync job management
-├── ask.py            # Question answering endpoints
-├── search.py         # Search endpoints
-└── internal/         # Internal APIs
-    └── connections.py
-```
+<Files>
+  <Folder name="api" defaultOpen>
+    <File name="__init__.py" />
+    <File name="mcp.py" />
+    <File name="channels.py" />
+    <File name="connections.py" />
+    <File name="sync.py" />
+    <File name="ask.py" />
+    <File name="search.py" />
+    <Folder name="internal" defaultOpen>
+      <File name="connections.py" />
+    </Folder>
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Expose HTTP endpoints for all features
@@ -104,14 +115,15 @@ api/
 
 Infrastructure services that support the application.
 
-```
-infra/
-├── __init__.py
-├── config.py         # Configuration management
-├── health.py         # Health check endpoints
-├── logging.py        # Logging configuration
-└── crypto.py         # Encryption utilities
-```
+<Files>
+  <Folder name="infra" defaultOpen>
+    <File name="__init__.py" />
+    <File name="config.py" />
+    <File name="health.py" />
+    <File name="logging.py" />
+    <File name="crypto.py" />
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Load and validate environment configuration
@@ -123,14 +135,15 @@ infra/
 
 LLM provider abstraction for multiple AI services.
 
-```
-llm/
-├── __init__.py
-├── provider.py       # Base provider interface
-├── litellm_provider.py
-├── model_resolver.py # Model name resolution
-└── schemas.py        # LLM request/response schemas
-```
+<Files>
+  <Folder name="llm" defaultOpen>
+    <File name="__init__.py" />
+    <File name="provider.py" />
+    <File name="litellm_provider.py" />
+    <File name="model_resolver.py" />
+    <File name="schemas.py" />
+  </Folder>
+</Files>
 
 **Supported Providers:**
 - Anthropic Claude
@@ -148,15 +161,16 @@ llm/
 
 Pydantic models for type safety and validation.
 
-```
-models/
-├── __init__.py
-├── platform_connection.py  # Platform connection data
-├── channel.py              # Channel metadata
-├── message.py              # Message representations
-├── sync_job.py             # Sync job tracking
-└── llm_request.py          # LLM request/response models
-```
+<Files>
+  <Folder name="models" defaultOpen>
+    <File name="__init__.py" />
+    <File name="platform_connection.py" />
+    <File name="channel.py" />
+    <File name="message.py" />
+    <File name="sync_job.py" />
+    <File name="llm_request.py" />
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Define data schemas for the entire application
@@ -168,14 +182,15 @@ models/
 
 Hybrid semantic + graph search implementation.
 
-```
-retrieval/
-├── __init__.py
-├── hybrid_search.py  # Combined vector + graph search
-├── vector_search.py  # Weaviate vector operations
-├── graph_search.py   # Neo4j graph operations
-└── query_optimizer.py # Query optimization
-```
+<Files>
+  <Folder name="retrieval" defaultOpen>
+    <File name="__init__.py" />
+    <File name="hybrid_search.py" />
+    <File name="vector_search.py" />
+    <File name="graph_search.py" />
+    <File name="query_optimizer.py" />
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Implement hybrid search combining vector and graph
@@ -187,16 +202,17 @@ retrieval/
 
 Business logic layer that coordinates between modules.
 
-```
-services/
-├── __init__.py
-├── chat_history.py       # Chat history management
-├── file_processor.py     # File content extraction
-├── sync_runner.py        # Sync job orchestration
-├── query_service.py      # Query processing
-├── citation_service.py   # Citation generation
-└── platform_store.py     # Platform data persistence
-```
+<Files>
+  <Folder name="services" defaultOpen>
+    <File name="__init__.py" />
+    <File name="chat_history.py" />
+    <File name="file_processor.py" />
+    <File name="sync_runner.py" />
+    <File name="query_service.py" />
+    <File name="citation_service.py" />
+    <File name="platform_store.py" />
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Implement core business logic
@@ -208,15 +224,16 @@ services/
 
 Data store clients for persistence layers.
 
-```
-stores/
-├── __init__.py
-├── weaviate.py       # Vector database client
-├── neo4j.py          # Graph database client
-├── mongodb.py        # Document database client
-├── redis.py          # Cache client
-└── platform.py       # Platform data store interface
-```
+<Files>
+  <Folder name="stores" defaultOpen>
+    <File name="__init__.py" />
+    <File name="weaviate.py" />
+    <File name="neo4j.py" />
+    <File name="mongodb.py" />
+    <File name="redis.py" />
+    <File name="platform.py" />
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Provide low-level database operations
@@ -228,14 +245,15 @@ stores/
 
 Wiki generation engine for creating documentation.
 
-```
-wiki/
-├── __init__.py
-├── builder.py        # Wiki content generation
-├── compiler.py       # Wiki compilation and formatting
-├── cache.py          # Wiki version caching
-└── templates.py      # Wiki templates
-```
+<Files>
+  <Folder name="wiki" defaultOpen>
+    <File name="__init__.py" />
+    <File name="builder.py" />
+    <File name="compiler.py" />
+    <File name="cache.py" />
+    <File name="templates.py" />
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Generate structured wiki content from conversations
@@ -247,19 +265,21 @@ wiki/
 
 The `bot/` directory contains the TypeScript bot service.
 
-```
-bot/
-├── src/
-│   ├── index.ts           # Bot entry point
-│   ├── chat-manager.ts    # Chat SDK wrapper
-│   ├── formatter.ts       # Slack Block Kit formatting
-│   ├── sse-client.ts      # SSE streaming client
-│   ├── webhook-buffer.ts  # Webhook buffering during transitions
-│   ├── bridge.ts          # Backend bridge endpoints
-│   └── slack-mrkdwn.ts    # Slack markdown conversion
-├── package.json
-└── tsconfig.json
-```
+<Files>
+  <Folder name="bot" defaultOpen>
+    <Folder name="src" defaultOpen>
+      <File name="index.ts" />
+      <File name="chat-manager.ts" />
+      <File name="formatter.ts" />
+      <File name="sse-client.ts" />
+      <File name="webhook-buffer.ts" />
+      <File name="bridge.ts" />
+      <File name="slack-mrkdwn.ts" />
+    </Folder>
+    <File name="package.json" />
+    <File name="tsconfig.json" />
+  </Folder>
+</Files>
 
 **Responsibilities:**
 - Handle platform webhooks (Slack, Discord, Teams)
@@ -372,16 +392,18 @@ class Settings(BaseSettings):
 
 ## Testing Strategy
 
-```
-tests/
-├── conftest.py          # Shared fixtures
-├── test_adapters.py     # Adapter tests
-├── test_services.py     # Service tests
-├── agents/              # Agent tests
-│   ├── query/
-│   └── citations/
-└── api/                 # API endpoint tests
-```
+<Files>
+  <Folder name="tests" defaultOpen>
+    <File name="conftest.py" />
+    <File name="test_adapters.py" />
+    <File name="test_services.py" />
+    <Folder name="agents" defaultOpen>
+      <Folder name="query" />
+      <Folder name="citations" />
+    </Folder>
+    <Folder name="api" />
+  </Folder>
+</Files>
 
 **Testing Principles:**
 - Mock external services (Slack, Discord, LLMs)

@@ -15,9 +15,15 @@ Get the wiki navigation structure for a channel.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -75,10 +81,20 @@ Get a specific wiki page content.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `page_id` | string | Yes | Page ID (`"overview"`, `"people"`, `"topic-xyz"`) |
-| `channel_id` | string | Yes | Channel identifier |
+<TypeTable
+  type={{
+    page_id: {
+      type: 'string',
+      description: 'Page ID ("overview", "people", "topic-xyz")',
+      required: true,
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -139,10 +155,20 @@ List all wiki versions for a channel.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
-| `limit` | int | No | Max versions (default: 10) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+    limit: {
+      type: 'int',
+      description: 'Max versions',
+      default: '10',
+    },
+  }}
+/>
 
 ### Response
 
@@ -167,10 +193,20 @@ Get a specific wiki version snapshot.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `version_number` | int | Yes | Version number |
-| `channel_id` | string | Yes | Channel identifier |
+<TypeTable
+  type={{
+    version_number: {
+      type: 'int',
+      description: 'Version number',
+      required: true,
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -197,10 +233,19 @@ Get recent wiki generation activity.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | No | Filter by channel |
-| `limit` | int | No | Max results (default: 20) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Filter by channel',
+    },
+    limit: {
+      type: 'int',
+      description: 'Max results',
+      default: '20',
+    },
+  }}
+/>
 
 ### Response
 
@@ -225,9 +270,15 @@ Get wiki generation sync history.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -253,9 +304,15 @@ Get wiki generation status for a channel.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 

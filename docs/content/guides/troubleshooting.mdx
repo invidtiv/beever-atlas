@@ -6,6 +6,8 @@ description: Common issues and solutions for Beever Atlas deployment and usage
 
 This guide covers common issues and their solutions when deploying and using Beever Atlas.
 
+<AutoTOC />
+
 ## Quick Diagnostics
 
 Start here if something isn't working:
@@ -24,10 +26,8 @@ docker-compose logs -f bot
 
 ## Common Issues
 
-<Tabs items={['Bot Returns 503', 'Wiki Not Generating', 'Weaviate Connection Errors', 'Neo4j Connection Errors', 'Missing API Keys', 'Sync Failures', 'Docker Issues', 'Performance Issues']}>
-
-### Bot Returns 503
-
+<Accordions>
+<Accordion title="Bot Returns 503">
 **Symptoms**:
 - Bot responds with 503 errors
 - Messages not syncing
@@ -65,9 +65,8 @@ docker-compose logs -f bot
 backend                Up      0.0.0.0:8000->8000/tcp
 bot                    Up
 ```
-
-### Wiki Not Generating
-
+</Accordion>
+<Accordion title="Wiki Not Generating">
 **Symptoms**:
 - Channel sync completes but wiki is empty
 - No topics or facts visible
@@ -99,9 +98,8 @@ bot                    Up
    ```
 
 **Expected**: Sync status should show `facts_extracted > 0`.
-
-### Weaviate Connection Errors
-
+</Accordion>
+<Accordion title="Weaviate Connection Errors">
 **Symptoms**:
 - "Connection refused" errors
 - "Weaviate not ready" in health check
@@ -132,9 +130,8 @@ bot                    Up
    # Verify services on same network
    docker network inspect beever-atlas_default
    ```
-
-### Neo4j Connection Errors
-
+</Accordion>
+<Accordion title="Neo4j Connection Errors">
 **Symptoms**:
 - "Failed to connect to Neo4j"
 - Graph queries fail
@@ -166,9 +163,8 @@ bot                    Up
    NEO4J_URI=bolt://neo4j:7687  # container-to-container
    NEO4J_URI=bolt://localhost:7687  # local
    ```
-
-### Missing API Key Errors
-
+</Accordion>
+<Accordion title="Missing API Key Errors">
 **Symptoms**:
 - "API key not configured"
 - LLM calls fail
@@ -202,9 +198,8 @@ bot                    Up
    curl -H "Authorization: Bearer $JINA_API_KEY" \
      https://api.jina.ai/v1/embeddings
    ```
-
-### Sync Failures
-
+</Accordion>
+<Accordion title="Sync Failures">
 **Symptoms**:
 - Sync stops midway
 - "Batch processing failed"
@@ -234,9 +229,8 @@ bot                    Up
    ```bash
    docker-compose logs backend | tail -100
    ```
-
-### Docker Issues
-
+</Accordion>
+<Accordion title="Docker Issues">
 **Symptoms**:
 - Containers won't start
 - "Port already in use"
@@ -277,9 +271,8 @@ bot                    Up
    # Check Docker has enough resources
    docker info
    ```
-
-### Performance Issues
-
+</Accordion>
+<Accordion title="Performance Issues">
 **Symptoms**:
 - Slow sync times
 - High latency queries
@@ -315,8 +308,8 @@ bot                    Up
    # Slow query logs
    docker-compose logs neo4j | grep "slow"
    ```
-
-</Tabs>
+</Accordion>
+</Accordions>
 
 ## Diagnostic Commands
 
