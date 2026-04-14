@@ -8,6 +8,8 @@ COPY . .
 # VITE_API_URL must be set at build time (Vite bakes env vars into the bundle)
 ARG VITE_API_URL=http://localhost:8000
 ENV VITE_API_URL=${VITE_API_URL}
+ARG VITE_BEEVER_API_KEY=
+ENV VITE_BEEVER_API_KEY=${VITE_BEEVER_API_KEY}
 
 RUN npm run build
 

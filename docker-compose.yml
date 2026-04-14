@@ -32,6 +32,7 @@ services:
       context: ./web
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        VITE_BEEVER_API_KEY: ${VITE_BEEVER_API_KEY:-}
     ports: ["3000:80"]
     depends_on:
       - beever-atlas
