@@ -29,15 +29,38 @@ Get overall system statistics.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `total_facts` | int | Total atomic facts across all channels |
-| `total_entities` | int | Total knowledge graph entities |
-| `total_channels` | int | Total connected channels |
-| `total_decisions` | int | Total decisions extracted |
-| `wiki_pages` | int | Total wiki pages generated |
-| `total_messages` | int | Total messages indexed |
-| `total_authors` | int | Total unique authors |
+<TypeTable
+  type={{
+    total_facts: {
+      type: 'int',
+      description: 'Total atomic facts across all channels',
+    },
+    total_entities: {
+      type: 'int',
+      description: 'Total knowledge graph entities',
+    },
+    total_channels: {
+      type: 'int',
+      description: 'Total connected channels',
+    },
+    total_decisions: {
+      type: 'int',
+      description: 'Total decisions extracted',
+    },
+    wiki_pages: {
+      type: 'int',
+      description: 'Total wiki pages generated',
+    },
+    total_messages: {
+      type: 'int',
+      description: 'Total messages indexed',
+    },
+    total_authors: {
+      type: 'int',
+      description: 'Total unique authors',
+    },
+  }}
+/>
 
 ## GET /api/stats/health
 
@@ -82,9 +105,15 @@ Get statistics for a specific channel.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -116,9 +145,15 @@ Get recent system activity.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `limit` | int | No | Max results (default: 20) |
+<TypeTable
+  type={{
+    limit: {
+      type: 'int',
+      description: 'Max results',
+      default: '20',
+    },
+  }}
+/>
 
 ### Response
 
@@ -193,10 +228,19 @@ Get top contributors across all channels.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `limit` | int | No | Max results (default: 10) |
-| `channel_id` | string | No | Filter by channel |
+<TypeTable
+  type={{
+    limit: {
+      type: 'int',
+      description: 'Max results',
+      default: '10',
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Filter by channel',
+    },
+  }}
+/>
 
 ### Response
 
@@ -219,10 +263,19 @@ Get most discussed topics.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `limit` | int | No | Max results (default: 10) |
-| `channel_id` | string | No | Filter by channel |
+<TypeTable
+  type={{
+    limit: {
+      type: 'int',
+      description: 'Max results',
+      default: '10',
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Filter by channel',
+    },
+  }}
+/>
 
 ### Response
 
@@ -243,11 +296,23 @@ Export statistics as CSV or JSON.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `format` | string | No | `csv` or `json` (default: `json`) |
-| `channel_id` | string | No | Filter by channel |
-| `since` | string | No | ISO 8601 start date |
+<TypeTable
+  type={{
+    format: {
+      type: 'string',
+      description: 'csv or json',
+      default: 'json',
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Filter by channel',
+    },
+    since: {
+      type: 'string',
+      description: 'ISO 8601 start date',
+    },
+  }}
+/>
 
 ### Response
 

@@ -17,11 +17,24 @@ Search the channel knowledge base using BM25 + vector hybrid retrieval.
 
 **Parameters:**
 
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `channel_id` | string | Yes | The channel to search |
-| `query` | string | Yes | Natural language search query |
-| `include_graph` | boolean | No | If True, traverses knowledge graph for entity relationships (slower but richer) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'The channel to search',
+      required: true,
+    },
+    query: {
+      type: 'string',
+      description: 'Natural language search query',
+      required: true,
+    },
+    include_graph: {
+      type: 'boolean',
+      description: 'If True, traverses knowledge graph for entity relationships (slower but richer)',
+    },
+  }}
+/>
 
 **Returns:**
 
@@ -70,10 +83,19 @@ Retrieve a compiled wiki page from the MongoDB wiki cache.
 
 **Parameters:**
 
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `channel_id` | string | Yes | The channel whose wiki to retrieve |
-| `page_type` | string | No | Page type: `overview`, `faq`, `decisions`, `people`, `glossary`, `activity`, `topics` |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'The channel whose wiki to retrieve',
+      required: true,
+    },
+    page_type: {
+      type: 'string',
+      description: 'Page type: overview, faq, decisions, people, glossary, activity, topics',
+    },
+  }}
+/>
 
 **Returns:**
 
@@ -115,10 +137,20 @@ Uses Neo4j Person node rankings based on fact count and decision involvement.
 
 **Parameters:**
 
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel scope for expertise search |
-| `topic` | string | Yes | Topic or keyword to rank experts against |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel scope for expertise search',
+      required: true,
+    },
+    topic: {
+      type: 'string',
+      description: 'Topic or keyword to rank experts against',
+      required: true,
+    },
+  }}
+/>
 
 **Returns:**
 

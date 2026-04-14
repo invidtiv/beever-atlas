@@ -41,9 +41,15 @@ Get connection details.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `connection_id` | string | Yes | Connection UUID |
+<TypeTable
+  type={{
+    connection_id: {
+      type: 'string',
+      description: 'Connection UUID',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -83,11 +89,25 @@ Create a new platform connection.
 
 ### Parameters
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `platform` | string | Yes | Platform name (`slack`, `discord`) |
-| `name` | string | Yes | Connection display name |
-| `credentials` | object | Yes | Platform-specific credentials |
+<TypeTable
+  type={{
+    platform: {
+      type: 'string',
+      description: 'Platform name (slack, discord)',
+      required: true,
+    },
+    name: {
+      type: 'string',
+      description: 'Connection display name',
+      required: true,
+    },
+    credentials: {
+      type: 'object',
+      description: 'Platform-specific credentials',
+      required: true,
+    },
+  }}
+/>
 
 ### Slack Credentials
 
@@ -142,9 +162,15 @@ Delete a connection.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `connection_id` | string | Yes | Connection UUID |
+<TypeTable
+  type={{
+    connection_id: {
+      type: 'string',
+      description: 'Connection UUID',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -156,9 +182,15 @@ Validate connection credentials.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `connection_id` | string | Yes | Connection UUID |
+<TypeTable
+  type={{
+    connection_id: {
+      type: 'string',
+      description: 'Connection UUID',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -191,9 +223,15 @@ Get channels for a connection.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `connection_id` | string | Yes | Connection UUID |
+<TypeTable
+  type={{
+    connection_id: {
+      type: 'string',
+      description: 'Connection UUID',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -224,10 +262,18 @@ Update which channels to sync.
 
 ### Parameters
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `channel_ids` | string[] | No | Specific channels to sync |
-| `sync_all` | boolean | No | Sync all public channels |
+<TypeTable
+  type={{
+    channel_ids: {
+      type: 'string[]',
+      description: 'Specific channels to sync',
+    },
+    sync_all: {
+      type: 'boolean',
+      description: 'Sync all public channels',
+    },
+  }}
+/>
 
 ## Connection Errors
 

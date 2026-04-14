@@ -15,12 +15,28 @@ List all entities in the knowledge graph.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
-| `type` | string | No | Filter by entity type |
-| `status` | string | No | Filter by status (`active`, `pending`) |
-| `limit` | int | No | Max results (default: 50, max: 200) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+    type: {
+      type: 'string',
+      description: 'Filter by entity type',
+    },
+    status: {
+      type: 'string',
+      description: 'Filter by status (active, pending)',
+    },
+    limit: {
+      type: 'int',
+      description: 'Max results (max: 200)',
+      default: '50',
+    },
+  }}
+/>
 
 ### Entity Types
 
@@ -61,9 +77,15 @@ Get a specific entity by ID.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `entity_id` | string | Yes | Entity UUID |
+<TypeTable
+  type={{
+    entity_id: {
+      type: 'string',
+      description: 'Entity UUID',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -95,11 +117,25 @@ Get entities connected to a specific entity.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `entity_id` | string | Yes | Entity UUID |
-| `depth` | int | No | Traversal depth (default: 1, max: 3) |
-| `limit` | int | No | Max neighbors (default: 50) |
+<TypeTable
+  type={{
+    entity_id: {
+      type: 'string',
+      description: 'Entity UUID',
+      required: true,
+    },
+    depth: {
+      type: 'int',
+      description: 'Traversal depth (max: 3)',
+      default: '1',
+    },
+    limit: {
+      type: 'int',
+      description: 'Max neighbors',
+      default: '50',
+    },
+  }}
+/>
 
 ### Response
 
@@ -138,13 +174,32 @@ List all relationships in the knowledge graph.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
-| `type` | string | No | Filter by relationship type |
-| `source` | string | No | Filter by source entity name |
-| `target` | string | No | Filter by target entity name |
-| `limit` | int | No | Max results (default: 50) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+    type: {
+      type: 'string',
+      description: 'Filter by relationship type',
+    },
+    source: {
+      type: 'string',
+      description: 'Filter by source entity name',
+    },
+    target: {
+      type: 'string',
+      description: 'Filter by target entity name',
+    },
+    limit: {
+      type: 'int',
+      description: 'Max results',
+      default: '50',
+    },
+  }}
+/>
 
 ### Relationship Types
 
@@ -181,10 +236,19 @@ List all decisions with metadata.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Channel identifier |
-| `status` | string | No | Filter by status |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+      required: true,
+    },
+    status: {
+      type: 'string',
+      description: 'Filter by status',
+    },
+  }}
+/>
 
 ### Response
 
@@ -207,9 +271,15 @@ Get an entity knowledge card (cross-channel aggregation).
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `entity_name` | string | Yes | Entity name (URL-encoded) |
+<TypeTable
+  type={{
+    entity_name: {
+      type: 'string',
+      description: 'Entity name (URL-encoded)',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -249,11 +319,23 @@ List entity cards with filters.
 
 ### Query Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | No | Filter by channel |
-| `entity_type` | string | No | Filter by entity type |
-| `limit` | int | No | Max results (default: 20) |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Filter by channel',
+    },
+    entity_type: {
+      type: 'string',
+      description: 'Filter by entity type',
+    },
+    limit: {
+      type: 'int',
+      description: 'Max results',
+      default: '20',
+    },
+  }}
+/>
 
 ### Response
 

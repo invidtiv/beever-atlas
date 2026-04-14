@@ -25,11 +25,25 @@ All other variables have sensible defaults. For production, review the sections 
 
 ### Core Application
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `BEEVER_API_URL` | string | `http://localhost:8000` | Public URL of the backend API |
-| `CORS_ORIGINS` | string | `http://localhost:5173,http://localhost:3000` | Comma-separated list of allowed CORS origins |
-| `BEEVER_API_KEY` | string | `""` | Optional API key for authentication |
+<TypeTable
+  type={{
+    BEEVER_API_URL: {
+      type: 'string',
+      description: 'Public URL of the backend API',
+      default: 'http://localhost:8000',
+    },
+    CORS_ORIGINS: {
+      type: 'string',
+      description: 'Comma-separated list of allowed CORS origins',
+      default: 'http://localhost:5173,http://localhost:3000',
+    },
+    BEEVER_API_KEY: {
+      type: 'string',
+      description: 'Optional API key for authentication',
+      default: '""',
+    },
+  }}
+/>
 
 **Example**:
 ```bash
@@ -41,18 +55,42 @@ CORS_ORIGINS=https://docs.example.com,https://app.example.com
 
 #### Weaviate (Vector Database)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `WEAVIATE_URL` | string | `http://localhost:8080` | Weaviate server URL |
-| `WEAVIATE_API_KEY` | string | `""` | Weaviate API key (if authentication enabled) |
-| `WEAVIATE_HYBRID_ALPHA` | float | `0.6` | Hybrid search alpha (0.0 = BM25, 1.0 = vector) |
+<TypeTable
+  type={{
+    WEAVIATE_URL: {
+      type: 'string',
+      description: 'Weaviate server URL',
+      default: 'http://localhost:8080',
+    },
+    WEAVIATE_API_KEY: {
+      type: 'string',
+      description: 'Weaviate API key (if authentication enabled)',
+      default: '""',
+    },
+    WEAVIATE_HYBRID_ALPHA: {
+      type: 'float',
+      description: 'Hybrid search alpha (0.0 = BM25, 1.0 = vector)',
+      default: '0.6',
+    },
+  }}
+/>
 
 #### Neo4j (Graph Database)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `NEO4J_URI` | string | `bolt://localhost:7687` | Neo4j Bolt connection URI |
-| `NEO4J_AUTH` | string | `neo4j/beever_atlas_dev` | Authentication in format `user/password` |
+<TypeTable
+  type={{
+    NEO4J_URI: {
+      type: 'string',
+      description: 'Neo4j Bolt connection URI',
+      default: 'bolt://localhost:7687',
+    },
+    NEO4J_AUTH: {
+      type: 'string',
+      description: 'Authentication in format user/password',
+      default: 'neo4j/beever_atlas_dev',
+    },
+  }}
+/>
 
 **Example**:
 ```bash
@@ -62,176 +100,448 @@ NEO4J_AUTH=neo4j/strong-password-here
 
 #### NebulaGraph (Alternative Graph DB)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `GRAPH_BACKEND` | string | `"neo4j"` | Graph database: `neo4j`, `nebula`, or `none` |
-| `NEBULA_HOSTS` | string | `"127.0.0.1:9669"` | NebulaGraph hosts |
-| `NEBULA_USER` | string | `"root"` | NebulaGraph username |
-| `NEBULA_PASSWORD` | string | `"nebula"` | NebulaGraph password |
-| `NEBULA_SPACE` | string | `"beever_atlas"` | NebulaGraph space name |
+<TypeTable
+  type={{
+    GRAPH_BACKEND: {
+      type: 'string',
+      description: 'Graph database: neo4j, nebula, or none',
+      default: '"neo4j"',
+    },
+    NEBULA_HOSTS: {
+      type: 'string',
+      description: 'NebulaGraph hosts',
+      default: '"127.0.0.1:9669"',
+    },
+    NEBULA_USER: {
+      type: 'string',
+      description: 'NebulaGraph username',
+      default: '"root"',
+    },
+    NEBULA_PASSWORD: {
+      type: 'string',
+      description: 'NebulaGraph password',
+      default: '"nebula"',
+    },
+    NEBULA_SPACE: {
+      type: 'string',
+      description: 'NebulaGraph space name',
+      default: '"beever_atlas"',
+    },
+  }}
+/>
 
 #### MongoDB (Document Store)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `MONGODB_URI` | string | `mongodb://localhost:27017/beever_atlas` | MongoDB connection URI |
+<TypeTable
+  type={{
+    MONGODB_URI: {
+      type: 'string',
+      description: 'MongoDB connection URI',
+      default: 'mongodb://localhost:27017/beever_atlas',
+    },
+  }}
+/>
 
 #### Redis (Cache)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `REDIS_URL` | string | `redis://localhost:6379` | Redis server URL |
+<TypeTable
+  type={{
+    REDIS_URL: {
+      type: 'string',
+      description: 'Redis server URL',
+      default: 'redis://localhost:6379',
+    },
+  }}
+/>
 
 ### LLM Providers
 
 #### Google (Gemini)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `GOOGLE_API_KEY` | string | `""` | Google AI API key for Gemini |
-| `LLM_FAST_MODEL` | string | `"gemini-2.5-flash"` | Model for fast operations |
-| `LLM_QUALITY_MODEL` | string | `"gemini-2.5-flash"` | Model for quality operations |
-| `USE_BATCH_API` | bool | `false` | Enable Gemini Batch API |
-| `BATCH_MAX_WAIT_SECONDS` | int | `3600` | Max wait time for batch completion |
-| `BATCH_MAX_PROMPT_TOKENS` | int | `6000` | Max tokens per batch request |
-| `BATCH_TIME_WINDOW_SECONDS` | int | `600` | Time window for batching requests |
+<TypeTable
+  type={{
+    GOOGLE_API_KEY: {
+      type: 'string',
+      description: 'Google AI API key for Gemini',
+      default: '""',
+    },
+    LLM_FAST_MODEL: {
+      type: 'string',
+      description: 'Model for fast operations',
+      default: '"gemini-2.5-flash"',
+    },
+    LLM_QUALITY_MODEL: {
+      type: 'string',
+      description: 'Model for quality operations',
+      default: '"gemini-2.5-flash"',
+    },
+    USE_BATCH_API: {
+      type: 'bool',
+      description: 'Enable Gemini Batch API',
+      default: 'false',
+    },
+    BATCH_MAX_WAIT_SECONDS: {
+      type: 'int',
+      description: 'Max wait time for batch completion',
+      default: '3600',
+    },
+    BATCH_MAX_PROMPT_TOKENS: {
+      type: 'int',
+      description: 'Max tokens per batch request',
+      default: '6000',
+    },
+    BATCH_TIME_WINDOW_SECONDS: {
+      type: 'int',
+      description: 'Time window for batching requests',
+      default: '600',
+    },
+  }}
+/>
 
 #### Jina (Embeddings)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `JINA_API_KEY` | string | `""` | Jina AI API key for embeddings |
-| `JINA_API_URL` | string | `"https://api.jina.ai/v1/embeddings"` | Jina embeddings endpoint |
-| `JINA_MODEL` | string | `"jina-embeddings-v4"` | Embedding model to use |
-| `JINA_DIMENSIONS` | int | `2048` | Embedding dimensions |
+<TypeTable
+  type={{
+    JINA_API_KEY: {
+      type: 'string',
+      description: 'Jina AI API key for embeddings',
+      default: '""',
+    },
+    JINA_API_URL: {
+      type: 'string',
+      description: 'Jina embeddings endpoint',
+      default: '"https://api.jina.ai/v1/embeddings"',
+    },
+    JINA_MODEL: {
+      type: 'string',
+      description: 'Embedding model to use',
+      default: '"jina-embeddings-v4"',
+    },
+    JINA_DIMENSIONS: {
+      type: 'int',
+      description: 'Embedding dimensions',
+      default: '2048',
+    },
+  }}
+/>
 
 #### Tavily (Search)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `TAVILY_API_KEY` | string | `""` | Tavily API key for web search |
+<TypeTable
+  type={{
+    TAVILY_API_KEY: {
+      type: 'string',
+      description: 'Tavily API key for web search',
+      default: '""',
+    },
+  }}
+/>
 
 #### Ollama (Local Models)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `OLLAMA_ENABLED` | bool | `false` | Enable Ollama for local models |
-| `OLLAMA_API_BASE` | string | `"http://localhost:11434"` | Ollama API endpoint |
+<TypeTable
+  type={{
+    OLLAMA_ENABLED: {
+      type: 'bool',
+      description: 'Enable Ollama for local models',
+      default: 'false',
+    },
+    OLLAMA_API_BASE: {
+      type: 'string',
+      description: 'Ollama API endpoint',
+      default: '"http://localhost:11434"',
+    },
+  }}
+/>
 
 #### OpenAI (Multimedia)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `OPENAI_API_KEY` | string | `""` | OpenAI API key for Whisper/vision |
+<TypeTable
+  type={{
+    OPENAI_API_KEY: {
+      type: 'string',
+      description: 'OpenAI API key for Whisper/vision',
+      default: '""',
+    },
+  }}
+/>
 
 ### Pipeline Settings
 
 #### Sync Configuration
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `SYNC_BATCH_SIZE` | int | `10` | Messages per batch for processing |
-| `SYNC_MAX_MESSAGES` | int | `1000` | Max messages to sync per channel |
-| `SYNC_BATCH_TIMEOUT_SECONDS` | int | `600` | Timeout per batch |
+<TypeTable
+  type={{
+    SYNC_BATCH_SIZE: {
+      type: 'int',
+      description: 'Messages per batch for processing',
+      default: '10',
+    },
+    SYNC_MAX_MESSAGES: {
+      type: 'int',
+      description: 'Max messages to sync per channel',
+      default: '1000',
+    },
+    SYNC_BATCH_TIMEOUT_SECONDS: {
+      type: 'int',
+      description: 'Timeout per batch',
+      default: '600',
+    },
+  }}
+/>
 
 #### Quality Thresholds
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `QUALITY_THRESHOLD` | float | `0.5` | Minimum confidence for fact extraction |
-| `ENTITY_THRESHOLD` | float | `0.6` | Minimum confidence for entity extraction |
-| `MAX_FACTS_PER_MESSAGE` | int | `2` | Maximum facts to extract per message |
+<TypeTable
+  type={{
+    QUALITY_THRESHOLD: {
+      type: 'float',
+      description: 'Minimum confidence for fact extraction',
+      default: '0.5',
+    },
+    ENTITY_THRESHOLD: {
+      type: 'float',
+      description: 'Minimum confidence for entity extraction',
+      default: '0.6',
+    },
+    MAX_FACTS_PER_MESSAGE: {
+      type: 'int',
+      description: 'Maximum facts to extract per message',
+      default: '2',
+    },
+  }}
+/>
 
 #### Entity Processing
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ENTITY_SIMILARITY_THRESHOLD` | float | `0.85` | Similarity threshold for entity merging |
-| `MERGE_REJECTION_TTL_DAYS` | int | `30` | Days to remember rejected merges |
-| `COREF_ENABLED` | bool | `true` | Enable coreference resolution |
-| `COREF_HISTORY_LIMIT` | int | `20` | Messages to consider for coreference |
+<TypeTable
+  type={{
+    ENTITY_SIMILARITY_THRESHOLD: {
+      type: 'float',
+      description: 'Similarity threshold for entity merging',
+      default: '0.85',
+    },
+    MERGE_REJECTION_TTL_DAYS: {
+      type: 'int',
+      description: 'Days to remember rejected merges',
+      default: '30',
+    },
+    COREF_ENABLED: {
+      type: 'bool',
+      description: 'Enable coreference resolution',
+      default: 'true',
+    },
+    COREF_HISTORY_LIMIT: {
+      type: 'int',
+      description: 'Messages to consider for coreference',
+      default: '20',
+    },
+  }}
+/>
 
 #### Consolidation
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `CLUSTER_SIMILARITY_THRESHOLD` | float | `0.6` | Similarity threshold for clustering |
-| `CLUSTER_MERGE_THRESHOLD` | float | `0.85` | Similarity threshold for merging clusters |
-| `CLUSTER_MAX_SIZE` | int | `100` | Maximum facts per cluster |
-| `CONSOLIDATION_ENABLED` | bool | `true` | Enable consolidation pipeline |
-| `CONSOLIDATION_MAX_CONCURRENT_LLM` | int | `5` | Max concurrent LLM calls during consolidation |
+<TypeTable
+  type={{
+    CLUSTER_SIMILARITY_THRESHOLD: {
+      type: 'float',
+      description: 'Similarity threshold for clustering',
+      default: '0.6',
+    },
+    CLUSTER_MERGE_THRESHOLD: {
+      type: 'float',
+      description: 'Similarity threshold for merging clusters',
+      default: '0.85',
+    },
+    CLUSTER_MAX_SIZE: {
+      type: 'int',
+      description: 'Maximum facts per cluster',
+      default: '100',
+    },
+    CONSOLIDATION_ENABLED: {
+      type: 'bool',
+      description: 'Enable consolidation pipeline',
+      default: 'true',
+    },
+    CONSOLIDATION_MAX_CONCURRENT_LLM: {
+      type: 'int',
+      description: 'Max concurrent LLM calls during consolidation',
+      default: '5',
+    },
+  }}
+/>
 
 #### Semantic Search
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `SEMANTIC_SEARCH_MIN_SIMILARITY` | float | `0.7` | Minimum similarity for semantic search |
+<TypeTable
+  type={{
+    SEMANTIC_SEARCH_MIN_SIMILARITY: {
+      type: 'float',
+      description: 'Minimum similarity for semantic search',
+      default: '0.7',
+    },
+  }}
+/>
 
 #### Fact Lifecycle
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `CONTRADICTION_CONFIDENCE_THRESHOLD` | float | `0.8` | Confidence threshold for flagging contradictions |
-| `CONTRADICTION_FLAG_THRESHOLD` | float | `0.5` | Threshold to mark a fact as contradicted |
+<TypeTable
+  type={{
+    CONTRADICTION_CONFIDENCE_THRESHOLD: {
+      type: 'float',
+      description: 'Confidence threshold for flagging contradictions',
+      default: '0.8',
+    },
+    CONTRADICTION_FLAG_THRESHOLD: {
+      type: 'float',
+      description: 'Threshold to mark a fact as contradicted',
+      default: '0.5',
+    },
+  }}
+/>
 
 #### Thread Context
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `CROSS_BATCH_THREAD_CONTEXT_ENABLED` | bool | `true` | Enable cross-batch thread context |
-| `THREAD_CONTEXT_MAX_LENGTH` | int | `200` | Max messages in thread context |
+<TypeTable
+  type={{
+    CROSS_BATCH_THREAD_CONTEXT_ENABLED: {
+      type: 'bool',
+      description: 'Enable cross-batch thread context',
+      default: 'true',
+    },
+    THREAD_CONTEXT_MAX_LENGTH: {
+      type: 'int',
+      description: 'Max messages in thread context',
+      default: '200',
+    },
+  }}
+/>
 
 #### Orphan Handling
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ORPHAN_GRACE_PERIOD_DAYS` | int | `7` | Grace period for soft orphan handling |
+<TypeTable
+  type={{
+    ORPHAN_GRACE_PERIOD_DAYS: {
+      type: 'int',
+      description: 'Grace period for soft orphan handling',
+      default: '7',
+    },
+  }}
+/>
 
 #### Reconciler
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `RECONCILER_INTERVAL_MINUTES` | int | `15` | Reconciler run interval in minutes |
+<TypeTable
+  type={{
+    RECONCILER_INTERVAL_MINUTES: {
+      type: 'int',
+      description: 'Reconciler run interval in minutes',
+      default: '15',
+    },
+  }}
+/>
 
 ### Integrations
 
 #### Platform Adapter
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `ADAPTER_TYPE` | string | `"slack"` | Platform: `slack`, `discord`, `teams`, `mock` |
-| `ADAPTER_MOCK` | bool | `false` | Use mock adapter for testing |
+<TypeTable
+  type={{
+    ADAPTER_TYPE: {
+      type: 'string',
+      description: 'Platform: slack, discord, teams, mock',
+      default: '"slack"',
+    },
+    ADAPTER_MOCK: {
+      type: 'bool',
+      description: 'Use mock adapter for testing',
+      default: 'false',
+    },
+  }}
+/>
 
 #### Bot Service (Bridge)
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `BRIDGE_URL` | string | `"http://localhost:3001"` | Bot service bridge URL |
-| `BRIDGE_API_KEY` | string | `""` | Bridge authentication key |
+<TypeTable
+  type={{
+    BRIDGE_URL: {
+      type: 'string',
+      description: 'Bot service bridge URL',
+      default: '"http://localhost:3001"',
+    },
+    BRIDGE_API_KEY: {
+      type: 'string',
+      description: 'Bridge authentication key',
+      default: '""',
+    },
+  }}
+/>
 
 #### Slack Configuration
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `SLACK_BOT_TOKEN` | string | `""` | Slack bot token (starts with `xoxb-`) |
-| `SLACK_APP_TOKEN` | string | `""` | Slack app token for Socket Mode |
+<TypeTable
+  type={{
+    SLACK_BOT_TOKEN: {
+      type: 'string',
+      description: 'Slack bot token (starts with xoxb-)',
+      default: '""',
+    },
+    SLACK_APP_TOKEN: {
+      type: 'string',
+      description: 'Slack app token for Socket Mode',
+      default: '""',
+    },
+  }}
+/>
 
 ### QA Agent
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `QA_CONFIDENCE_THRESHOLD` | float | `0.4` | Minimum confidence for QA answers |
-| `EXTERNAL_MCP_SERVERS` | string | `""` | Comma-separated external MCP servers |
-| `QA_NEW_PROMPT` | bool | `false` | Use new QA prompt format |
-| `QA_ONBOARDING_LENGTH_MONITOR` | bool | `true` | Warn on long onboarding responses |
-| `QA_HISTORY_NEGATIVE_FILTER` | bool | `false` | Filter out negative QA history |
-| `QA_ADK_STREAMING_SSE` | bool | `false` | Enable SSE streaming for QA |
+<TypeTable
+  type={{
+    QA_CONFIDENCE_THRESHOLD: {
+      type: 'float',
+      description: 'Minimum confidence for QA answers',
+      default: '0.4',
+    },
+    EXTERNAL_MCP_SERVERS: {
+      type: 'string',
+      description: 'Comma-separated external MCP servers',
+      default: '""',
+    },
+    QA_NEW_PROMPT: {
+      type: 'bool',
+      description: 'Use new QA prompt format',
+      default: 'false',
+    },
+    QA_ONBOARDING_LENGTH_MONITOR: {
+      type: 'bool',
+      description: 'Warn on long onboarding responses',
+      default: 'true',
+    },
+    QA_HISTORY_NEGATIVE_FILTER: {
+      type: 'bool',
+      description: 'Filter out negative QA history',
+      default: 'false',
+    },
+    QA_ADK_STREAMING_SSE: {
+      type: 'bool',
+      description: 'Enable SSE streaming for QA',
+      default: 'false',
+    },
+  }}
+/>
 
 ### Security
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `CREDENTIAL_MASTER_KEY` | string | `""` | Master key for credential encryption |
+<TypeTable
+  type={{
+    CREDENTIAL_MASTER_KEY: {
+      type: 'string',
+      description: 'Master key for credential encryption',
+      default: '""',
+    },
+  }}
+/>
 
 **Generate a secure key**:
 ```bash
@@ -242,52 +552,140 @@ openssl rand -base64 32
 
 #### Citation Registry
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `CITATION_REGISTRY_ENABLED` | bool | `true` | Enable enterprise citation architecture |
+<TypeTable
+  type={{
+    CITATION_REGISTRY_ENABLED: {
+      type: 'bool',
+      description: 'Enable enterprise citation architecture',
+      default: 'true',
+    },
+  }}
+/>
 
 #### LLM Structured Output
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `USE_LLM_STRUCTURED_OUTPUT` | bool | `true` | Enable schema-constrained decoding |
+<TypeTable
+  type={{
+    USE_LLM_STRUCTURED_OUTPUT: {
+      type: 'bool',
+      description: 'Enable schema-constrained decoding',
+      default: 'true',
+    },
+  }}
+/>
 
 #### File Import
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `FILE_IMPORT_STAGING_DIR` | string | `".omc/imports"` | Staging directory for imports |
-| `FILE_IMPORT_STAGING_TTL_SECONDS` | int | `3600` | TTL for staged files |
-| `FILE_IMPORT_MAX_ROWS` | int | `100000` | Max rows for tabular imports |
+<TypeTable
+  type={{
+    FILE_IMPORT_STAGING_DIR: {
+      type: 'string',
+      description: 'Staging directory for imports',
+      default: '".omc/imports"',
+    },
+    FILE_IMPORT_STAGING_TTL_SECONDS: {
+      type: 'int',
+      description: 'TTL for staged files',
+      default: '3600',
+    },
+    FILE_IMPORT_MAX_ROWS: {
+      type: 'int',
+      description: 'Max rows for tabular imports',
+      default: '100000',
+    },
+  }}
+/>
 
 #### Media Processing
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `MEDIA_MAX_FILE_SIZE_MB` | int | `20` | Max file size for media processing |
-| `MEDIA_VISION_TIMEOUT_SECONDS` | int | `180` | Timeout for vision processing |
-| `MEDIA_VISION_MODEL` | string | `"gemini-2.5-flash"` | Model for vision tasks |
-| `MEDIA_SUPPORTED_IMAGE_TYPES` | string | `"png,jpg,jpeg,gif,webp"` | Supported image types |
-| `MEDIA_SUPPORTED_DOC_TYPES` | string | `"pdf"` | Supported document types |
-| `MEDIA_DIGEST_ENABLED` | bool | `true` | Enable LLM-based media digest |
+<TypeTable
+  type={{
+    MEDIA_MAX_FILE_SIZE_MB: {
+      type: 'int',
+      description: 'Max file size for media processing',
+      default: '20',
+    },
+    MEDIA_VISION_TIMEOUT_SECONDS: {
+      type: 'int',
+      description: 'Timeout for vision processing',
+      default: '180',
+    },
+    MEDIA_VISION_MODEL: {
+      type: 'string',
+      description: 'Model for vision tasks',
+      default: '"gemini-2.5-flash"',
+    },
+    MEDIA_SUPPORTED_IMAGE_TYPES: {
+      type: 'string',
+      description: 'Supported image types',
+      default: '"png,jpg,jpeg,gif,webp"',
+    },
+    MEDIA_SUPPORTED_DOC_TYPES: {
+      type: 'string',
+      description: 'Supported document types',
+      default: '"pdf"',
+    },
+    MEDIA_DIGEST_ENABLED: {
+      type: 'bool',
+      description: 'Enable LLM-based media digest',
+      default: 'true',
+    },
+  }}
+/>
 
 #### PDF Processing
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `PDF_CHUNK_PAGES` | int | `4` | Pages per chunk for PDF extraction |
-| `PDF_MAX_PAGES` | int | `100` | Maximum pages to process |
-| `PDF_SUMMARIZE_LARGE_DOCS` | bool | `false` | Summarize large PDFs |
-| `PDF_LARGE_DOC_THRESHOLD` | int | `50` | Page threshold for large docs |
+<TypeTable
+  type={{
+    PDF_CHUNK_PAGES: {
+      type: 'int',
+      description: 'Pages per chunk for PDF extraction',
+      default: '4',
+    },
+    PDF_MAX_PAGES: {
+      type: 'int',
+      description: 'Maximum pages to process',
+      default: '100',
+    },
+    PDF_SUMMARIZE_LARGE_DOCS: {
+      type: 'bool',
+      description: 'Summarize large PDFs',
+      default: 'false',
+    },
+    PDF_LARGE_DOC_THRESHOLD: {
+      type: 'int',
+      description: 'Page threshold for large docs',
+      default: '50',
+    },
+  }}
+/>
 
 #### Multilingual
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `LANGUAGE_DETECTION_ENABLED` | bool | `false` | Enable language detection |
-| `DEFAULT_TARGET_LANGUAGE` | string | `"en"` | Default target language |
-| `SUPPORTED_LANGUAGES` | string | `"en,zh-HK,zh-TW,zh-CN,ja,ko,..."` | Supported BCP-47 languages |
-| `LANGUAGE_DETECTION_CONFIDENCE_THRESHOLD` | float | `0.6` | Confidence threshold for detection |
+<TypeTable
+  type={{
+    LANGUAGE_DETECTION_ENABLED: {
+      type: 'bool',
+      description: 'Enable language detection',
+      default: 'false',
+    },
+    DEFAULT_TARGET_LANGUAGE: {
+      type: 'string',
+      description: 'Default target language',
+      default: '"en"',
+    },
+    SUPPORTED_LANGUAGES: {
+      type: 'string',
+      description: 'Supported BCP-47 languages',
+      default: '"en,zh-HK,zh-TW,zh-CN,ja,ko,..."',
+    },
+    LANGUAGE_DETECTION_CONFIDENCE_THRESHOLD: {
+      type: 'float',
+      description: 'Confidence threshold for detection',
+      default: '0.6',
+    },
+  }}
+/>
 
 </Tabs>
 

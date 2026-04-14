@@ -1,5 +1,6 @@
 {
   "title": "Tutorials",
+  "icon": "GraduationCap",
   "root": true,
   "pages": [
     "first-channel-sync",

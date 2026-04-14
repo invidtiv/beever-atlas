@@ -22,39 +22,134 @@ A single extracted fact stored in Weaviate (Tier 2).
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique fact identifier (UUID v5) |
-| `memory_text` | string | The extracted fact text |
-| `quality_score` | float | Quality score 0.0-1.0 |
-| `tier` | string | Always `"atomic"` for facts |
-| `cluster_id` | string \| null | Parent topic cluster ID |
-| `channel_id` | string | Source channel identifier |
-| `platform` | string | Platform name (e.g., "slack") |
-| `author_id` | string | Author's platform user ID |
-| `author_name` | string | Author's display name |
-| `message_ts` | string | Message timestamp |
-| `thread_ts` | string \| null | Thread root timestamp |
-| `source_message_id` | string | Platform message ID |
-| `topic_tags` | string[] | Topic category tags |
-| `entity_tags` | string[] | Mentioned entity names |
-| `action_tags` | string[] | Action item keywords |
-| `importance` | string | `"low" \| "medium" \| "high"` |
-| `graph_entity_ids` | string[] | Linked graph entity IDs |
-| `source_media_urls` | string[] | URLs of attached media |
-| `source_media_names` | string[] | Filenames of attached media |
-| `source_link_urls` | string[] | URLs of linked resources |
-| `source_link_titles` | string[] | Titles of linked resources |
-| `source_link_descriptions` | string[] | Descriptions of linked resources |
-| `valid_at` | datetime \| null | When fact became valid |
-| `invalid_at` | datetime \| null | When fact became invalid |
-| `superseded_by` | string \| null | ID of fact that replaced this |
-| `supersedes` | string \| null | ID of fact this replaced |
-| `potential_contradiction` | boolean | Flagged for conflict review |
-| `text_vector` | float[] \| null | Embedding vector |
-| `fact_type` | string | `"decision" \| "opinion" \| "observation" \| "action_item" \| "question"` |
-| `thread_context_summary` | string | Thread deliberation summary |
-| `source_lang` | string | BCP-47 language tag (e.g., "en", "zh-HK") |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Unique fact identifier (UUID v5)',
+    },
+    memory_text: {
+      type: 'string',
+      description: 'The extracted fact text',
+    },
+    quality_score: {
+      type: 'float',
+      description: 'Quality score 0.0-1.0',
+    },
+    tier: {
+      type: 'string',
+      description: 'Always "atomic" for facts',
+    },
+    cluster_id: {
+      type: 'string | null',
+      description: 'Parent topic cluster ID',
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Source channel identifier',
+    },
+    platform: {
+      type: 'string',
+      description: 'Platform name (e.g., "slack")',
+    },
+    author_id: {
+      type: 'string',
+      description: "Author's platform user ID",
+    },
+    author_name: {
+      type: 'string',
+      description: "Author's display name",
+    },
+    message_ts: {
+      type: 'string',
+      description: 'Message timestamp',
+    },
+    thread_ts: {
+      type: 'string | null',
+      description: 'Thread root timestamp',
+    },
+    source_message_id: {
+      type: 'string',
+      description: 'Platform message ID',
+    },
+    topic_tags: {
+      type: 'string[]',
+      description: 'Topic category tags',
+    },
+    entity_tags: {
+      type: 'string[]',
+      description: 'Mentioned entity names',
+    },
+    action_tags: {
+      type: 'string[]',
+      description: 'Action item keywords',
+    },
+    importance: {
+      type: 'string',
+      description: '"low" | "medium" | "high"',
+    },
+    graph_entity_ids: {
+      type: 'string[]',
+      description: 'Linked graph entity IDs',
+    },
+    source_media_urls: {
+      type: 'string[]',
+      description: 'URLs of attached media',
+    },
+    source_media_names: {
+      type: 'string[]',
+      description: 'Filenames of attached media',
+    },
+    source_link_urls: {
+      type: 'string[]',
+      description: 'URLs of linked resources',
+    },
+    source_link_titles: {
+      type: 'string[]',
+      description: 'Titles of linked resources',
+    },
+    source_link_descriptions: {
+      type: 'string[]',
+      description: 'Descriptions of linked resources',
+    },
+    valid_at: {
+      type: 'datetime | null',
+      description: 'When fact became valid',
+    },
+    invalid_at: {
+      type: 'datetime | null',
+      description: 'When fact became invalid',
+    },
+    superseded_by: {
+      type: 'string | null',
+      description: 'ID of fact that replaced this',
+    },
+    supersedes: {
+      type: 'string | null',
+      description: 'ID of fact this replaced',
+    },
+    potential_contradiction: {
+      type: 'boolean',
+      description: 'Flagged for conflict review',
+    },
+    text_vector: {
+      type: 'float[] | null',
+      description: 'Embedding vector',
+    },
+    fact_type: {
+      type: 'string',
+      description: '"decision" | "opinion" | "observation" | "action_item" | "question"',
+    },
+    thread_context_summary: {
+      type: 'string',
+      description: 'Thread deliberation summary',
+    },
+    source_lang: {
+      type: 'string',
+      description: 'BCP-47 language tag (e.g., "en", "zh-HK")',
+    },
+  }}
+/>
 
 ### Example
 
@@ -90,41 +185,142 @@ A Tier 1 topic cluster grouping related atomic facts.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique cluster identifier |
-| `tier` | string | Always `"topic"` |
-| `channel_id` | string | Channel identifier |
-| `title` | string | Short descriptive name (5-10 words) |
-| `summary` | string | Narrative of what happened (2-3 sentences) |
-| `current_state` | string | Where things stand now (1-2 sentences) |
-| `open_questions` | string | Unresolved tensions/debates |
-| `impact_note` | string | Scope and significance |
-| `topic_tags` | string[] | Topic category tags |
-| `member_ids` | string[] | Member fact IDs |
-| `member_count` | int | Number of member facts |
-| `centroid_vector` | float[] \| null | Cluster center embedding |
-| `created_at` | datetime | Creation timestamp |
-| `updated_at` | datetime | Last update timestamp |
-| `key_entities` | object[] | Related entities `[{id, name, type}]` |
-| `key_relationships` | object[] | Key relationships `[{source, type, target, confidence}]` |
-| `date_range_start` | string | Earliest fact timestamp |
-| `date_range_end` | string | Latest fact timestamp |
-| `authors` | string[] | Contributors to this topic |
-| `media_refs` | string[] | Referenced media URLs |
-| `media_names` | string[] | Referenced media filenames |
-| `link_refs` | string[] | Referenced link URLs |
-| `high_importance_count` | int | Number of high-importance facts |
-| `related_cluster_ids` | string[] | Related topic clusters |
-| `staleness_score` | float | 0.0=fresh, 1.0=very stale |
-| `status` | string | `"active" \| "completed" \| "stale"` |
-| `fact_type_counts` | object | Counts by fact type `{decision: N, ...}` |
-| `key_facts` | object[] | Top facts with metadata |
-| `decisions` | object[] | Extracted decisions |
-| `people` | object[] | Involved people `[{name, role, entity_id}]` |
-| `technologies` | object[] | Technologies mentioned `[{name, category, champion}]` |
-| `projects` | object[] | Projects referenced `[{name, status, owner, blockers}]` |
-| `faq_candidates` | object[] | Q&A pairs `[{question, answer}]` |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Unique cluster identifier',
+    },
+    tier: {
+      type: 'string',
+      description: 'Always "topic"',
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+    },
+    title: {
+      type: 'string',
+      description: 'Short descriptive name (5-10 words)',
+    },
+    summary: {
+      type: 'string',
+      description: 'Narrative of what happened (2-3 sentences)',
+    },
+    current_state: {
+      type: 'string',
+      description: 'Where things stand now (1-2 sentences)',
+    },
+    open_questions: {
+      type: 'string',
+      description: 'Unresolved tensions/debates',
+    },
+    impact_note: {
+      type: 'string',
+      description: 'Scope and significance',
+    },
+    topic_tags: {
+      type: 'string[]',
+      description: 'Topic category tags',
+    },
+    member_ids: {
+      type: 'string[]',
+      description: 'Member fact IDs',
+    },
+    member_count: {
+      type: 'int',
+      description: 'Number of member facts',
+    },
+    centroid_vector: {
+      type: 'float[] | null',
+      description: 'Cluster center embedding',
+    },
+    created_at: {
+      type: 'datetime',
+      description: 'Creation timestamp',
+    },
+    updated_at: {
+      type: 'datetime',
+      description: 'Last update timestamp',
+    },
+    key_entities: {
+      type: 'object[]',
+      description: 'Related entities [{id, name, type}]',
+    },
+    key_relationships: {
+      type: 'object[]',
+      description: 'Key relationships [{source, type, target, confidence}]',
+    },
+    date_range_start: {
+      type: 'string',
+      description: 'Earliest fact timestamp',
+    },
+    date_range_end: {
+      type: 'string',
+      description: 'Latest fact timestamp',
+    },
+    authors: {
+      type: 'string[]',
+      description: 'Contributors to this topic',
+    },
+    media_refs: {
+      type: 'string[]',
+      description: 'Referenced media URLs',
+    },
+    media_names: {
+      type: 'string[]',
+      description: 'Referenced media filenames',
+    },
+    link_refs: {
+      type: 'string[]',
+      description: 'Referenced link URLs',
+    },
+    high_importance_count: {
+      type: 'int',
+      description: 'Number of high-importance facts',
+    },
+    related_cluster_ids: {
+      type: 'string[]',
+      description: 'Related topic clusters',
+    },
+    staleness_score: {
+      type: 'float',
+      description: '0.0=fresh, 1.0=very stale',
+    },
+    status: {
+      type: 'string',
+      description: '"active" | "completed" | "stale"',
+    },
+    fact_type_counts: {
+      type: 'object',
+      description: 'Counts by fact type {decision: N, ...}',
+    },
+    key_facts: {
+      type: 'object[]',
+      description: 'Top facts with metadata',
+    },
+    decisions: {
+      type: 'object[]',
+      description: 'Extracted decisions',
+    },
+    people: {
+      type: 'object[]',
+      description: 'Involved people [{name, role, entity_id}]',
+    },
+    technologies: {
+      type: 'object[]',
+      description: 'Technologies mentioned [{name, category, champion}]',
+    },
+    projects: {
+      type: 'object[]',
+      description: 'Projects referenced [{name, status, owner, blockers}]',
+    },
+    faq_candidates: {
+      type: 'object[]',
+      description: 'Q&A pairs [{question, answer}]',
+    },
+  }}
+/>
 
 ### Example
 
@@ -152,35 +348,118 @@ A Tier 0 channel-level summary consolidating all topic clusters.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique summary identifier |
-| `tier` | string | Always `"summary"` |
-| `channel_id` | string | Channel identifier |
-| `channel_name` | string | Resolved display name |
-| `text` | string | Overall narrative overview |
-| `description` | string | One-line channel purpose (max 200 chars) |
-| `themes` | string | Main knowledge areas and interrelations |
-| `momentum` | string | Active vs completed vs stale |
-| `team_dynamics` | string | Decision drivers, collaboration patterns |
-| `cluster_count` | int | Number of topic clusters |
-| `fact_count` | int | Total number of facts |
-| `updated_at` | datetime | Last update timestamp |
-| `key_decisions` | object[] | Top decisions |
-| `key_entities` | object[] | Top entities |
-| `key_topics` | object[] | Top topics with metadata |
-| `date_range_start` | string | Earliest content |
-| `date_range_end` | string | Latest content |
-| `media_count` | int | Total media references |
-| `author_count` | int | Unique contributors |
-| `worst_staleness` | float | Highest staleness in clusters |
-| `top_decisions` | object[] | Key decisions across all topics |
-| `top_people` | object[] | Key people by expertise |
-| `tech_stack` | object[] | Technologies referenced |
-| `active_projects` | object[] | Ongoing projects |
-| `glossary_terms` | object[] | Domain terminology |
-| `recent_activity_summary` | object | Activity metrics |
-| `topic_graph_edges` | object[] | Topic relationships |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Unique summary identifier',
+    },
+    tier: {
+      type: 'string',
+      description: 'Always "summary"',
+    },
+    channel_id: {
+      type: 'string',
+      description: 'Channel identifier',
+    },
+    channel_name: {
+      type: 'string',
+      description: 'Resolved display name',
+    },
+    text: {
+      type: 'string',
+      description: 'Overall narrative overview',
+    },
+    description: {
+      type: 'string',
+      description: 'One-line channel purpose (max 200 chars)',
+    },
+    themes: {
+      type: 'string',
+      description: 'Main knowledge areas and interrelations',
+    },
+    momentum: {
+      type: 'string',
+      description: 'Active vs completed vs stale',
+    },
+    team_dynamics: {
+      type: 'string',
+      description: 'Decision drivers, collaboration patterns',
+    },
+    cluster_count: {
+      type: 'int',
+      description: 'Number of topic clusters',
+    },
+    fact_count: {
+      type: 'int',
+      description: 'Total number of facts',
+    },
+    updated_at: {
+      type: 'datetime',
+      description: 'Last update timestamp',
+    },
+    key_decisions: {
+      type: 'object[]',
+      description: 'Top decisions',
+    },
+    key_entities: {
+      type: 'object[]',
+      description: 'Top entities',
+    },
+    key_topics: {
+      type: 'object[]',
+      description: 'Top topics with metadata',
+    },
+    date_range_start: {
+      type: 'string',
+      description: 'Earliest content',
+    },
+    date_range_end: {
+      type: 'string',
+      description: 'Latest content',
+    },
+    media_count: {
+      type: 'int',
+      description: 'Total media references',
+    },
+    author_count: {
+      type: 'int',
+      description: 'Unique contributors',
+    },
+    worst_staleness: {
+      type: 'float',
+      description: 'Highest staleness in clusters',
+    },
+    top_decisions: {
+      type: 'object[]',
+      description: 'Key decisions across all topics',
+    },
+    top_people: {
+      type: 'object[]',
+      description: 'Key people by expertise',
+    },
+    tech_stack: {
+      type: 'object[]',
+      description: 'Technologies referenced',
+    },
+    active_projects: {
+      type: 'object[]',
+      description: 'Ongoing projects',
+    },
+    glossary_terms: {
+      type: 'object[]',
+      description: 'Domain terminology',
+    },
+    recent_activity_summary: {
+      type: 'object',
+      description: 'Activity metrics',
+    },
+    topic_graph_edges: {
+      type: 'object[]',
+      description: 'Topic relationships',
+    },
+  }}
+/>
 
 ---
 
@@ -190,24 +469,74 @@ An entity node in the Neo4j knowledge graph.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique entity identifier |
-| `name` | string | Entity name |
-| `type` | string | `"Person" \| "Decision" \| "Project" \| "Technology" \| "Team" \| "Meeting"` |
-| `scope` | string | `"global" \| "channel"` |
-| `channel_id` | string \| null | Channel scope (if channel-scoped) |
-| `properties` | object | Additional entity properties |
-| `aliases` | string[] | Alternative names |
-| `status` | string | `"active" \| "pending"` |
-| `pending_since` | datetime \| null | When status became pending |
-| `name_vector` | float[] \| null | Name embedding for fuzzy matching |
-| `source_fact_ids` | string[] | Source facts |
-| `source_message_id` | string | Originating message |
-| `message_ts` | string | Message timestamp |
-| `source_lang` | string | BCP-47 language tag |
-| `created_at` | datetime | Creation timestamp |
-| `updated_at` | datetime | Last update timestamp |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Unique entity identifier',
+    },
+    name: {
+      type: 'string',
+      description: 'Entity name',
+    },
+    type: {
+      type: 'string',
+      description: '"Person" | "Decision" | "Project" | "Technology" | "Team" | "Meeting"',
+    },
+    scope: {
+      type: 'string',
+      description: '"global" | "channel"',
+    },
+    channel_id: {
+      type: 'string | null',
+      description: 'Channel scope (if channel-scoped)',
+    },
+    properties: {
+      type: 'object',
+      description: 'Additional entity properties',
+    },
+    aliases: {
+      type: 'string[]',
+      description: 'Alternative names',
+    },
+    status: {
+      type: 'string',
+      description: '"active" | "pending"',
+    },
+    pending_since: {
+      type: 'datetime | null',
+      description: 'When status became pending',
+    },
+    name_vector: {
+      type: 'float[] | null',
+      description: 'Name embedding for fuzzy matching',
+    },
+    source_fact_ids: {
+      type: 'string[]',
+      description: 'Source facts',
+    },
+    source_message_id: {
+      type: 'string',
+      description: 'Originating message',
+    },
+    message_ts: {
+      type: 'string',
+      description: 'Message timestamp',
+    },
+    source_lang: {
+      type: 'string',
+      description: 'BCP-47 language tag',
+    },
+    created_at: {
+      type: 'datetime',
+      description: 'Creation timestamp',
+    },
+    updated_at: {
+      type: 'datetime',
+      description: 'Last update timestamp',
+    },
+  }}
+/>
 
 ### Entity Types
 
@@ -226,19 +555,54 @@ A relationship edge in the Neo4j knowledge graph.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique relationship identifier |
-| `type` | string | Relationship type (see below) |
-| `source` | string | Source entity name |
-| `target` | string | Target entity name |
-| `confidence` | float | Confidence score 0.0-1.0 |
-| `valid_from` | string \| null | When relationship became valid |
-| `valid_until` | string \| null | When relationship became invalid |
-| `context` | string | Relationship context |
-| `source_message_id` | string | Originating message |
-| `source_fact_id` | string | Source fact |
-| `created_at` | datetime | Creation timestamp |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Unique relationship identifier',
+    },
+    type: {
+      type: 'string',
+      description: 'Relationship type (see below)',
+    },
+    source: {
+      type: 'string',
+      description: 'Source entity name',
+    },
+    target: {
+      type: 'string',
+      description: 'Target entity name',
+    },
+    confidence: {
+      type: 'float',
+      description: 'Confidence score 0.0-1.0',
+    },
+    valid_from: {
+      type: 'string | null',
+      description: 'When relationship became valid',
+    },
+    valid_until: {
+      type: 'string | null',
+      description: 'When relationship became invalid',
+    },
+    context: {
+      type: 'string',
+      description: 'Relationship context',
+    },
+    source_message_id: {
+      type: 'string',
+      description: 'Originating message',
+    },
+    source_fact_id: {
+      type: 'string',
+      description: 'Source fact',
+    },
+    created_at: {
+      type: 'datetime',
+      description: 'Creation timestamp',
+    },
+  }}
+/>
 
 ### Relationship Types
 
@@ -257,20 +621,58 @@ A generated wiki page with enhanced Markdown content.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Page ID (`"overview"`, `"people"`, `"topic-xyz"`) |
-| `slug` | string | URL slug |
-| `title` | string | Page title |
-| `page_type` | string | `"fixed" \| "topic" \| "sub-topic"` |
-| `parent_id` | string \| null | Parent page ID |
-| `section_number` | string | Section number (`"1"`, `"2.1"`, `"2.1.1"`) |
-| `content` | string | Enhanced Markdown content |
-| `summary` | string | 1-2 sentence summary |
-| `memory_count` | int | Number of source facts |
-| `last_updated` | datetime | Last update timestamp |
-| `citations` | WikiCitation[] | Source citations |
-| `children` | WikiPageRef[] | Child pages |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Page ID ("overview", "people", "topic-xyz")',
+    },
+    slug: {
+      type: 'string',
+      description: 'URL slug',
+    },
+    title: {
+      type: 'string',
+      description: 'Page title',
+    },
+    page_type: {
+      type: 'string',
+      description: '"fixed" | "topic" | "sub-topic"',
+    },
+    parent_id: {
+      type: 'string | null',
+      description: 'Parent page ID',
+    },
+    section_number: {
+      type: 'string',
+      description: 'Section number ("1", "2.1", "2.1.1")',
+    },
+    content: {
+      type: 'string',
+      description: 'Enhanced Markdown content',
+    },
+    summary: {
+      type: 'string',
+      description: '1-2 sentence summary',
+    },
+    memory_count: {
+      type: 'int',
+      description: 'Number of source facts',
+    },
+    last_updated: {
+      type: 'datetime',
+      description: 'Last update timestamp',
+    },
+    citations: {
+      type: 'WikiCitation[]',
+      description: 'Source citations',
+    },
+    children: {
+      type: 'WikiPageRef[]',
+      description: 'Child pages',
+    },
+  }}
+/>
 
 ### WikiPage Types
 
@@ -286,16 +688,42 @@ A source citation for wiki page content.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Citation reference (`"[1]"`, `"[2]"`) |
-| `author` | string | Message author |
-| `channel` | string | Channel name |
-| `timestamp` | string | Message timestamp |
-| `text_excerpt` | string | First 100 characters |
-| `permalink` | string | URL to original message |
-| `media_type` | string \| null | `"pdf" \| "image" \| "link" \| "video" \| "audio"` |
-| `media_name` | string \| null | Filename or domain |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Citation reference ("[1]", "[2]")',
+    },
+    author: {
+      type: 'string',
+      description: 'Message author',
+    },
+    channel: {
+      type: 'string',
+      description: 'Channel name',
+    },
+    timestamp: {
+      type: 'string',
+      description: 'Message timestamp',
+    },
+    text_excerpt: {
+      type: 'string',
+      description: 'First 100 characters',
+    },
+    permalink: {
+      type: 'string',
+      description: 'URL to original message',
+    },
+    media_type: {
+      type: 'string | null',
+      description: '"pdf" | "image" | "link" | "video" | "audio"',
+    },
+    media_name: {
+      type: 'string | null',
+      description: 'Filename or domain',
+    },
+  }}
+/>
 
 ---
 
@@ -305,23 +733,70 @@ Cross-channel aggregation of all knowledge about a single graph entity.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique card identifier |
-| `tier` | string | Always `"entity_card"` |
-| `entity_id` | string | Graph entity ID |
-| `entity_name` | string | Entity name |
-| `entity_type` | string | Entity type |
-| `channel_ids` | string[] | Channels where entity appears |
-| `cluster_ids` | string[] | Related topic clusters |
-| `fact_count` | int | Number of related facts |
-| `fact_type_breakdown` | object | Fact counts by type |
-| `key_facts` | string[] | Most important facts |
-| `related_entities` | object[] | Related entities |
-| `last_mentioned_at` | string | Latest mention timestamp |
-| `staleness_score` | float | 0.0=fresh, 1.0=stale |
-| `summary` | string | Entity summary |
-| `updated_at` | datetime | Last update timestamp |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Unique card identifier',
+    },
+    tier: {
+      type: 'string',
+      description: 'Always "entity_card"',
+    },
+    entity_id: {
+      type: 'string',
+      description: 'Graph entity ID',
+    },
+    entity_name: {
+      type: 'string',
+      description: 'Entity name',
+    },
+    entity_type: {
+      type: 'string',
+      description: 'Entity type',
+    },
+    channel_ids: {
+      type: 'string[]',
+      description: 'Channels where entity appears',
+    },
+    cluster_ids: {
+      type: 'string[]',
+      description: 'Related topic clusters',
+    },
+    fact_count: {
+      type: 'int',
+      description: 'Number of related facts',
+    },
+    fact_type_breakdown: {
+      type: 'object',
+      description: 'Fact counts by type',
+    },
+    key_facts: {
+      type: 'string[]',
+      description: 'Most important facts',
+    },
+    related_entities: {
+      type: 'object[]',
+      description: 'Related entities',
+    },
+    last_mentioned_at: {
+      type: 'string',
+      description: 'Latest mention timestamp',
+    },
+    staleness_score: {
+      type: 'float',
+      description: '0.0=fresh, 1.0=stale',
+    },
+    summary: {
+      type: 'string',
+      description: 'Entity summary',
+    },
+    updated_at: {
+      type: 'datetime',
+      description: 'Last update timestamp',
+    },
+  }}
+/>
 
 ---
 

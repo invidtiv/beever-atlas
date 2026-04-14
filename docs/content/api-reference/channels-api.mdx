@@ -31,15 +31,38 @@ List all channels across all connected platforms.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Platform channel ID |
-| `name` | string | Channel name |
-| `platform` | string | Platform name (`slack`, `discord`) |
-| `connected` | boolean | Connection status |
-| `last_sync` | string | Last sync timestamp (ISO 8601) |
-| `message_count` | int | Total messages indexed |
-| `fact_count` | int | Total facts extracted |
+<TypeTable
+  type={{
+    id: {
+      type: 'string',
+      description: 'Platform channel ID',
+    },
+    name: {
+      type: 'string',
+      description: 'Channel name',
+    },
+    platform: {
+      type: 'string',
+      description: 'Platform name (slack, discord)',
+    },
+    connected: {
+      type: 'boolean',
+      description: 'Connection status',
+    },
+    last_sync: {
+      type: 'string',
+      description: 'Last sync timestamp (ISO 8601)',
+    },
+    message_count: {
+      type: 'int',
+      description: 'Total messages indexed',
+    },
+    fact_count: {
+      type: 'int',
+      description: 'Total facts extracted',
+    },
+  }}
+/>
 
 ## `GET /api/channels/{channel_id}`
 
@@ -47,9 +70,15 @@ Get detailed information about a specific channel.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Platform channel ID |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Platform channel ID',
+      required: true,
+    },
+  }}
+/>
 
 ### Response
 
@@ -80,12 +109,28 @@ List messages from a channel with pagination.
 
 ### Parameters
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `channel_id` | string | Yes | Platform channel ID |
-| `limit` | int | No | Max results (default: 50, max: 200) |
-| `before` | string | No | Pagination cursor (message timestamp) |
-| `after` | string | No | Get messages after timestamp |
+<TypeTable
+  type={{
+    channel_id: {
+      type: 'string',
+      description: 'Platform channel ID',
+      required: true,
+    },
+    limit: {
+      type: 'int',
+      description: 'Max results (max: 200)',
+      default: '50',
+    },
+    before: {
+      type: 'string',
+      description: 'Pagination cursor (message timestamp)',
+    },
+    after: {
+      type: 'string',
+      description: 'Get messages after timestamp',
+    },
+  }}
+/>
 
 ### Response
 

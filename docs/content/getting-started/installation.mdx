@@ -118,58 +118,170 @@ Expected response:
 
 ### Core Application
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BEEVER_API_URL` | `http://localhost:8000` | Backend API URL |
-| `CORS_ORIGINS` | `http://localhost:5173` | Allowed CORS origins (comma-separated) |
-| `VITE_API_URL` | `http://localhost:8000` | Frontend API URL target |
+<TypeTable
+  type={{
+    BEEVER_API_URL: {
+      type: 'string',
+      description: 'Backend API URL',
+      default: 'http://localhost:8000',
+    },
+    CORS_ORIGINS: {
+      type: 'string',
+      description: 'Allowed CORS origins (comma-separated)',
+      default: 'http://localhost:5173',
+    },
+    VITE_API_URL: {
+      type: 'string',
+      description: 'Frontend API URL target',
+      default: 'http://localhost:8000',
+    },
+  }}
+/>
 
 ### Databases
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MONGODB_URI` | `mongodb://localhost:27017/beever_atlas` | MongoDB connection string |
-| `REDIS_URL` | `redis://localhost:6379` | Redis URL |
-| `WEAVIATE_URL` | `http://localhost:8080` | Weaviate instance URL |
-| `NEO4J_URI` | `bolt://localhost:7687` | Neo4j Bolt URI |
-| `NEO4J_AUTH` | `neo4j/beever_atlas_dev` | Neo4j auth (user/password) |
+<TypeTable
+  type={{
+    MONGODB_URI: {
+      type: 'string',
+      description: 'MongoDB connection string',
+      default: 'mongodb://localhost:27017/beever_atlas',
+    },
+    REDIS_URL: {
+      type: 'string',
+      description: 'Redis URL',
+      default: 'redis://localhost:6379',
+    },
+    WEAVIATE_URL: {
+      type: 'string',
+      description: 'Weaviate instance URL',
+      default: 'http://localhost:8080',
+    },
+    NEO4J_URI: {
+      type: 'string',
+      description: 'Neo4j Bolt URI',
+      default: 'bolt://localhost:7687',
+    },
+    NEO4J_AUTH: {
+      type: 'string',
+      description: 'Neo4j auth (user/password)',
+      default: 'neo4j/beever_atlas_dev',
+    },
+  }}
+/>
 
 ### LLM & Embeddings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GOOGLE_API_KEY` | — | Gemini API key (required) |
-| `LLM_FAST_MODEL` | `gemini-2.5-flash` | Model for extraction/classification |
-| `LLM_QUALITY_MODEL` | `gemini-2.5-flash` | Model for wiki synthesis |
-| `JINA_API_KEY` | — | Jina embeddings API key (required) |
-| `JINA_MODEL` | `jina-embeddings-v4` | Jina model to use |
-| `JINA_DIMENSIONS` | `2048` | Embedding dimensions |
+<TypeTable
+  type={{
+    GOOGLE_API_KEY: {
+      type: 'string',
+      description: 'Gemini API key (required)',
+      required: true,
+    },
+    LLM_FAST_MODEL: {
+      type: 'string',
+      description: 'Model for extraction/classification',
+      default: 'gemini-2.5-flash',
+    },
+    LLM_QUALITY_MODEL: {
+      type: 'string',
+      description: 'Model for wiki synthesis',
+      default: 'gemini-2.5-flash',
+    },
+    JINA_API_KEY: {
+      type: 'string',
+      description: 'Jina embeddings API key (required)',
+      required: true,
+    },
+    JINA_MODEL: {
+      type: 'string',
+      description: 'Jina model to use',
+      default: 'jina-embeddings-v4',
+    },
+    JINA_DIMENSIONS: {
+      type: 'int',
+      description: 'Embedding dimensions',
+      default: '2048',
+    },
+  }}
+/>
 
 ### Pipeline & Quality Gates
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SYNC_BATCH_SIZE` | `50` | Messages per ingestion batch |
-| `SYNC_MAX_MESSAGES` | `1000` | Max messages per sync run |
-| `QUALITY_THRESHOLD` | `0.5` | Minimum fact quality score (0.0–1.0) |
-| `ENTITY_THRESHOLD` | `0.6` | Minimum entity confidence (0.0–1.0) |
-| `MAX_FACTS_PER_MESSAGE` | `2` | Max facts extracted per message |
+<TypeTable
+  type={{
+    SYNC_BATCH_SIZE: {
+      type: 'int',
+      description: 'Messages per ingestion batch',
+      default: '50',
+    },
+    SYNC_MAX_MESSAGES: {
+      type: 'int',
+      description: 'Max messages per sync run',
+      default: '1000',
+    },
+    QUALITY_THRESHOLD: {
+      type: 'float',
+      description: 'Minimum fact quality score (0.0-1.0)',
+      default: '0.5',
+    },
+    ENTITY_THRESHOLD: {
+      type: 'float',
+      description: 'Minimum entity confidence (0.0-1.0)',
+      default: '0.6',
+    },
+    MAX_FACTS_PER_MESSAGE: {
+      type: 'int',
+      description: 'Max facts extracted per message',
+      default: '2',
+    },
+  }}
+/>
 
 ### Integrations
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ADAPTER_MOCK` | `true` | Use fixture data (no platform credentials needed) |
-| `BOT_PORT` | `3001` | Bot HTTP server port |
-| `BACKEND_URL` | `http://localhost:8000` | Bot → Backend URL |
-| `BRIDGE_URL` | `http://localhost:3001` | Backend → Bot service URL |
-| `BRIDGE_API_KEY` | — | Shared secret for backend↔bot auth |
+<TypeTable
+  type={{
+    ADAPTER_MOCK: {
+      type: 'bool',
+      description: 'Use fixture data (no platform credentials needed)',
+      default: 'true',
+    },
+    BOT_PORT: {
+      type: 'int',
+      description: 'Bot HTTP server port',
+      default: '3001',
+    },
+    BACKEND_URL: {
+      type: 'string',
+      description: 'Bot to Backend URL',
+      default: 'http://localhost:8000',
+    },
+    BRIDGE_URL: {
+      type: 'string',
+      description: 'Backend to Bot service URL',
+      default: 'http://localhost:3001',
+    },
+    BRIDGE_API_KEY: {
+      type: 'string',
+      description: 'Shared secret for backend-bot auth',
+      required: true,
+    },
+  }}
+/>
 
 ### Security
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CREDENTIAL_MASTER_KEY` | — | 64-char hex key for AES-256-GCM encryption |
+<TypeTable
+  type={{
+    CREDENTIAL_MASTER_KEY: {
+      type: 'string',
+      description: '64-char hex key for AES-256-GCM encryption',
+      required: true,
+    },
+  }}
+/>
 
 <Callout type="info">
 **Generate secure keys**:
