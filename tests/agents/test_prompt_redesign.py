@@ -2,7 +2,6 @@
 
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 
 def _make_settings(*, registry_on: bool = True, new_prompt: bool) -> MagicMock:

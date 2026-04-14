@@ -171,7 +171,7 @@ def test_cassette_covers_all_calls(tmp_path: Path) -> None:
     if not _FULL_CASSETTE.exists():
         pytest.skip(f"Full cassette not found: {_FULL_CASSETTE}")
 
-    out_path = tmp_path / "cassette_check_baseline.json"
+    tmp_path / "cassette_check_baseline.json"
 
     # Run one pass.
     gathered = wiki_bench._load_fixture(_FULL_FIXTURE)

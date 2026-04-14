@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -269,7 +267,7 @@ async def test_d2_batch_wall_clock_in_timings():
     ):
         from beever_atlas.services.batch_processor import BatchProcessor
         processor = BatchProcessor()
-        result = await processor.process_messages(
+        await processor.process_messages(
             messages=[{"text": "hello", "id": "msg-1"}],
             channel_id="C123",
             channel_name="test",

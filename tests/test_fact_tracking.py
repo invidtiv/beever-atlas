@@ -1,5 +1,4 @@
 """Unit tests for fact-level status tracking."""
-import pytest
 from beever_atlas.models.persistence import FactStatus
 
 

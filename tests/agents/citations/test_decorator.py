@@ -12,7 +12,6 @@ import asyncio
 import pytest
 
 from beever_atlas.agents.citations.registry import (
-    SourceRegistry,
     bind,
     reset,
 )

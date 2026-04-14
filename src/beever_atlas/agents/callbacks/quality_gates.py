@@ -158,7 +158,6 @@ def fact_extraction_with_recovery(callback_context: CallbackContext) -> None:
     # If raw is a string (LLM returned text instead of parsed JSON), try recovery
     if isinstance(raw, str):
         from beever_atlas.services.json_recovery import (
-            TruncationReport,
             recover_truncated_json_with_report,
         )
         result, report = recover_truncated_json_with_report(raw)

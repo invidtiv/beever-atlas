@@ -25,7 +25,7 @@ from beever_atlas.stores.graph_errors import (
 )
 
 if TYPE_CHECKING:
-    from beever_atlas.stores.graph_protocol import GraphStore
+    pass
 
 
 @asynccontextmanager

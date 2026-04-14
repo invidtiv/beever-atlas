@@ -7,7 +7,6 @@ cell body parses as a single GFM table cell regardless of Unicode input.
 
 from __future__ import annotations
 
-import re
 
 # Zero-width characters that can sneak into LLM- or user-derived text and
 # corrupt GFM table column counts in some renderers.

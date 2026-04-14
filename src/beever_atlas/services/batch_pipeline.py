@@ -833,13 +833,12 @@ class BatchPipelineRunner:
             batch_num,
         )
         try:
-            from copy import deepcopy
             from beever_atlas.infra.config import get_settings as _get_settings
 
             if ingestion_config is not None:
                 reduced_config = ingestion_config.model_copy(update={"max_facts_per_message": 1})
             else:
-                settings = _get_settings()
+                _get_settings()
                 reduced_config = IngestionConfig(max_facts_per_message=1)
 
             return await self.process_batch(

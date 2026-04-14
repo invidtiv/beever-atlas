@@ -20,7 +20,6 @@ from beever_atlas.wiki.prompts import (
     GLOSSARY_PROMPT,
     OVERVIEW_PROMPT,
     PEOPLE_PROMPT,
-    RESOURCES_PROMPT,
     SUBTOPIC_PROMPT,
     SUBTOPIC_PROMPT_V2,
     THIN_TOPIC_PROMPT,

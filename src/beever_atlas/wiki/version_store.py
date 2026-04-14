@@ -6,7 +6,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import DESCENDING, ReturnDocument
 
 logger = logging.getLogger(__name__)

@@ -30,7 +30,7 @@ jobs:
           enable-cache: true
 
       - name: pip-audit (Python deps)
-        run: uv run --with pip-audit pip-audit --strict
+        run: uv run --with pip-audit pip-audit --strict --skip-editable
 
       - name: Set up Node
         uses: actions/setup-node@v4

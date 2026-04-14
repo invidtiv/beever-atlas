@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -72,7 +72,7 @@ async def test_skip_retry_on_cannot_prefix() -> None:
     with patch("beever_atlas.infra.config.get_settings") as mock_settings:
         mock_settings.return_value.wiki_parse_hardening = True
         with patch.object(WikiCompiler, "_llm_generate_json", _cannot_response):
-            result = await compiler._call_llm("test prompt", max_retries=1)
+            await compiler._call_llm("test prompt", max_retries=1)
 
     assert call_count == 1
 
@@ -134,6 +134,6 @@ async def test_blocked_keyword_triggers_no_retry() -> None:
     with patch("beever_atlas.infra.config.get_settings") as mock_settings:
         mock_settings.return_value.wiki_parse_hardening = True
         with patch.object(WikiCompiler, "_llm_generate_json", _blocked_response):
-            result = await compiler._call_llm("test prompt", max_retries=1)
+            await compiler._call_llm("test prompt", max_retries=1)
 
     assert call_count == 1

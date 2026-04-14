@@ -15,13 +15,12 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 # Make scripts/ importable without installing
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import qa_test_harness as harness
-from qa_test_harness import TestCase, _URL_STOP_TOKENS, OUT_DIR
+from qa_test_harness import TestCase
 
 
 # ---------------------------------------------------------------------------

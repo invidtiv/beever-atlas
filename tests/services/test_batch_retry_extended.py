@@ -9,7 +9,6 @@ Step 3 — ingestion-batch-cap-retry-v2 plan.
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -113,7 +112,7 @@ async def test_retry_sleep_calls_base_values():
         patch("beever_atlas.services.batch_processor.create_session", new=AsyncMock(return_value=fake_session)),
         patch("beever_atlas.services.batch_processor.get_llm_provider", return_value=MagicMock()),
     ):
-        result = await processor.process_messages(
+        await processor.process_messages(
             messages=[{"text": "hello", "id": "msg-1"}],
             channel_id="C123",
             channel_name="test",
@@ -157,7 +156,7 @@ async def test_retry_sleep_last_call_with_jitter():
         patch("beever_atlas.services.batch_processor.create_session", new=AsyncMock(return_value=fake_session)),
         patch("beever_atlas.services.batch_processor.get_llm_provider", return_value=MagicMock()),
     ):
-        result = await processor.process_messages(
+        await processor.process_messages(
             messages=[{"text": "hello", "id": "msg-1"}],
             channel_id="C123",
             channel_name="test",

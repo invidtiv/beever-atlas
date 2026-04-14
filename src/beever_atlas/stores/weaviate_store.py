@@ -872,7 +872,6 @@ class WeaviateStore:
 
         def _fetch() -> list[AtomicFact]:
             collection = self._collection()
-            from weaviate.classes.query import MetadataQuery
 
             # Unclustered facts have cluster_id set to "__none__" sentinel.
             # Cannot use "" (stopword) or is_none (requires indexNullState).
@@ -892,7 +891,6 @@ class WeaviateStore:
 
     async def upsert_cluster(self, cluster: "TopicCluster") -> str:
         """Upsert a topic cluster as a MemoryFact with tier='topic'."""
-        from beever_atlas.models.domain import TopicCluster
 
         def _upsert() -> str:
             collection = self._collection()
@@ -1094,7 +1092,6 @@ class WeaviateStore:
 
     async def upsert_channel_summary(self, summary: "ChannelSummary") -> str:
         """Upsert a channel summary (Tier 0). One per channel via deterministic UUID."""
-        from beever_atlas.models import ChannelSummary  # noqa: F811
 
         def _upsert() -> str:
             collection = self._collection()
@@ -1214,7 +1211,6 @@ class WeaviateStore:
 
     async def upsert_entity_card(self, card: "EntityKnowledgeCard") -> str:
         """Upsert an EntityKnowledgeCard as a MemoryFact with tier='entity_card'."""
-        from beever_atlas.models.domain import EntityKnowledgeCard  # noqa: F811
 
         def _upsert() -> str:
             collection = self._collection()

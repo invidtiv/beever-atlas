@@ -9,13 +9,11 @@ concurrent rotation.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import uuid
 from datetime import UTC, datetime
 
 import pytest
-from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from beever_atlas.infra.auth import require_user

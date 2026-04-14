@@ -796,7 +796,7 @@ class NebulaStore:
         if entity_type is not None:
             conditions.append(f"Entity.type == {_quote(entity_type)}")
         if not include_pending:
-            conditions.append(f"Entity.status == \"active\"")
+            conditions.append("Entity.status == \"active\"")
 
         if conditions:
             where = " AND ".join(conditions)
@@ -891,9 +891,9 @@ class NebulaStore:
     async def prune_expired_pending(self, grace_period_days: int = 7) -> int:
         cutoff = (datetime.now(tz=UTC) - timedelta(days=grace_period_days)).isoformat()
         resp = await self._execute_with_space(
-            f"LOOKUP ON Entity WHERE Entity.status == \"pending\" "
-            f"YIELD id(vertex) AS vid, "
-            f"properties(vertex).pending_since AS pending_since"
+            "LOOKUP ON Entity WHERE Entity.status == \"pending\" "
+            "YIELD id(vertex) AS vid, "
+            "properties(vertex).pending_since AS pending_since"
         )
         rows = self._parse_result_to_dicts(resp)
         pruned = 0

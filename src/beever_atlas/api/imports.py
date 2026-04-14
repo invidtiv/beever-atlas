@@ -13,7 +13,6 @@ platform channels.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 import logging
@@ -395,7 +394,7 @@ async def commit_import(request: Request, body: CommitRequest) -> CommitResponse
 
     original_path = Path(meta["original_path"])
     encoding = meta["encoding"]
-    fmt = meta["format"]
+    meta["format"]
     if not original_path.exists():
         raise HTTPException(status_code=410, detail="Staged file missing on disk. Re-upload.")
 

@@ -8,12 +8,15 @@ Phase 1 Step 2 — ingestion-pipeline-hardening plan.
 """
 from __future__ import annotations
 
-import asyncio
+import json as _json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from google.genai.errors import ServerError
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 
 # ---------------------------------------------------------------------------
@@ -183,14 +186,6 @@ async def test_checkpoint_reloaded_on_httpx_error_retry():
 # ---------------------------------------------------------------------------
 # A4: Parametrized resume test — all 4 resumable exception types
 # ---------------------------------------------------------------------------
-
-import json as _json
-
-import pytest
-from google.genai.errors import ServerError
-from pydantic import ValidationError as PydanticValidationError
-from pydantic import BaseModel
-
 
 def _make_server_error() -> ServerError:
     err = ServerError.__new__(ServerError)

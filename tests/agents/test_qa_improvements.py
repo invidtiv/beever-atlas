@@ -7,7 +7,6 @@ Fix 3 — stale "No activity recorded" sentinel fallback in get_wiki_page
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

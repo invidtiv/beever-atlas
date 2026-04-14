@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
 import tempfile
 import time
 from dataclasses import dataclass

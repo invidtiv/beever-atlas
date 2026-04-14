@@ -7,7 +7,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Query
 
 from beever_atlas.stores import get_stores
-from beever_atlas.models import MemoryFilters, PaginatedFacts, AtomicFact
+from beever_atlas.models import MemoryFilters, PaginatedFacts
 
 router = APIRouter(prefix="/api/channels", tags=["memories"])
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -111,7 +110,6 @@ async def test_translate_and_fixed_pages_run_concurrently() -> None:
     translate_gate = asyncio.Event()
     people_entered = asyncio.Event()
 
-    original_translate = compiler._translate_cluster_titles
     original_people = compiler._compile_people
 
     async def _patched_translate(clusters):

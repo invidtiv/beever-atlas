@@ -138,7 +138,7 @@ def _is_latin_letter(ch: str) -> bool:
     """Latin script, including Latin Extended (accented chars é, ñ, ü, ß, ç…)."""
     if not ch.isalpha():
         return False
-    cp = ord(ch)
+    ord(ch)
     # Basic Latin + Latin-1 Supplement + Latin Extended-A/B + Latin Extended
     # Additional = 0x0000–0x024F and 0x1E00–0x1EFF. Simpler check: unicodedata
     # block name starts with "LATIN".
