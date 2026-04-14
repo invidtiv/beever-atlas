@@ -55,7 +55,7 @@ jobs:
       - name: Pytest
         env:
           MONGODB_URI: mongodb://localhost:27017/beever_atlas
-          REDIS_URL: redis://localhost:6379/0
+          REDIS_URL: redis://localhost:6379
         run: uv run pytest -q
 
   web:
