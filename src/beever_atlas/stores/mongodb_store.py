@@ -142,6 +142,56 @@ class MongoDBStore:
 
         await self._sync_jobs.update_one({"id": job_id}, ops)
 
+    async def update_batch_stage(
+        self,
+        job_id: str,
+        batch_idx: int,
+        label: str,
+    ) -> None:
+        """Atomic dot-path update for per-batch stage label — race-safe under concurrency.
+
+        Writes stage_details.batch_stages.<batch_idx> without touching sibling
+        batch entries. Also keeps the deprecated singleton current_stage / current_batch
+        fields so worker-4 (frontend) can fall back when batch_stages is absent.
+        """
+        await self._sync_jobs.update_one(
+            {"id": job_id},
+            {
+                "$set": {
+                    f"stage_details.batch_stages.{batch_idx}": label,
+                    # deprecated singletons — kept for backward compat with frontend fallback
+                    "current_stage": label,
+                    "current_batch": batch_idx,
+                },
+                "$inc": {"version": 1},
+            },
+        )
+
+    async def push_activity_log_entry(
+        self,
+        job_id: str,
+        batch_idx: int,
+        entry: dict[str, Any],
+    ) -> None:
+        """Append a batch-tagged entry to the activity log, capped at 50.
+
+        Tags the entry with batch_idx so the frontend can group/filter per batch.
+        Uses $push + $slice to avoid unbounded growth — race-safe under concurrency.
+        """
+        tagged_entry = {**entry, "batch_idx": batch_idx}
+        await self._sync_jobs.update_one(
+            {"id": job_id},
+            {
+                "$push": {
+                    "stage_details.activity_log": {
+                        "$each": [tagged_entry],
+                        "$slice": -50,
+                    }
+                },
+                "$inc": {"version": 1},
+            },
+        )
+
     async def increment_batches_completed(self, job_id: str) -> None:
         """Atomic increment of batches_completed — safe under concurrent batch runs."""
         await self._sync_jobs.update_one(

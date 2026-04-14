@@ -17,6 +17,8 @@ from beever_atlas.services.batch_processor import BatchProcessor
 def _make_stores_mock() -> MagicMock:
     stores = MagicMock()
     stores.mongodb.update_sync_progress = AsyncMock(return_value=None)
+    stores.mongodb.update_batch_stage = AsyncMock(return_value=None)
+    stores.mongodb.push_activity_log_entry = AsyncMock(return_value=None)
     stores.mongodb.load_pipeline_checkpoint = AsyncMock(return_value=None)
     stores.mongodb.save_pipeline_checkpoint = AsyncMock(return_value=None)
     stores.mongodb.delete_pipeline_checkpoint = AsyncMock(return_value=None)
@@ -69,30 +71,40 @@ async def test_batch_exceptions_populate_result_errors() -> None:
     """Batches 2 and 4 crash; result.errors must have 2 entries, others succeed."""
     stores = _make_stores_mock()
     settings = _make_settings_mock(concurrency=4)
-    runner = _make_runner_mock()
     session_svc = _make_session_service_mock()
 
     fake_session = MagicMock()
     fake_session.id = "sess-err"
 
-    call_count = 0
+    # Session state carries batch_num — use it to raise on batches 2 and 4.
+    _sessions: dict[str, dict] = {}
 
-    original_gather = asyncio.gather
+    async def _fake_create_session(user_id, state):
+        sess = MagicMock()
+        sess.id = f"sess-{state.get('batch_num', 0)}"
+        _sessions[sess.id] = state
+        return sess
 
-    async def _patched_gather(*coros, return_exceptions=False):
-        # Wrap each coroutine so batches 2 and 4 (index 1, 3) raise.
-        async def _maybe_raise(idx, coro):
-            if idx in (1, 3):
-                # Drain the coroutine to avoid ResourceWarning then raise.
-                try:
-                    await coro
-                except Exception:
-                    pass
-                raise RuntimeError(f"Simulated crash for batch {idx + 1}")
-            return await coro
+    async def _failing_run_async(user_id, session_id, new_message):
+        state = _sessions.get(session_id, {})
+        batch_num = state.get("batch_num", 0)
+        if batch_num in (2, 4):
+            raise RuntimeError(f"Simulated crash for batch {batch_num}")
+        event = MagicMock()
+        event.author = "persister"
+        actions = MagicMock()
+        actions.state_delta = {"persist_result": {"weaviate_ids": ["id1"], "entity_count": 1, "relationship_count": 0}}
+        actions.stateDelta = None
+        event.actions = actions
 
-        wrapped = [_maybe_raise(i, c) for i, c in enumerate(coros)]
-        return await original_gather(*wrapped, return_exceptions=return_exceptions)
+        async def _gen():
+            yield event
+
+        async for e in _gen():
+            yield e
+
+    runner = MagicMock()
+    runner.run_async = _failing_run_async
 
     processor = BatchProcessor()
 
@@ -101,10 +113,9 @@ async def test_batch_exceptions_populate_result_errors() -> None:
         patch("beever_atlas.services.batch_processor.get_settings", return_value=settings),
         patch("beever_atlas.services.batch_processor.create_ingestion_pipeline", return_value=MagicMock()),
         patch("beever_atlas.services.batch_processor.create_runner", return_value=runner),
-        patch("beever_atlas.services.batch_processor.create_session", new=AsyncMock(return_value=fake_session)),
+        patch("beever_atlas.services.batch_processor.create_session", side_effect=_fake_create_session),
         patch("beever_atlas.agents.runner.get_session_service", return_value=session_svc),
         patch("beever_atlas.services.batch_processor.get_llm_provider", return_value=MagicMock()),
-        patch("beever_atlas.services.batch_processor.asyncio.gather", side_effect=_patched_gather),
     ):
         messages = [{"text": f"msg{i}", "id": str(i)} for i in range(4)]
         result = await processor.process_messages(
