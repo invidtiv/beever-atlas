@@ -29,8 +29,11 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Export locked requirements (without editable project)
+        run: uv export --quiet --no-emit-project --format requirements-txt --no-hashes > /tmp/requirements-audit.txt
+
       - name: pip-audit (Python deps)
-        run: uv run --with pip-audit pip-audit --strict --skip-editable
+        run: uv run --with pip-audit pip-audit --requirement /tmp/requirements-audit.txt
 
       - name: Set up Node
         uses: actions/setup-node@v4
