@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import weaviate
 from weaviate.classes.config import Configure, DataType, Property
+from weaviate.classes.init import Auth
 from weaviate.classes.query import Filter
 
 from beever_atlas.models import AtomicFact, MemoryFilters, PaginatedFacts
@@ -46,12 +47,15 @@ class WeaviateStore:
             port = parsed.port or (443 if parsed.scheme == "https" else 8080)
             secure = parsed.scheme == "https"
 
-            if host in ("localhost", "127.0.0.1") and not secure:
-                return weaviate.connect_to_local(port=port, grpc_port=50051)
+            auth = Auth.api_key(self._api_key) if self._api_key else None
 
-            headers: dict[str, str] = {}
-            if self._api_key:
-                headers["X-Weaviate-Api-Key"] = self._api_key
+            if host in ("localhost", "127.0.0.1") and not secure:
+                return weaviate.connect_to_local(
+                    port=port,
+                    grpc_port=50051,
+                    auth_credentials=auth,
+                )
+
             return weaviate.connect_to_custom(
                 http_host=host,
                 http_port=port,
@@ -59,7 +63,7 @@ class WeaviateStore:
                 grpc_host=host,
                 grpc_port=50051,
                 grpc_secure=secure,
-                headers=headers,
+                auth_credentials=auth,
             )
 
         self._client = await asyncio.to_thread(_connect)
