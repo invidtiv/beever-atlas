@@ -173,9 +173,17 @@ class EmbedderAgent(BaseAgent):
 
         raw_classified = ctx.session.state.get("classified_facts")
         if isinstance(raw_classified, dict):
-            facts: list[dict[str, Any]] = raw_classified.get("facts") or []
+            facts_raw = raw_classified.get("facts") or []
+        elif isinstance(raw_classified, list):
+            facts_raw = raw_classified
         else:
-            facts = raw_classified or []
+            logger.warning(
+                "EmbedderAgent: classified_facts is %s, not dict/list; skipping batch=%s",
+                type(raw_classified).__name__,
+                batch_num,
+            )
+            facts_raw = []
+        facts: list[dict[str, Any]] = [f for f in facts_raw if isinstance(f, dict)]
 
         if not facts:
             logger.warning(
