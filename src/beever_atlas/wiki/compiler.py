@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 from beever_atlas.agents.prompt_safety import wrap_untrusted
@@ -28,6 +29,13 @@ from beever_atlas.wiki.prompts import (
     TOPIC_PROMPT_V2,
 )
 from beever_atlas.wiki.schemas import CompiledPageContent
+from beever_atlas.wiki.validators import (
+    banned_phrases,
+    combine,
+    mermaid_balanced,
+    min_length,
+    required_headings,
+)
 
 # Phase 4: deterministic Key Facts marker.
 _KEY_FACTS_MARKER = "<<KEY_FACTS_TABLE>>"
@@ -150,6 +158,46 @@ def _facts_fallback_content(facts: list[AtomicFact]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _compute_size_tier(fact_count: int) -> str:
+    """Derive the adaptive-template size tier from a cluster's fact count.
+
+    - "small"  for fewer than 5 facts (render: TL;DR + Key Facts + Sources).
+    - "medium" for 5–12 facts (adds Concept Diagram if ≥7 entities + Open Qs).
+    - "large"  for more than 12 facts (adds Decisions/Contributors/Tools).
+    """
+    if fact_count < 5:
+        return "small"
+    if fact_count <= 12:
+        return "medium"
+    return "large"
+
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for dedup comparison.
+
+    Steps: lowercase scheme+host, canonicalize twitter.com↔x.com, strip query
+    string, fragment, and trailing slash. Preserves path case since some
+    providers treat the path as case-sensitive.
+    """
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower()
+        # Canonicalize twitter.com → x.com (subdomains too).
+        if host == "twitter.com" or host.endswith(".twitter.com"):
+            host = "x.com" if host == "twitter.com" else host.replace("twitter.com", "x.com")
+        if host.startswith("www."):
+            host = host[4:]
+        path = parsed.path.rstrip("/") if parsed.path else ""
+        # Drop query and fragment (tracking params, shares).
+        return urlunparse((scheme, host, path, "", "", ""))
+    except Exception:
+        return url
+
+
 def _build_media_data(facts: list[AtomicFact]) -> list[dict]:
     """Extract media references from facts for the LLM prompt."""
     def _truncate_context(text: str, limit: int = 180) -> str:
@@ -163,12 +211,16 @@ def _build_media_data(facts: list[AtomicFact]) -> list[dict]:
         return cut.rstrip() + "..."
 
     media: list[dict] = []
+    # Track normalized URLs globally across all facts' media+link lists so the
+    # same tweet shared in two messages (e.g. x.com/foo and twitter.com/foo/)
+    # collapses to a single entry.
     seen_urls: set[str] = set()
     for fact in facts:
         for i, url in enumerate(fact.source_media_urls):
-            if url in seen_urls:
+            key = _normalize_url(url)
+            if not key or key in seen_urls:
                 continue
-            seen_urls.add(url)
+            seen_urls.add(key)
             name = fact.source_media_names[i] if i < len(fact.source_media_names) else url.split("/")[-1]
             media.append({
                 "url": url,
@@ -178,9 +230,10 @@ def _build_media_data(facts: list[AtomicFact]) -> list[dict]:
                 "context": _truncate_context(fact.memory_text),
             })
         for j, url in enumerate(fact.source_link_urls):
-            if url in seen_urls:
+            key = _normalize_url(url)
+            if not key or key in seen_urls:
                 continue
-            seen_urls.add(url)
+            seen_urls.add(key)
             title = fact.source_link_titles[j] if j < len(fact.source_link_titles) else url
             media.append({
                 "url": url,
@@ -503,6 +556,128 @@ def _faq_fallback(faq_by_topic: list[dict], clusters: list) -> tuple[str, str]:
     return content, summary
 
 
+_GLOSSARY_PLACEHOLDER_RE = re.compile(
+    r"\(\s*(implicit|inferred|unknown|n\/a|not\s+specified|tbd)\s*\)",
+    re.IGNORECASE,
+)
+
+_GLOSSARY_SECTION_ALIASES: dict[str, re.Pattern] = {
+    "intro": re.compile(r"^##\s+(introduction|overview)\b", re.IGNORECASE | re.MULTILINE),
+    "terms": re.compile(r"^##\s+terms?\b", re.IGNORECASE | re.MULTILINE),
+}
+
+
+def _collect_glossary_entries(
+    glossary_terms: list, clusters: list
+) -> list[dict]:
+    """Aggregate {term, definition, first_mentioned_by, related_topics} rows."""
+    rows: dict[str, dict] = {}
+    for t in glossary_terms or []:
+        if isinstance(t, dict):
+            name = (t.get("term") or t.get("name") or "").strip()
+            if not name:
+                continue
+            rows[name] = {
+                "term": name,
+                "definition": (t.get("definition") or t.get("description") or "").strip(),
+                "first_mentioned_by": (t.get("first_mentioned_by") or "").strip(),
+                "related_topics": list(t.get("related_topics") or []),
+            }
+        elif t:
+            name = str(t).strip()
+            if name and name not in rows:
+                rows[name] = {
+                    "term": name, "definition": "",
+                    "first_mentioned_by": "", "related_topics": [],
+                }
+    # Enrich from cluster key_entities.
+    for c in clusters or []:
+        cluster_title = (getattr(c, "title", "") or "").strip()
+        for ent in getattr(c, "key_entities", None) or []:
+            if not isinstance(ent, dict):
+                continue
+            name = (ent.get("name") or "").strip()
+            if not name:
+                continue
+            row = rows.setdefault(name, {
+                "term": name, "definition": "",
+                "first_mentioned_by": "", "related_topics": [],
+            })
+            if not row["definition"]:
+                row["definition"] = (
+                    ent.get("description") or ent.get("role") or ""
+                ).strip()
+            if cluster_title and cluster_title not in row["related_topics"]:
+                row["related_topics"].append(cluster_title)
+    return sorted(rows.values(), key=lambda r: r["term"].lower())
+
+
+def _render_glossary_terms_table(entries: list[dict]) -> str:
+    if not entries:
+        return ""
+    lines = [
+        "## Terms",
+        "",
+        "| Term | Definition | First Mentioned By | Related Topics |",
+        "|---|---|---|---|",
+    ]
+    for row in entries:
+        term = row["term"].replace("|", "\\|")
+        definition = (row["definition"] or "Referenced in this channel.").replace("|", "\\|")
+        author = (row["first_mentioned_by"] or "—").replace("|", "\\|")
+        related = ", ".join(row["related_topics"][:4]) if row["related_topics"] else "—"
+        related = related.replace("|", "\\|")
+        lines.append(f"| {term} | {definition} | {author} | {related} |")
+    return "\n".join(lines)
+
+
+def _splice_glossary_sections(
+    content: str, glossary_terms: list, clusters: list
+) -> str:
+    """Append deterministic Introduction + Terms table when the LLM drops them.
+
+    The Glossary prompt sometimes emits only the relationship mermaid diagram
+    and nothing else. This helper detects missing Introduction and Terms
+    sections via heading-alias regex and appends deterministic replacements.
+    """
+    if not content:
+        return content
+    present = {
+        key: bool(pat.search(content))
+        for key, pat in _GLOSSARY_SECTION_ALIASES.items()
+    }
+    additions: list[str] = []
+    if not present["intro"]:
+        additions.append(
+            "## Introduction\n\nKey terms, acronyms, and concepts used in this channel."
+        )
+    if not present["terms"]:
+        entries = _collect_glossary_entries(glossary_terms, clusters)
+        block = _render_glossary_terms_table(entries)
+        if block:
+            additions.append(block)
+    if not additions:
+        return content
+    logger.info(
+        "WikiCompiler: glossary splice added %d missing sections: %s",
+        len(additions),
+        [k for k, v in present.items() if not v],
+    )
+    return content.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
+
+
+def _scrub_glossary_placeholders(content: str) -> str:
+    """Replace `(Implicit)` / `(Inferred)` / `(Unknown)` markers with `—`.
+
+    The Glossary prompt now forbids these, but LLM outputs occasionally slip
+    them into the "First Mentioned By" column. Swapping them for an em-dash
+    keeps the column readable without revealing LLM guesswork.
+    """
+    if not content:
+        return content
+    return _GLOSSARY_PLACEHOLDER_RE.sub("—", content)
+
+
 def _glossary_fallback(glossary_terms: list, clusters: list) -> tuple[str, str]:
     """Render a minimal Glossary page from term list / clusters when LLM fails."""
     lines: list[str] = ["## Glossary", ""]
@@ -570,6 +745,212 @@ def _glossary_fallback(glossary_terms: list, clusters: list) -> tuple[str, str]:
 
 
 _PLACEHOLDER_LINE = "This section has limited data and could not be summarized."
+
+
+# Headings the Overview template is supposed to emit. Each entry is
+# (canonical_heading, alias_regex) — alias_regex matches H2 headings
+# case-insensitively so we don't double-insert when the LLM picks a variant.
+_OVERVIEW_SECTION_ALIASES: dict[str, re.Pattern] = {
+    "key_highlights": re.compile(r"^##\s+(key\s+)?highlights\b", re.IGNORECASE | re.MULTILINE),
+    "topics": re.compile(r"^##\s+topics(\s+at\s+a\s+glance)?\b", re.IGNORECASE | re.MULTILINE),
+    "contributors": re.compile(r"^##\s+(key\s+)?contributors\b", re.IGNORECASE | re.MULTILINE),
+    "tools": re.compile(r"^##\s+tools(\s*&\s*resources|\s+and\s+resources)?\b", re.IGNORECASE | re.MULTILINE),
+    "momentum": re.compile(r"^##\s+(recent\s+)?momentum\b", re.IGNORECASE | re.MULTILINE),
+}
+
+
+def _render_overview_key_highlights(
+    topic_count: int,
+    decisions_count: int,
+    people_count: int,
+    media_count: int,
+    date_range: tuple[str, str] | None = None,
+) -> str:
+    rows = [
+        ("Topics", str(topic_count)),
+        ("Decisions Made", str(decisions_count)),
+        ("Key Contributors", str(people_count)),
+        ("Resources Shared", str(media_count)),
+    ]
+    if date_range and (date_range[0] or date_range[1]):
+        start = (date_range[0] or "").strip()[:10]
+        end = (date_range[1] or "").strip()[:10]
+        if start and end:
+            rows.append(("Active Period", f"{start} – {end}"))
+        elif start or end:
+            rows.append(("Active Period", start or end))
+    lines = ["## Key Highlights", "", "| Metric | Value |", "|---|---|"]
+    for label, value in rows:
+        lines.append(f"| {label} | {value} |")
+    return "\n".join(lines)
+
+
+def _render_overview_topics(clusters: list, skipped_titles: set[str]) -> str:
+    if not clusters:
+        return ""
+    lines = ["## Topics at a glance", ""]
+    for c in clusters:
+        title = (getattr(c, "title", "") or "").strip() or f"Topic {getattr(c, 'id', '')[:6]}"
+        mc = getattr(c, "member_count", 0)
+        blurb = ""
+        tags = getattr(c, "topic_tags", None) or []
+        if tags:
+            blurb = str(tags[0])
+        blurb = (blurb or "")[:120]
+        suffix = f" — {blurb}" if blurb else ""
+        brief = " (brief mention)" if title in skipped_titles else ""
+        lines.append(f"- **{title}** ({mc} memories){suffix}{brief}")
+    return "\n".join(lines)
+
+
+def _render_overview_contributors(top_people: list) -> str:
+    if not top_people:
+        return ""
+    lines = ["## Key contributors", ""]
+    for person in top_people[:8]:
+        if isinstance(person, dict):
+            name = (person.get("name") or "").strip()
+            role = (person.get("role") or "").strip()
+            expertise = person.get("expertise_topics") or []
+        else:
+            name = str(person).strip()
+            role = ""
+            expertise = []
+        if not name:
+            continue
+        bits = []
+        if role:
+            bits.append(role)
+        elif expertise:
+            bits.append(str(expertise[0]))
+        suffix = f" — {' · '.join(bits)}" if bits else ""
+        lines.append(f"- **{name}**{suffix}")
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines)
+
+
+_GENERIC_TOOLS = {
+    "slack", "whatsapp", "imessage", "x", "twitter", "macos", "linux", "windows",
+    "vs code", "vscode", "github",
+}
+
+
+def _render_overview_tools(tech_data: list[dict], project_data: list[dict]) -> str:
+    tools: list[str] = []
+    seen: set[str] = set()
+    for t in tech_data or []:
+        name = (t.get("name") or "").strip()
+        if not name or name.lower() in _GENERIC_TOOLS:
+            continue
+        if name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        tools.append(name)
+        if len(tools) >= 10:
+            break
+    for p in project_data or []:
+        if len(tools) >= 10:
+            break
+        name = (p.get("name") or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        tools.append(name)
+    if not tools:
+        return ""
+    lines = ["## Tools & resources", ""]
+    for name in tools:
+        lines.append(f"- {name}")
+    return "\n".join(lines)
+
+
+def _render_overview_momentum(momentum_text: str, recent: dict) -> str:
+    text = (momentum_text or "").strip()
+    highlights = []
+    if isinstance(recent, dict):
+        raw_highlights = recent.get("highlights") or []
+        for h in raw_highlights[:3]:
+            if isinstance(h, str) and h.strip():
+                highlights.append(h.strip())
+            elif isinstance(h, dict):
+                val = (h.get("text") or h.get("title") or "").strip()
+                if val:
+                    highlights.append(val)
+    if not text and not highlights:
+        return ""
+    lines = ["## Recent momentum", ""]
+    if text:
+        lines.append(text)
+        lines.append("")
+    for h in highlights:
+        lines.append(f"- {h}")
+    return "\n".join(lines).rstrip()
+
+
+def _splice_overview_sections(
+    content: str,
+    channel_summary: Any,
+    clusters: list,
+    tech_data: list[dict],
+    project_data: list[dict],
+    decisions_count: int,
+    skipped_topics: list[dict],
+) -> str:
+    """Append deterministic sections the LLM omitted.
+
+    Overview generation is unstable — the LLM often drops Key Highlights,
+    Topics at a glance, Contributors, Tools, or Momentum. We detect missing
+    H2 sections by heading alias regex and append deterministic replacements
+    in the template order. Existing sections are left untouched.
+    """
+    if not content:
+        return content
+    present = {key: bool(pat.search(content)) for key, pat in _OVERVIEW_SECTION_ALIASES.items()}
+    skipped_titles = {(st.get("title") or "").strip() for st in skipped_topics or [] if isinstance(st, dict)}
+
+    additions: list[str] = []
+    if not present["key_highlights"]:
+        additions.append(
+            _render_overview_key_highlights(
+                topic_count=len(clusters),
+                decisions_count=decisions_count,
+                people_count=len(getattr(channel_summary, "top_people", []) or []),
+                media_count=getattr(channel_summary, "media_count", 0) or 0,
+                date_range=(
+                    getattr(channel_summary, "date_range_start", ""),
+                    getattr(channel_summary, "date_range_end", ""),
+                ),
+            )
+        )
+    if not present["topics"]:
+        block = _render_overview_topics(clusters, skipped_titles)
+        if block:
+            additions.append(block)
+    if not present["contributors"]:
+        block = _render_overview_contributors(getattr(channel_summary, "top_people", []) or [])
+        if block:
+            additions.append(block)
+    if not present["tools"]:
+        block = _render_overview_tools(tech_data, project_data)
+        if block:
+            additions.append(block)
+    if not present["momentum"]:
+        block = _render_overview_momentum(
+            getattr(channel_summary, "momentum", "") or "",
+            getattr(channel_summary, "recent_activity_summary", {}) or {},
+        )
+        if block:
+            additions.append(block)
+
+    if not additions:
+        return content
+    logger.info(
+        "WikiCompiler: overview splice added %d missing sections: %s",
+        len(additions),
+        [k for k, v in present.items() if not v],
+    )
+    return content.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
 
 
 def _overview_fallback(channel_summary: Any, clusters: list) -> tuple[str, str]:
@@ -705,61 +1086,197 @@ def _people_fallback(persons: list, top_people: list) -> tuple[str, str]:
     return content, summary
 
 
+def _fmt_date(ts: str) -> str:
+    """Normalize a timestamp to YYYY-MM-DD; return '' if unparseable."""
+    if not ts:
+        return ""
+    s = str(ts).strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return ""
+
+
 def _activity_fallback(
     recent_facts: list,
     recent_activity_summary: dict,
     clusters: list,
 ) -> tuple[str, str]:
-    """Render a minimal Recent Activity page from recent facts / clusters."""
-    lines: list[str] = ["## Recent Activity", ""]
-    rendered_any = False
+    """Render a structured Recent Activity page when the LLM output is unusable.
 
-    for f in (recent_facts or [])[:10]:
-        ts = getattr(f, "message_ts", "") or ""
-        author = getattr(f, "author_name", "") or ""
+    Produces: summary stats table → facts-per-day chart → daily breakdown
+    (grouped by date with author + fact snippet) → top contributors →
+    topics-with-recent-activity table. Each section is omitted cleanly when
+    its data is empty so short channels don't render placeholders.
+    """
+    lines: list[str] = []
+
+    # Normalize facts: keep (date, author, text, fact_type) tuples sorted desc.
+    rows: list[dict] = []
+    for f in recent_facts or []:
         text = (getattr(f, "memory_text", "") or "").strip()
         if not text:
             continue
-        text = text[:180]
-        prefix_bits = []
-        if ts:
-            prefix_bits.append(ts)
-        if author:
-            prefix_bits.append(author)
-        prefix = " — ".join(prefix_bits)
-        if prefix:
-            lines.append(f"* {prefix}: {text}")
-        else:
-            lines.append(f"* {text}")
-        rendered_any = True
+        date = _fmt_date(getattr(f, "message_ts", ""))
+        rows.append({
+            "date": date,
+            "author": (getattr(f, "author_name", "") or "").strip(),
+            "text": text,
+            "fact_type": (getattr(f, "fact_type", "") or "").strip().lower(),
+        })
 
-    if not rendered_any:
-        highlights = (recent_activity_summary or {}).get("highlights") or []
-        for h in highlights[:10]:
-            if isinstance(h, dict):
-                msg = (h.get("text") or h.get("summary") or "").strip()
-            else:
-                msg = str(h).strip()
-            if msg:
-                lines.append(f"* {msg}")
-                rendered_any = True
+    # Aggregate counts.
+    from collections import Counter, defaultdict
+    per_day: dict[str, int] = defaultdict(int)
+    decisions_per_day: dict[str, int] = defaultdict(int)
+    authors_counter: Counter = Counter()
+    for r in rows:
+        if r["date"]:
+            per_day[r["date"]] += 1
+            if r["fact_type"] == "decision":
+                decisions_per_day[r["date"]] += 1
+        if r["author"]:
+            authors_counter[r["author"]] += 1
 
-    if not rendered_any:
-        for c in clusters or []:
+    total_facts = len(rows)
+    total_decisions = sum(decisions_per_day.values())
+    unique_authors = len(authors_counter)
+    date_min = min((r["date"] for r in rows if r["date"]), default="")
+    date_max = max((r["date"] for r in rows if r["date"]), default="")
+
+    # 1. Summary stats table.
+    if total_facts or total_decisions or unique_authors:
+        lines.append("## Summary")
+        lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("|---|---|")
+        lines.append(f"| Memories added | {total_facts} |")
+        lines.append(f"| Decisions | {total_decisions} |")
+        lines.append(f"| Contributors | {unique_authors} |")
+        if date_min and date_max:
+            span = f"{date_min} – {date_max}" if date_min != date_max else date_min
+            lines.append(f"| Active period | {span} |")
+        lines.append("")
+
+    # 2. Facts-per-day chart (only if we have ≥3 days of data).
+    if len(per_day) >= 3:
+        import json as _json
+        chart_data = [
+            {"date": d, "facts": per_day[d], "decisions": decisions_per_day.get(d, 0)}
+            for d in sorted(per_day.keys())
+        ]
+        payload = {
+            "type": "area",
+            "title": "Knowledge Growth",
+            "data": chart_data,
+            "xKey": "date",
+            "series": ["facts", "decisions"],
+        }
+        lines.append("## Activity Chart")
+        lines.append("")
+        lines.append("```chart")
+        lines.append(_json.dumps(payload))
+        lines.append("```")
+        lines.append("")
+
+    # 3. Daily breakdown — group by date, most recent first.
+    if rows:
+        lines.append("## Daily Breakdown")
+        lines.append("")
+        by_date: dict[str, list[dict]] = defaultdict(list)
+        undated: list[dict] = []
+        for r in rows:
+            (by_date[r["date"]] if r["date"] else undated).append(r)
+        for date in sorted(by_date.keys(), reverse=True):
+            lines.append(f"### {date}")
+            lines.append("")
+            for r in by_date[date][:8]:
+                author = r["author"] or "Unknown"
+                snippet = r["text"][:180]
+                lines.append(f"- **{author}** — {snippet}")
+            extra = len(by_date[date]) - 8
+            if extra > 0:
+                lines.append(f"- _…and {extra} more_")
+            lines.append("")
+        if undated:
+            if by_date:
+                lines.append("### Other")
+                lines.append("")
+            for r in undated[:10]:
+                author = r["author"] or "Unknown"
+                snippet = r["text"][:180]
+                lines.append(f"- **{author}** — {snippet}")
+            lines.append("")
+
+    # 4. Top contributors.
+    if authors_counter:
+        top = authors_counter.most_common(5)
+        lines.append("## Top Contributors")
+        lines.append("")
+        for name, count in top:
+            noun = "memory" if count == 1 else "memories"
+            lines.append(f"- **{name}** — {count} {noun}")
+        lines.append("")
+
+    # 5. Topics with recent activity (from clusters when recent-facts path missing).
+    if not rows and clusters:
+        cluster_memories = sum(getattr(c, "member_count", 0) or 0 for c in clusters)
+        cluster_dates = [
+            _fmt_date(getattr(c, "date_range_end", "")) for c in clusters
+        ]
+        cluster_dates_valid = [d for d in cluster_dates if d]
+        starts = [
+            _fmt_date(getattr(c, "date_range_start", "")) for c in clusters
+        ]
+        starts_valid = [d for d in starts if d]
+        c_min = min(starts_valid + cluster_dates_valid, default="")
+        c_max = max(cluster_dates_valid, default="")
+
+        if clusters:
+            lines.append("## Summary")
+            lines.append("")
+            lines.append("| Metric | Value |")
+            lines.append("|---|---|")
+            lines.append(f"| Topics tracked | {len(clusters)} |")
+            lines.append(f"| Total memories | {cluster_memories} |")
+            if c_min and c_max:
+                span = f"{c_min} – {c_max}" if c_min != c_max else c_min
+                lines.append(f"| Active period | {span} |")
+            lines.append("")
+
+        lines.append("## Topics with Recent Activity")
+        lines.append("")
+        lines.append("| Topic | Memories | Last Update |")
+        lines.append("|---|---|---|")
+        sorted_clusters = sorted(
+            clusters,
+            key=lambda c: getattr(c, "date_range_end", "") or "",
+            reverse=True,
+        )
+        for c in sorted_clusters[:15]:
             title = (getattr(c, "title", "") or "").strip()
             if not title:
                 continue
             mc = getattr(c, "member_count", 0)
-            end = getattr(c, "date_range_end", "") or ""
-            suffix = f" ({end})" if end else ""
-            lines.append(f"* {title} — {mc} memories{suffix}")
-            rendered_any = True
+            last = _fmt_date(getattr(c, "date_range_end", "")) or "—"
+            lines.append(f"| {title} | {mc} | {last} |")
+        lines.append("")
 
-    if not rendered_any:
+    if not lines:
         lines.append(_PLACEHOLDER_LINE)
 
     content = "\n".join(lines).rstrip() + "\n"
-    summary = "Auto-generated recent activity summary."
+    summary_bits: list[str] = []
+    if total_facts:
+        summary_bits.append(f"{total_facts} memories")
+    if total_decisions:
+        summary_bits.append(f"{total_decisions} decisions")
+    if unique_authors:
+        summary_bits.append(f"{unique_authors} contributors")
+    summary = (
+        "Recent activity — " + ", ".join(summary_bits) + "."
+        if summary_bits
+        else "Auto-generated recent activity summary."
+    )
     return content, summary
 
 
@@ -1446,6 +1963,206 @@ class WikiCompiler:
     _BLANK_LINES_RE = re.compile(r"\n{4,}")
     # Matches 4+ consecutive inline citation markers like [1][2][5][6][8]...
     _OVERCITATION_RE = re.compile(r"(?:\[\d+\]\s*){4,}")
+    # Source-list entries we need to validate against used [N] in body.
+    # Matches a single "- [N] ..." line inside the Sources/citations list.
+    _SOURCE_ENTRY_RE = re.compile(r"^- \[(\d+)\] [^\n]+$", re.MULTILINE)
+    # Inline citation markers in body text: [1], [12].
+    _INLINE_CITATION_RE = re.compile(r"\[(\d+)\]")
+
+    @staticmethod
+    def _auto_close_unclosed_mermaid(content: str) -> str:
+        """Append a closing ``` to any ```mermaid block that never closes.
+
+        The main `_MERMAID_BLOCK_RE` substitution only matches well-formed
+        blocks; if the LLM truncates output mid-diagram, the opening fence
+        passes through silently and the rest of the page renders as raw
+        mermaid source. This helper scans for orphan openers and emits a
+        closer so the diagram at least terminates cleanly.
+        """
+        if "```mermaid" not in content:
+            return content
+        # Walk fence-by-fence. A mermaid opener is unclosed if no ``` follows
+        # it before the next ```mermaid or end of string.
+        parts: list[str] = []
+        i = 0
+        length = len(content)
+        while i < length:
+            opener_idx = content.find("```mermaid", i)
+            if opener_idx < 0:
+                parts.append(content[i:])
+                break
+            # Emit everything up to and including the opener + newline.
+            # Find end of opener line.
+            opener_end = content.find("\n", opener_idx)
+            if opener_end < 0:
+                # Opener is the last line — just append a newline + closer.
+                parts.append(content[i:] + "\n```\n")
+                i = length
+                break
+            parts.append(content[i:opener_end + 1])
+            i = opener_end + 1
+            # Search for the next ``` that closes this block, stopping if we
+            # hit another ```mermaid first (which means the first was unclosed).
+            close_idx = content.find("```", i)
+            next_mermaid_idx = content.find("```mermaid", i)
+            if close_idx < 0:
+                # No closer at all — emit remaining body + close fence.
+                parts.append(content[i:].rstrip("\n") + "\n```\n")
+                i = length
+                break
+            if next_mermaid_idx >= 0 and next_mermaid_idx <= close_idx:
+                # Another mermaid block starts before any closer — the first
+                # is unclosed. Emit body up to next opener + synthetic closer.
+                parts.append(content[i:next_mermaid_idx].rstrip("\n") + "\n```\n\n")
+                i = next_mermaid_idx
+                continue
+            # Well-formed block — emit body + closer + trailing newline.
+            parts.append(content[i:close_idx + 3])
+            i = close_idx + 3
+        return "".join(parts)
+
+    @classmethod
+    def _filter_citations_to_body(
+        cls, content: str, citations: list["WikiCitation"]
+    ) -> list["WikiCitation"]:
+        """Drop citations whose `[N]` marker never appears in `content`.
+
+        The renderer re-attaches the WikiPage.citations list as a visible
+        Sources section, so the earlier `_strip_orphan_citations` pass
+        (which only operates on LLM body text) cannot remove entries that
+        were trimmed from the body. This helper runs after
+        `_postprocess_content` and filters the citations list by the set
+        of `[N]` indices actually referenced in the final body.
+
+        A citation is kept when its id is `[N]` and the string `[N]`
+        appears somewhere in `content`. Ids that don't match `[N]` are
+        kept unchanged (defensive).
+        """
+        if not content or not citations:
+            return citations
+        used_indices: set[int] = set()
+        for m in cls._INLINE_CITATION_RE.finditer(content):
+            try:
+                used_indices.add(int(m.group(1)))
+            except ValueError:
+                pass
+        if not used_indices:
+            return citations
+        kept: list["WikiCitation"] = []
+        for c in citations:
+            cid = getattr(c, "id", "") or ""
+            mm = re.match(r"^\[(\d+)\]$", cid)
+            if mm is None:
+                kept.append(c)
+                continue
+            try:
+                if int(mm.group(1)) in used_indices:
+                    kept.append(c)
+            except ValueError:
+                kept.append(c)
+        return kept
+
+    @classmethod
+    def _strip_out_of_range_inline_citations(
+        cls, content: str, max_index: int
+    ) -> str:
+        """Drop `[N]` markers where N exceeds max_index (the count of citation facts).
+
+        The LLM occasionally emits citation numbers beyond the provided
+        citation list (e.g. references `[36]` when only 12 facts were
+        supplied). `_filter_citations_to_body` drops these from the citations
+        list, but the inline markers remain in the body as dangling refs.
+        This pass removes them. Comma-separated groups like `[1, 36, 7]` are
+        reduced to `[1, 7]`; groups that become empty are removed entirely,
+        along with a preceding space.
+        """
+        if not content or max_index <= 0:
+            return content
+
+        def _replace(match: re.Match) -> str:
+            raw = match.group(0)
+            inner = match.group(1)
+            parts = [p.strip() for p in inner.split(",")]
+            kept: list[str] = []
+            for p in parts:
+                if not p.isdigit():
+                    kept.append(p)
+                    continue
+                if 1 <= int(p) <= max_index:
+                    kept.append(p)
+            if not kept:
+                return ""
+            if len(kept) == len(parts):
+                return raw
+            return "[" + ", ".join(kept) + "]"
+
+        # Match either single `[N]` or comma-grouped `[N, M, ...]`.
+        pattern = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+        out = pattern.sub(_replace, content)
+        # Collapse ` ` left by removed markers (e.g. "fact  ." -> "fact.")
+        out = re.sub(r" {2,}([.,;:])", r"\1", out)
+        out = re.sub(r"  +", " ", out)
+        return out
+
+    @classmethod
+    def _strip_orphan_citations(cls, content: str) -> str:
+        """Remove Source list entries whose [N] marker is never cited in body.
+
+        Some LLM outputs define sources like `- [6] @Author — …` but never
+        reference `[6]` in the prose. This leaves "dangling" entries that add
+        noise and confuse readers. This pass is conservative: it only acts
+        when the Sources list is a trailing markdown block prefixed by a
+        heading `### Sources` or `## Sources` (matching _SOURCES_RE shape, but
+        we preserve the list here instead of stripping it).
+
+        Note: _SOURCES_RE already runs earlier in _postprocess_content and
+        strips the whole Sources section by design (because the UI renders
+        citations from WikiPage.citations, not the inline list). This
+        fallback handles cases where a Sources list leaked past the regex
+        (e.g., inside the body rather than trailing).
+        """
+        if "[" not in content:
+            return content
+        # Collect all inline citation indices used in non-source-list lines.
+        # Skip lines that are themselves source entries (`- [N] @author — …`),
+        # otherwise `- [6] @claire` counts as a "use" of [6] and the orphan
+        # never gets removed.
+        lines = content.split("\n")
+        used: set[int] = set()
+        in_sources = False
+        for line in lines:
+            stripped = line.strip()
+            if re.match(r"^#{2,4}\s*Sources?\s*$", stripped, re.IGNORECASE):
+                in_sources = True
+                continue
+            if in_sources and stripped.startswith("#"):
+                in_sources = False
+            if in_sources:
+                continue
+            # Skip source-entry lines themselves.
+            if cls._SOURCE_ENTRY_RE.match(line):
+                continue
+            for m in cls._INLINE_CITATION_RE.finditer(line):
+                try:
+                    used.add(int(m.group(1)))
+                except ValueError:
+                    pass
+        if not used:
+            return content
+        # Drop source-list lines whose [N] is not in `used`.
+        kept_lines: list[str] = []
+        for line in lines:
+            src_match = cls._SOURCE_ENTRY_RE.match(line)
+            if src_match:
+                try:
+                    idx = int(src_match.group(1))
+                except ValueError:
+                    kept_lines.append(line)
+                    continue
+                if idx not in used:
+                    continue
+            kept_lines.append(line)
+        return "\n".join(kept_lines)
 
     @staticmethod
     def _postprocess_content(content: str) -> str:
@@ -1459,12 +2176,23 @@ class WikiCompiler:
         # 1b. Strip terminal numbered citation lists (e.g., "- [1] @Author ...")
         content = WikiCompiler._CITATION_LIST_RE.sub("", content)
 
+        # 1c. Strip orphan source-list entries whose [N] never appears in body.
+        # Second line of defence after _SOURCES_RE for non-trailing source lists.
+        content = WikiCompiler._strip_orphan_citations(content)
+
+        # 1d. Auto-close unclosed ```mermaid fences. Must run BEFORE the
+        # _MERMAID_BLOCK_RE substitution below, otherwise orphan openers
+        # pass through unmodified and break downstream rendering.
+        content = WikiCompiler._auto_close_unclosed_mermaid(content)
+
         # 2. Sanitize mermaid blocks
         def _sanitize_node_label(match: re.Match) -> str:
             node_id = match.group(1)
             label = match.group(2)
-            # Strip characters mermaid rejects inside [...]: parens, quotes, backticks
-            label = re.sub(r'[()"\'\`]', " ", label)
+            # Strip characters mermaid rejects inside [...]: parens, quotes,
+            # backticks, plus dots and slashes (which the 11.x flowchart parser
+            # rejects in labels like `studio.votee.ai`, `CI/CD pipeline`).
+            label = re.sub(r'[()"\'\`./]', " ", label)
             # Collapse repeated spaces
             label = re.sub(r" {2,}", " ", label).strip()
             # If label is now empty, fall back to node ID so the box shows something
@@ -1487,6 +2215,11 @@ class WikiCompiler:
                 # Convert dash-space edge labels to pipe style: A -- label --> B  →  A -->|label| B
                 line = re.sub(r"--\s+([^-\n][^>\n]*?)\s+-->", r"-->|\1|", line)
                 line = re.sub(r"--\s+([^-\n][^-\n]*?)\s+---", r"---|\1|", line)
+                # Normalize rare arrow endings `--x` / `--o` (cross/circle) which
+                # the mermaid 11.x flowchart parser rejects when combined with
+                # pipe labels. Convert to the standard `-->` so labels render.
+                line = re.sub(r"--x\s*\|", "-->|", line)
+                line = re.sub(r"--o\s*\|", "-->|", line)
                 # Strip colon-style labels conservatively: only when --> NODE: free text (no brackets)
                 line = re.sub(r"(-->\s*\w+(?:\[[^\]]*\])?)\s*:\s*[^\[\]|]+$", r"\1", line)
                 # Sanitize node-definition labels: strip forbidden chars inside [...]
@@ -1603,18 +2336,43 @@ class WikiCompiler:
 
             filtered.append(item)
 
-        # Domain-based capping
+        # Domain-based capping. Canonicalize twitter.com→x.com so both
+        # variants share a cap (preventing 5 x.com + 5 twitter.com = 10
+        # near-duplicates of the same platform).
         from collections import Counter
+        _SOCIAL_DOMAINS = {
+            "x.com", "twitter.com", "threads.com", "facebook.com",
+            "instagram.com", "linkedin.com",
+        }
         domain_counts: Counter[str] = Counter()
+        # Second-pass normalized-URL dedup so the filter collapses items that
+        # slipped past _build_media_data (e.g., media from different callers).
+        seen_normalized: set[str] = set()
         domain_capped: list[dict] = []
         for item in filtered:
+            url = item.get("url", "") or ""
+            norm = _normalize_url(url)
+            if norm and norm in seen_normalized:
+                continue
+            if norm:
+                seen_normalized.add(norm)
             try:
                 from urllib.parse import urlparse
-                host = urlparse(item.get("url", "")).hostname or ""
-                domain = host.replace("www.", "")
+                host = (urlparse(url).hostname or "").lower()
+                if host.startswith("www."):
+                    host = host[4:]
+                # Canonicalize twitter.com → x.com for cap purposes.
+                if host == "twitter.com" or host.endswith(".twitter.com"):
+                    host = "x.com"
+                domain = host
             except Exception:
                 domain = "unknown"
-            cap = 10 if "github.com" in domain else 5
+            if domain in _SOCIAL_DOMAINS:
+                cap = 5
+            elif "github.com" in domain:
+                cap = 10
+            else:
+                cap = 5
             if domain_counts[domain] < cap:
                 domain_capped.append(item)
                 domain_counts[domain] += 1
@@ -1715,7 +2473,13 @@ class WikiCompiler:
             )
             return response.text or "{}"
 
-    async def _call_llm(self, prompt: str, max_retries: int = 1, page_kind: str = "topic") -> CompiledPageContent:
+    async def _call_llm(
+        self,
+        prompt: str,
+        max_retries: int = 1,
+        page_kind: str = "topic",
+        validator: "Callable[[str], tuple[bool, str]] | None" = None,
+    ) -> CompiledPageContent:
         from beever_atlas.infra.config import get_settings
         settings = get_settings()
         hardening = settings.wiki_parse_hardening
@@ -1768,6 +2532,29 @@ class WikiCompiler:
                         logger.warning("WikiCompiler: degenerate content shipped for retry (%s)", reason2)
                         return CompiledPageContent(content=content2 or content, summary=summary2 or summary)
 
+                if content and validator is not None:
+                    ok, reason = validator(content)
+                    if not ok and attempt < max_retries:
+                        logger.warning(
+                            "WikiCompiler: validator_failed event=degraded_regeneration page_kind=%s attempt=%d reason=%s",
+                            page_kind, attempt + 1, reason,
+                        )
+                        raw2 = await self._llm_generate_json(
+                            prompt + f"\n\nNOTE: The previous attempt failed validation — {reason} Fix this on retry.",
+                            temperature=0.4,
+                            page_kind=page_kind,
+                        )
+                        parsed2 = _parse_delimited_response(raw2 or "")
+                        content2 = parsed2.content.strip()
+                        summary2 = parsed2.summary.strip()
+                        ok2, reason2 = validator(content2) if content2 else (False, "empty")
+                        if ok2:
+                            return CompiledPageContent(content=content2, summary=summary2)
+                        logger.warning(
+                            "WikiCompiler: validator_failed_twice event=deterministic_fallback page_kind=%s reason=%s",
+                            page_kind, reason2,
+                        )
+                        return CompiledPageContent(content=content2 or content, summary=summary2 or summary)
                 if content:
                     return CompiledPageContent(content=content, summary=summary)
                 if attempt < max_retries:
@@ -1832,8 +2619,10 @@ class WikiCompiler:
     async def _compile_overview(self, gathered: dict) -> WikiPage:
         summary = gathered["channel_summary"]
         clusters = gathered["clusters"]
+        # Use `memory_count` (not `member_count`) as the JSON key so the LLM
+        # emits "N memories" instead of "N members" in Topics-at-a-Glance.
         clusters_data = [
-            {"id": c.id, "title": c.title, "member_count": c.member_count, "topic_tags": c.topic_tags}
+            {"id": c.id, "title": c.title, "memory_count": c.member_count, "topic_tags": c.topic_tags}
             for c in clusters
         ]
         # Build media data from media_facts
@@ -1864,7 +2653,11 @@ class WikiCompiler:
         # Build a stable, indexed citation list that the LLM will reference by [N] number.
         # Using the same list for both the prompt and the WikiPage.citations ensures inline
         # citation numbers match what the UI renders in the Sources panel.
-        citation_facts = (gathered["recent_facts"] + gathered["media_facts"])[:20]
+        # Cap to 12 facts (down from 20) — the LLM rarely uses all 20 and
+        # unused indices become orphan citations ([6] defined, never referenced)
+        # in the Sources list. Orphan strip in _postprocess_content is a
+        # second line of defence but capping at the source reduces churn.
+        citation_facts = (gathered["recent_facts"] + gathered["media_facts"])[:12]
         cited_facts_for_prompt = [
             {
                 "index": i,
@@ -1875,13 +2668,50 @@ class WikiCompiler:
             for i, f in enumerate(citation_facts, 1)
         ]
 
-        # Aggregate decisions from cluster-level data as fallback when top-level list is empty
-        gathered_decisions = gathered.get("decisions", [])
-        if not gathered_decisions:
-            gathered_decisions = [
-                d for c in gathered["clusters"]
-                for d in getattr(c, "decisions", [])
-            ]
+        # Always union top-level decisions with cluster-level decisions, then
+        # dedup by (name, decided_by, date) tuple so the Overview "Decisions
+        # Made" count reflects decisions scattered across clusters (previously
+        # the cluster fallback only ran when the top-level list was empty,
+        # hiding cluster decisions whenever ANY top-level decision existed).
+        _top_level_decisions = gathered.get("decisions", []) or []
+        _cluster_decisions = [
+            d for c in gathered["clusters"]
+            for d in getattr(c, "decisions", []) or []
+        ]
+        # Fallback: upstream consolidation may not populate `c.decisions` at
+        # all, in which case the count silently stays 0 even though facts
+        # typed as "decision" exist in `c.key_facts`. Harvest those too so
+        # Key Highlights reflects the real decision volume.
+        _fact_decisions = [
+            {
+                "name": kf.get("memory_text") or kf.get("fact") or "",
+                "decided_by": kf.get("author_name") or "",
+                "date": kf.get("message_ts") or "",
+            }
+            for c in gathered["clusters"]
+            for kf in (getattr(c, "key_facts", []) or [])
+            if isinstance(kf, dict)
+            and (kf.get("fact_type") or kf.get("type") or "").lower() == "decision"
+        ]
+        _seen_keys: set[tuple] = set()
+        gathered_decisions: list = []
+        for d in list(_top_level_decisions) + list(_cluster_decisions) + list(_fact_decisions):
+            if isinstance(d, dict):
+                # Normalize name for dedup — truncate to first 60 chars so
+                # the fact-harvested entries (which use full memory_text)
+                # don't escape dedup against shorter structured decisions.
+                raw_name = (d.get("name") or d.get("title") or "").strip().lower()
+                key = (
+                    raw_name[:60],
+                    (d.get("decided_by") or "").strip().lower(),
+                    (d.get("date") or "").strip()[:10],
+                )
+            else:
+                key = (str(getattr(d, "name", "") or getattr(d, "title", "")).strip().lower()[:60], "", "")
+            if key in _seen_keys:
+                continue
+            _seen_keys.add(key)
+            gathered_decisions.append(d)
 
         prompt = self._fmt_prompt(OVERVIEW_PROMPT,
             channel_name=summary.channel_name,
@@ -1910,7 +2740,11 @@ class WikiCompiler:
             cited_facts_json=json.dumps(cited_facts_for_prompt, default=str),
         )
         try:
-            result = await self._call_llm(prompt, page_kind="overview")
+            result = await self._call_llm(
+                prompt,
+                page_kind="overview",
+                validator=combine(min_length(300), mermaid_balanced, banned_phrases),
+            )
             content = result.content if result is not None else ""
             summary_text = result.summary if result is not None else ""
         except Exception as exc:
@@ -1920,16 +2754,31 @@ class WikiCompiler:
         if not stripped or _is_degenerate_content(content)[0]:
             logger.info("WikiCompiler: overview content empty/degenerate, using deterministic fallback")
             content, summary_text = _overview_fallback(summary, clusters)
+        post_content = self._postprocess_content(content)
+        post_content = self._strip_out_of_range_inline_citations(
+            post_content, max_index=len(citation_facts)
+        )
+        post_content = _splice_overview_sections(
+            post_content,
+            channel_summary=summary,
+            clusters=clusters,
+            tech_data=tech_data,
+            project_data=project_data,
+            decisions_count=len(gathered_decisions),
+            skipped_topics=skipped_topics,
+        )
         return WikiPage(
             id="overview",
             slug="overview",
             title=self._page_title("overview"),
             page_type="fixed",
             section_number="1",
-            content=self._postprocess_content(content),
+            content=post_content,
             summary=summary_text,
             memory_count=gathered["total_facts"],
-            citations=_build_citations(citation_facts),
+            citations=self._filter_citations_to_body(
+                post_content, _build_citations(citation_facts)
+            ),
         )
 
     async def _analyze_topic(self, cluster, sorted_facts: list[AtomicFact]) -> dict | None:
@@ -2034,7 +2883,10 @@ class WikiCompiler:
             content=content,
             summary=result_summary,
             memory_count=fact_count,
-            citations=_build_citations(sub_facts[:10]),
+            size_tier=_compute_size_tier(fact_count),
+            citations=self._filter_citations_to_body(
+                content, _build_citations(sub_facts[:10])
+            ),
         )
 
     async def _compile_thin_topic(self, cluster, gathered: dict) -> WikiPage:
@@ -2060,7 +2912,11 @@ class WikiCompiler:
             key_facts_json=json.dumps(cluster.key_facts, default=str),
             member_facts_json=json.dumps(facts_data, default=str),
         )
-        result = await self._call_llm(prompt, page_kind="topic")
+        result = await self._call_llm(
+            prompt,
+            page_kind="topic",
+            validator=combine(min_length(200), mermaid_balanced, required_headings(("Overview",))),
+        )
         content = self._postprocess_content(result.content)
         # Marker substitution still runs (table may be empty -> "" replacement).
         content = _splice_key_facts_table(content, cluster.key_facts)
@@ -2074,7 +2930,10 @@ class WikiCompiler:
             content=content,
             summary=result.summary,
             memory_count=cluster.member_count,
-            citations=_build_citations(sorted_facts[:20]),
+            size_tier=_compute_size_tier(cluster.member_count),
+            citations=self._filter_citations_to_body(
+                content, _build_citations(sorted_facts[:20])
+            ),
         )
 
     async def _compile_topic_page(self, cluster, gathered: dict) -> WikiPage | list[WikiPage]:
@@ -2175,15 +3034,19 @@ class WikiCompiler:
                             )
                             for sp in sub_pages
                         ]
+                        final_parent_content = parent_content if v2 else parent_result.content
                         parent_page = WikiPage(
                             id=f"topic-{slug}",
                             slug=slug,
                             title=cluster.title,
                             page_type="topic",
-                            content=parent_content if v2 else parent_result.content,
+                            content=final_parent_content,
                             summary=parent_result.summary,
                             memory_count=cluster.member_count,
-                            citations=_build_citations(sorted_facts[:20]),
+                            size_tier=_compute_size_tier(cluster.member_count),
+                            citations=self._filter_citations_to_body(
+                                final_parent_content, _build_citations(sorted_facts[:20])
+                            ),
                             children=children_refs,
                         )
                         return [parent_page, *sub_pages]
@@ -2217,7 +3080,11 @@ class WikiCompiler:
             media_json=json.dumps(media_data, default=str),
             related_topics_json=related_topics_json,
         )
-        result = await self._call_llm(prompt, page_kind="topic")
+        result = await self._call_llm(
+            prompt,
+            page_kind="topic",
+            validator=combine(min_length(200), mermaid_balanced, required_headings(("Overview",))),
+        )
         content = self._postprocess_content(result.content)
         if v2:
             content = _splice_key_facts_table(content, cluster.key_facts)
@@ -2231,7 +3098,10 @@ class WikiCompiler:
             content=content,
             summary=result.summary,
             memory_count=cluster.member_count,
-            citations=_build_citations(sorted_facts[:20]),
+            size_tier=_compute_size_tier(cluster.member_count),
+            citations=self._filter_citations_to_body(
+                content, _build_citations(sorted_facts[:20])
+            ),
         )
 
     async def _compile_people(self, gathered: dict) -> WikiPage:
@@ -2299,7 +3169,11 @@ class WikiCompiler:
             faq_candidates_json=json.dumps(faq_by_topic, default=str),
             topic_names_json=json.dumps(topic_names, default=str),
         )
-        result = await self._call_llm(prompt, page_kind="faq")
+        result = await self._call_llm(
+            prompt,
+            page_kind="faq",
+            validator=combine(min_length(150), mermaid_balanced),
+        )
         content = result.content
         summary = result.summary
         if not content.strip():
@@ -2361,12 +3235,20 @@ class WikiCompiler:
             glossary_terms_json=json.dumps(glossary_terms, default=str),
             channel_description=channel_summary.description or channel_summary.channel_name,
         )
-        result = await self._call_llm(prompt, page_kind="glossary")
+        result = await self._call_llm(
+            prompt,
+            page_kind="glossary",
+            validator=combine(min_length(200), mermaid_balanced),
+        )
         content = result.content
         summary = result.summary
         if not content.strip():
             logger.info("WikiCompiler: Glossary LLM returned empty, using deterministic fallback")
             content, summary = _glossary_fallback(glossary_terms, gathered.get("clusters", []))
+        content = _scrub_glossary_placeholders(content)
+        content = _splice_glossary_sections(
+            content, glossary_terms, gathered.get("clusters", []) or []
+        )
         return WikiPage(
             id="glossary",
             slug="glossary",
@@ -2412,7 +3294,9 @@ class WikiCompiler:
             content=content,
             summary=summary,
             memory_count=len(media_data),
-            citations=_build_citations(media_facts[:20]),
+            citations=self._filter_citations_to_body(
+                content, _build_citations(media_facts[:20])
+            ),
         )
 
     async def _compile_activity(self, gathered: dict) -> WikiPage:

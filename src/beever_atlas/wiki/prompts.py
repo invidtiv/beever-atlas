@@ -26,7 +26,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Content structure (follow this order strictly — INTRO FIRST, then visuals)
 1. **Brief intro** — 2-3 sentences describing what this channel is about, its purpose, and the key knowledge areas it covers. THIS MUST BE THE VERY FIRST CONTENT. Set the context for the reader before showing any visuals.
 2. **Concept map** — ```mermaid flowchart showing how the main topics/themes relate to each other. Use the topic relationships data to build accurate connections.
-3. **Key Highlights table** — GFM table summarizing: total topics, decisions made, key contributors, resources shared, active period
+3. **Key Highlights table** — GFM table summarizing: total topics, decisions made, key contributors, resources shared, active period. **CRITICAL**: use the EXACT numbers from the channel-data block below — `{decisions_count}` for "Decisions Made", `{people_count}` for "Key Contributors", `{media_count}` for "Resources Shared". Do NOT recompute these from topic descriptions; the provided counts are authoritative.
 4. **Topics at a glance** — bullet list of each topic with 1-line description and memory count. Topics with `"brief": true` in the data are minor/off-topic and were not given full pages — append "(brief mention)" after their entry.
 5. **Key contributors** — bullet list of most active people and their roles/expertise
 6. **Tools & resources** — if technologies or tools data exists, show as bullet list or GFM table. Skip this section entirely if no tools/technologies are relevant.
@@ -35,6 +35,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Writing style
 - **Synthesize, don't narrate.** Transform raw facts into insights. Write "The team identified context graphs as a key architecture pattern for agent safety [1]" — NOT "Jacky Chan shared a link about context graphs [1]".
 - FORBIDDEN phrases: "shared a link", "shared an article", "posted about", "mentioned that", "noted that", "presented a". These produce activity-log narration, not knowledge.
+- Avoid filler phrases that add no information: "crucial for", "under discussion", "actively testing", "plays a key role in", "is a subject of ongoing", "highlights the importance of". Replace with concrete verbs naming the specific outcome or blocker.
 - Lead with the INSIGHT or CONCLUSION, then cite the source. The reader wants to know what matters, not who posted what.
 - Use active voice describing the knowledge itself: "Context graphs prevent agents from using expired data [3]" — not "It was shared that context graphs prevent..."
 - When multiple people contributed to a theme, synthesize their collective input rather than listing each person's individual share.
@@ -47,7 +48,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Rules
 - Do NOT start with a # heading (title rendered separately)
 - Each numbered section above MUST be a ## heading (e.g. `## Concept Map`, `## Key Highlights`). Use ### for sub-sections within them. This creates a navigable table of contents.
-- Use ```mermaid for diagrams. Keep syntax SIMPLE — use ONLY `graph TD` with `ID[Label] --> ID[Label]` edges. Every node MUST use a short ID with a descriptive label: `DS[Data Sources]` not just `Data Sources`. FORBIDDEN: subgraph, end, style, classDef, parentheses inside brackets, quotes inside labels, `-- text -->` dash-space style labels, semicolons, chained arrows like `A --> B --> C` (use separate lines: `A --> B` then `B --> C`). USE `-->|label|` pipe-style to label edges (e.g., `A -->|uses| B`). Example: `graph TD\n    DS[Data Sources] -->|feeds| PR[Processing]\n    PR -->|outputs| ST[Storage]`
+- Use ```mermaid for diagrams. Keep syntax SIMPLE — use ONLY `graph TD` with `ID[Label] --> ID[Label]` edges. Every node MUST use a short ID with a descriptive label: `DS[Data Sources]` not just `Data Sources`. FORBIDDEN: subgraph, end, style, classDef, parentheses inside brackets, quotes inside labels, `-- text -->` dash-space style labels, semicolons, chained arrows like `A --> B --> C` (use separate lines: `A --> B` then `B --> C`). USE `-->|label|` pipe-style to label edges (e.g., `A -->|uses| B`). Example: `graph TD\n    DS[Data Sources] -->|feeds| PR[Processing]\n    PR -->|outputs| ST[Storage]`. **Every ```mermaid block MUST end with a line containing only ``` (three backticks) — never leave a mermaid block unclosed.**
 - Use ```chart for data charts with exact JSON: {{"type":"donut","title":"...","data":[{{"name":"X","value":N}}],"xKey":"name","series":["value"]}}
 - Use GFM tables for structured data. ALWAYS include the header separator row. Example:\n  | Column A | Column B |\n  |----------|----------|\n  | value 1  | value 2  |
 - Use bullet points over paragraphs when listing facts
@@ -102,6 +103,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Writing style
 - **Synthesize, don't narrate.** Write "The team adopted a wiki-first architecture for 10x cost reduction [1]" — NOT "Thomas Chong shared that the wiki-first architecture offers cost reduction [1]".
 - FORBIDDEN phrases: "shared a link", "shared an article", "posted about", "mentioned that", "noted that", "presented a", "highlighted that". These produce activity-log narration.
+- AVOID filler phrases: "crucial for", "under discussion", "actively testing", "plays a key role in", "is a subject of ongoing", "highlights the importance of", "paves the way for", "underscores the need". Replace with concrete verbs naming the specific outcome, blocker, or unresolved question.
 - Lead with the INSIGHT, then cite. The reader wants knowledge, not a timeline of who said what.
 - In the Key Facts table, state the fact itself — not "Person X observed that [fact]". Write the fact directly.
 - When listing open questions, include when the question was raised (e.g., "(raised Jan 2026)") so readers can assess staleness.
@@ -220,7 +222,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Writing style
 - Describe what each person DOES and KNOWS — not what they "shared" or "posted". Write "Thomas Chong drives architecture decisions for Beever Atlas [1]" — NOT "Thomas Chong shared several messages about architecture [1]".
 - In the Contributors table, "Key Contributions" should describe impact (e.g., "Designed the memory hierarchy and led database selection") — not activity (e.g., "Shared 14 messages across 8 topics").
-- FORBIDDEN phrases: "shared a link", "posted about", "mentioned that".
+- FORBIDDEN phrases: "shared a link", "posted about", "mentioned that". AVOID filler: "crucial for", "under discussion", "actively testing", "plays a key role in".
 
 ## Adaptive instructions
 - Use "Contributors" and "Experts" language rather than "Team members" — this works for open communities, research groups, and enterprise teams alike
@@ -258,7 +260,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Writing style
 - Focus on the DECISION and its RATIONALE — not who proposed it. Write "The team chose Supabase for its real-time capabilities, replacing the initial Postgres plan [1]" — NOT "Thomas Chong suggested using Supabase [1]".
 - In the Impact analysis, explain consequences: what changed, what was enabled, what risks remain.
-- FORBIDDEN phrases: "shared a link", "posted about", "mentioned that".
+- FORBIDDEN phrases: "shared a link", "posted about", "mentioned that". AVOID filler: "crucial for", "under discussion", "actively testing", "plays a key role in".
 
 ## Adaptive instructions
 - "Decisions" applies broadly: technical architecture choices, community governance decisions, research methodology selections, project direction changes, policy updates
@@ -343,6 +345,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Writing style
 - Each answer MUST be 2-3 sentences providing actionable context, not a restatement of the source. Bad: "MCP is a protocol proposed by Alvin Yu [1]." Good: "MCP (Multi-Agent Communication Protocol) standardizes how AI agents call Beever Atlas capabilities through a unified interface. It separates tool invocation (MCP) from guidance/instructions (Skills), enabling agents to interact with the system without custom integrations [1]."
 - Answers should help someone UNDERSTAND the topic, not just confirm it exists.
+- **Verbatim reuse**: if a candidate question already has an `answer` field containing 2+ sentences with citation markers, reuse that answer **verbatim** (preserve its wording and `[N]` citations). Only rewrite when the candidate answer is <2 sentences, lacks citations, or is clearly malformed.
 - Each Q&A pair must be visually separated with a blank line before and after the answer — never run Q&A pairs together in a single paragraph.
 - FORBIDDEN: 1-sentence answers that merely restate who said what.
 
@@ -371,10 +374,10 @@ GLOSSARY_PROMPT = """You are a knowledge wiki compiler. Create a **Glossary** pa
 
 Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 
-## Content structure (follow this order strictly — DIAGRAM FIRST, text after visuals)
-1. **Relationship diagram** — if 5+ terms exist, include a ```mermaid diagram showing how terms relate to each other (which terms are used together, which are sub-concepts of others). THIS MUST BE THE VERY FIRST CONTENT ELEMENT (skip if fewer than 5 terms — start with Terms table instead).
-2. **Terms table** — GFM table with columns: Term, Definition, First Mentioned By, Related Topics. Sort alphabetically.
-3. **Introduction** — 1 sentence: "Key terms, acronyms, and concepts used in this channel." (AFTER the diagram/table)
+## Content structure (follow this order strictly)
+1. **Relationship diagram** — if 5+ terms exist, include a ```mermaid diagram showing how terms relate to each other (which terms are used together, which are sub-concepts of others). THIS MUST BE THE VERY FIRST CONTENT ELEMENT (skip if fewer than 5 terms — start with Introduction instead).
+2. **Introduction** — 1 sentence: "Key terms, acronyms, and concepts used in this channel."
+3. **Terms table** — GFM table with columns: Term, Definition, First Mentioned By, Related Topics. Sort alphabetically. In the "First Mentioned By" column, write "—" when the source is unknown; NEVER write placeholder markers like `(Implicit)`, `(Inferred)`, `(Unknown)`, `(N/A)`, or any parenthesized guess.
 4. **Category breakdown** — if terms naturally group into categories (e.g., technical terms, process terms, domain terms), add a brief categorized list after the table
 
 ## Writing style
