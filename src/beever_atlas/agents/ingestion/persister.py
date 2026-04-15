@@ -101,13 +101,23 @@ class PersisterAgent(BaseAgent):
         embedded_facts: list[dict[str, Any]] = (
             ctx.session.state.get("embedded_facts") or []
         )
-        validated_payload: dict[str, Any] = (
-            ctx.session.state.get("validated_entities") or {}
-        )
-        entity_dicts: list[dict[str, Any]] = validated_payload.get("entities") or []
-        relationship_dicts: list[dict[str, Any]] = (
-            validated_payload.get("relationships") or []
-        )
+        raw_validated = ctx.session.state.get("validated_entities")
+        if not isinstance(raw_validated, dict):
+            if raw_validated:
+                logger.warning(
+                    "PersisterAgent: validated_entities is %s, not dict; treating as empty batch=%s",
+                    type(raw_validated).__name__,
+                    batch_num,
+                )
+            validated_payload: dict[str, Any] = {}
+        else:
+            validated_payload = raw_validated
+        entity_dicts: list[dict[str, Any]] = [
+            e for e in (validated_payload.get("entities") or []) if isinstance(e, dict)
+        ]
+        relationship_dicts: list[dict[str, Any]] = [
+            r for r in (validated_payload.get("relationships") or []) if isinstance(r, dict)
+        ]
 
         stores = get_stores()
 

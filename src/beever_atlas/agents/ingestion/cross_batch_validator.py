@@ -28,13 +28,19 @@ def _skip_if_no_work(callback_context: CallbackContext) -> types.Content | None:
 
     # Second check: empty entities
     raw = callback_context.state.get("extracted_entities")
-    if raw is None:
+    if not isinstance(raw, dict):
+        if raw is not None:
+            logger.warning(
+                "CrossBatchValidator: extracted_entities is %s, not dict; treating as empty",
+                type(raw).__name__,
+            )
+        callback_context.state["validated_entities"] = {"entities": [], "relationships": []}
         return types.Content(
             role="model",
             parts=[types.Part(text="[Skipped: no entities to validate]")],
         )
-    entities = raw.get("entities", []) if isinstance(raw, dict) else []
-    relationships = raw.get("relationships", []) if isinstance(raw, dict) else []
+    entities = raw.get("entities") or []
+    relationships = raw.get("relationships") or []
     if not entities and not relationships:
         logger.info("CrossBatchValidator: skipping — 0 entities, 0 relationships")
         # Write empty validation result so downstream stages have the key
