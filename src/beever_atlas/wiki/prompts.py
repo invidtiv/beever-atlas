@@ -452,12 +452,11 @@ TOPIC_ANALYSIS_PROMPT = """You are a knowledge wiki architect. Analyze whether t
 Return JSON exactly: {{"needs_subpages": true/false, "subpages": [{{"title": "...", "fact_indices": [0, 1, 2], "summary": "..."}}]}}
 
 ## Rules
-- Only recommend splitting if there are clearly distinct sub-themes (at least 2 sub-pages, each with 5+ facts)
-- If the facts are cohesive and cover one main theme, return {{"needs_subpages": false, "subpages": []}}
-- Each fact_indices entry is a 0-based index into the facts list below
-- Every fact must be assigned to exactly one sub-page (no gaps, no overlaps)
-- Sub-page titles should be concise (3-6 words) and descriptive
-- Maximum 5 sub-pages
+- **Size-based bias**: Readers cannot navigate a 40+ row Key Facts table. If `fact_count` ≥ 40, you MUST return `needs_subpages: true` and partition into 2–5 sub-pages even if the theme feels unified — there will always be sub-themes worth separating (by entity, by phase, by platform, by decision vs. discussion, etc.).
+- For clusters with 15–39 facts, recommend splitting ONLY if there are clearly distinct sub-themes (at least 2 sub-pages, each with 5+ facts); return `needs_subpages: false` otherwise.
+- When splitting, every fact must be assigned to exactly one sub-page (no gaps, no overlaps). Each fact_indices entry is a 0-based index into the facts list below.
+- Sub-page titles should be concise (3-6 words) and descriptive.
+- Maximum 5 sub-pages. Each sub-page must have 5+ facts.
 
 ## Topic
 Title: {title}

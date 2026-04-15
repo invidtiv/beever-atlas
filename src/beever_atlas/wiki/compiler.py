@@ -2973,6 +2973,21 @@ class WikiCompiler:
         # Sub-page analysis for large clusters
         if len(member_facts) >= TOPIC_SUBPAGE_THRESHOLD:
             analysis = await self._analyze_topic(cluster, sorted_facts)
+            # Force a retry when the LLM says "no split" on a very large cluster
+            # (≥40 facts). A 40+ row Key Facts table is unreadable, so treat
+            # this as an analyzer error and ask again once.
+            if (
+                len(member_facts) >= 40
+                and analysis is not None
+                and not analysis.get("needs_subpages")
+            ):
+                logger.info(
+                    "WikiCompiler: analyzer said no-split for large cluster '%s' "
+                    "(%d facts); retrying once with stronger bias",
+                    cluster.title,
+                    len(member_facts),
+                )
+                analysis = await self._analyze_topic(cluster, sorted_facts)
             if analysis and analysis.get("needs_subpages") and analysis.get("subpages"):
                 try:
                     # Generate sub-pages in parallel
@@ -3245,6 +3260,12 @@ class WikiCompiler:
         if not content.strip():
             logger.info("WikiCompiler: Glossary LLM returned empty, using deterministic fallback")
             content, summary = _glossary_fallback(glossary_terms, gathered.get("clusters", []))
+        # Post-process BEFORE splicing: _postprocess_content auto-closes any
+        # unclosed ```mermaid fence. If we splice first, the auto-closer runs
+        # afterwards and seals the close fence AFTER our appended content —
+        # which drags Introduction + Terms INTO the mermaid block and
+        # renders as a mermaid syntax error.
+        content = self._postprocess_content(content)
         content = _scrub_glossary_placeholders(content)
         content = _splice_glossary_sections(
             content, glossary_terms, gathered.get("clusters", []) or []
@@ -3254,7 +3275,7 @@ class WikiCompiler:
             slug="glossary",
             title=self._page_title("glossary"),
             page_type="fixed",
-            content=self._postprocess_content(content),
+            content=content,
             summary=summary,
             memory_count=len(glossary_terms),
         )
