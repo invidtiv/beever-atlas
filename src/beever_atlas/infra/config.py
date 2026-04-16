@@ -284,6 +284,16 @@ class Settings(BaseSettings):
     # Admin token for /api/dev/* endpoints
     admin_token: str = Field(default="", alias="BEEVER_ADMIN_TOKEN")
 
+    # Transitional feature flag: when True, `require_user` still accepts
+    # BRIDGE_API_KEY on user-facing routes. Default is True during the
+    # migration that decouples bridge auth from user auth (security
+    # finding H4); the follow-up commit flips the default to False so a
+    # leaked bridge key can no longer act as a super-admin on
+    # /api/memories, /api/channels/*/data, etc.
+    allow_bridge_as_user: bool = Field(
+        default=True, alias="BEEVER_ALLOW_BRIDGE_AS_USER"
+    )
+
     @property
     def neo4j_user(self) -> str:
         return self.neo4j_auth.split("/")[0]
