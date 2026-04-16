@@ -172,6 +172,65 @@ def test_no_keys_configured_still_rejects(monkeypatch):
     assert r.status_code == 401
 
 
+# ── H4 final-state guarantees ───────────────────────────────────────────
+#
+# The `allow_bridge_as_user` default is False after Group 6. These tests
+# lock in that default so the regression can't silently flip back.
+
+
+def test_default_setting_rejects_bridge_as_user():
+    """`Settings()` with no env override must default `allow_bridge_as_user` False."""
+    from beever_atlas.infra.config import Settings
+
+    s = Settings(api_keys="k", bridge_api_key="b")  # type: ignore[arg-type]
+    assert s.allow_bridge_as_user is False, (
+        "H4 regression: BEEVER_ALLOW_BRIDGE_AS_USER default must be False"
+    )
+
+
+def test_bridge_key_rejected_on_user_routes_with_default_config(monkeypatch):
+    """End-to-end: bridge key → user route → 401 under default config."""
+    # Intentionally do NOT pass allow_bridge_as_user — we want the default.
+    base = dict(
+        api_keys="user-key-aaaaaaaa",
+        bridge_api_key="bridge-secret-xxxxxxxx",
+        admin_token="admin-token-xyz",
+    )
+
+    def fake_get_settings():
+        from beever_atlas.infra.config import Settings
+
+        return Settings(**base)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(auth_mod, "get_settings", fake_get_settings)
+
+    client = TestClient(_build_app())
+    # User key → accepted.
+    assert (
+        client.get(
+            "/user", headers={"Authorization": "Bearer user-key-aaaaaaaa"}
+        ).status_code
+        == 200
+    )
+    # Bridge key → rejected at the dependency layer.
+    assert (
+        client.get(
+            "/user", headers={"Authorization": "Bearer bridge-secret-xxxxxxxx"}
+        ).status_code
+        == 401
+    )
+
+
+def test_emergency_override_still_works(monkeypatch):
+    """The override path must remain functional for operators who need it."""
+    _patch_settings(monkeypatch, allow_bridge_as_user=True)
+    client = TestClient(_build_app())
+    r = client.get(
+        "/user", headers={"Authorization": "Bearer bridge-secret-xxxxxxxx"}
+    )
+    assert r.status_code == 200
+
+
 @pytest.mark.parametrize("bad_header", ["", "Basic xyz", "Bearer", "Bearer  "])
 def test_malformed_authorization_header(monkeypatch, bad_header):
     _patch_settings(monkeypatch)

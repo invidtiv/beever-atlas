@@ -8,12 +8,12 @@ Two distinct dependencies are exposed so public user routes and internal
 bridge routes use different trust models:
 
 - `require_user(...)` → `Principal(kind="user")` for user-facing routes.
+  REJECTS `BRIDGE_API_KEY` by default (security finding H4).
 - `require_bridge(...)` → `Principal(kind="bridge")` for `/api/internal/*`.
 
-The `BEEVER_ALLOW_BRIDGE_AS_USER` feature flag temporarily permits the
-bridge key on user routes during the migration that decouples them (the
-flag's default flips to `False` in the follow-up commit that closes
-finding H4).
+`BEEVER_ALLOW_BRIDGE_AS_USER` is an emergency override that re-opens the
+bridge-as-user path. It defaults to False; when set to True, `config.py`
+emits a loud startup warning so operators notice the reopened gap.
 """
 
 from __future__ import annotations
@@ -129,11 +129,10 @@ def require_user(
 ) -> Principal:
     """Validate Bearer token against configured user API keys.
 
-    Accepts values from ``BEEVER_API_KEYS`` and (while
-    ``BEEVER_ALLOW_BRIDGE_AS_USER`` is True) the internal ``BRIDGE_API_KEY``.
-    The flag exists solely to keep existing callers working while the
-    ownership model lands; commit H4 flips its default to ``False`` and
-    bridge tokens are then rejected here.
+    Accepts values from ``BEEVER_API_KEYS``. The internal
+    ``BRIDGE_API_KEY`` is rejected here unless the emergency override
+    ``BEEVER_ALLOW_BRIDGE_AS_USER=true`` is set (security finding H4) —
+    that flag also triggers a boot-time warning in `config.py`.
 
     May be provided via ``Authorization: Bearer <token>`` (preferred) OR
     ``?access_token=<token>`` for `<img src>` / `<a href>` URLs that
