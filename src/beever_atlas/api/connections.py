@@ -252,7 +252,7 @@ async def create_connection(body: CreateConnectionRequest) -> ConnectionResponse
     stores = get_stores()
     platform = body.platform.lower()
 
-    if platform not in ("slack", "discord", "teams", "telegram", "file"):
+    if platform not in ("slack", "discord", "teams", "telegram", "mattermost", "file"):
         raise HTTPException(status_code=400, detail=f"Unsupported platform: {platform!r}")
 
     # "file" connections are created by POST /api/imports/commit with no
@@ -296,12 +296,15 @@ async def create_connection(body: CreateConnectionRequest) -> ConnectionResponse
     # Step 1: register adapter — raises HTTPException on failure
     await _register_adapter(platform, body.credentials, connection_id=connection_id)
 
-    # Step 2: verify channel access — rollback on failure
-    try:
-        await _list_bridge_channels(platform, connection_id=connection_id)
-    except HTTPException:
-        await _unregister_adapter(connection_id)
-        raise
+    # Step 2: verify channel access — skipped for webhook-driven platforms (Telegram, Teams)
+    # that have no channel listing API. They receive messages via webhook only.
+    _WEBHOOK_ONLY_PLATFORMS = {"telegram", "teams"}
+    if platform not in _WEBHOOK_ONLY_PLATFORMS:
+        try:
+            await _list_bridge_channels(platform, connection_id=connection_id)
+        except HTTPException:
+            await _unregister_adapter(connection_id)
+            raise
 
     # Step 3: persist encrypted connection
     conn = await stores.platform.create_connection(
@@ -313,7 +316,7 @@ async def create_connection(body: CreateConnectionRequest) -> ConnectionResponse
         connection_id=connection_id,
     )
 
-    logger.info("Created platform connection id=%s platform=%s", conn.id, platform)
+    logger.info("Created platform connection id=%s platform=%s", conn.id, conn.platform)
     return _to_response(conn)
 
 
@@ -343,10 +346,12 @@ async def validate_connection(connection_id: str) -> ConnectionResponse:
     if conn is None:
         raise HTTPException(status_code=404, detail=f"Connection {connection_id!r} not found")
 
+    _WEBHOOK_ONLY_PLATFORMS = {"telegram", "teams"}
     try:
         credentials = stores.platform.decrypt_connection_credentials(conn)
         await _register_adapter(conn.platform, credentials, connection_id=conn.id)
-        await _list_bridge_channels(conn.platform, connection_id=conn.id)
+        if conn.platform not in _WEBHOOK_ONLY_PLATFORMS:
+            await _list_bridge_channels(conn.platform, connection_id=conn.id)
         updated = await stores.platform.update_connection(
             connection_id,
             status="connected",
@@ -374,6 +379,12 @@ async def list_connection_channels(connection_id: str) -> list[ChannelItem]:
     conn = await stores.platform.get_connection(connection_id)
     if conn is None:
         raise HTTPException(status_code=404, detail=f"Connection {connection_id!r} not found")
+
+    # Teams has no channel-listing path wired up (Graph API not implemented) — short-circuit
+    # to avoid a 501. Telegram falls through: the bridge returns an in-memory registry of
+    # chats the bot has received updates from (populated on webhook delivery).
+    if conn.platform == "teams":
+        return []
 
     raw_channels = await _list_bridge_channels(conn.platform, connection_id=conn.id)
     # Only return channels where the bot is a member — the bot can only

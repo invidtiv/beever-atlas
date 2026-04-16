@@ -7,7 +7,7 @@ config({ path: resolve(import.meta.dirname, "../../.env") });
 import { Chat } from "chat";
 import { formatBlockKit } from "./formatter.js";
 import { consumeSSEStream } from "./sse-client.js";
-import { registerBridgeRoutes } from "./bridge.js";
+import { registerBridgeRoutes, recordTelegramChat } from "./bridge.js";
 import { ChatManager } from "./chat-manager.js";
 import { WebhookBuffer } from "./webhook-buffer.js";
 
@@ -246,6 +246,15 @@ async function fallbackToEnvCredentials(chatManager: ChatManager): Promise<void>
   if (telegramToken) {
     console.log("Env fallback: registering Telegram adapter from .env credentials");
     await chatManager.register("telegram", { botToken: telegramToken });
+    registered++;
+  }
+
+  // Mattermost
+  const mmBaseUrl = process.env.MATTERMOST_BASE_URL;
+  const mmBotToken = process.env.MATTERMOST_BOT_TOKEN;
+  if (mmBaseUrl && mmBotToken) {
+    console.log("Env fallback: registering Mattermost adapter from .env credentials");
+    await chatManager.register("mattermost", { baseUrl: mmBaseUrl, botToken: mmBotToken });
     registered++;
   }
 
@@ -529,6 +538,9 @@ async function handlePlatformWebhook(
         // If verification succeeded (non-4xx), use this response
         if (webRes.status < 400) {
           console.log(`Legacy ${platform} webhook handled by connection ${connectionId}`);
+          if (platform === "telegram") {
+            recordTelegramChatFromUpdate(body, connectionId);
+          }
           res.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
           const resBody = await webRes.text();
           res.end(resBody);
@@ -557,6 +569,34 @@ async function handlePlatformWebhook(
     console.error(`${platform} webhook error:`, err);
     res.writeHead(500);
     res.end("Internal Server Error");
+  }
+}
+
+/**
+ * Parse a Telegram webhook body and register any chat ids it exposes into the
+ * bridge's in-memory registry, so `listChannels` can surface groups the bot has
+ * been invited to. Telegram has no channel-discovery API per chat-sdk docs
+ * ("no native way to discover channels or groups the bot inhabits"), so this is
+ * the only way a group becomes visible in the UI's channel list.
+ */
+function recordTelegramChatFromUpdate(body: string, connectionId: string): void {
+  try {
+    const update = JSON.parse(body);
+    const candidates = [
+      update?.message,
+      update?.edited_message,
+      update?.channel_post,
+      update?.edited_channel_post,
+      update?.my_chat_member,
+      update?.chat_member,
+      update?.message_reaction,
+      update?.callback_query?.message,
+    ];
+    for (const evt of candidates) {
+      if (evt?.chat) recordTelegramChat(connectionId, evt.chat);
+    }
+  } catch {
+    // malformed body — ignore; the SDK's handler will surface its own error
   }
 }
 

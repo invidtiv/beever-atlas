@@ -931,11 +931,45 @@ class TeamsBridge implements PlatformBridge {
 // Telegram bots are event-driven — they receive messages via webhook but cannot
 // pull message history or list group chats. These methods return empty stubs.
 
+// Per-connection registry of Telegram chats the bot has observed. Telegram's Bot API
+// has no "list my chats" endpoint (confirmed by chat-sdk.dev/adapters/telegram: "no
+// native way to discover channels or groups the bot inhabits"), so we populate this
+// registry lazily from incoming webhook/polling updates via recordTelegramChat().
+// In-memory only — rebuilt as new updates arrive after restart.
+interface TelegramChatEntry {
+  chatId: string;
+  title: string;
+  type: "private" | "group" | "supergroup" | "channel" | string;
+  lastSeenAt: number;
+}
+const telegramChatRegistry = new Map<string, Map<string, TelegramChatEntry>>();
+
+export function recordTelegramChat(
+  connectionId: string,
+  chat: { id: number | string; title?: string; type?: string; first_name?: string; last_name?: string; username?: string },
+): void {
+  if (!connectionId || chat?.id === undefined || chat?.id === null) return;
+  const chatId = String(chat.id);
+  const title =
+    chat.title ||
+    [chat.first_name, chat.last_name].filter(Boolean).join(" ") ||
+    chat.username ||
+    chatId;
+  let bucket = telegramChatRegistry.get(connectionId);
+  if (!bucket) {
+    bucket = new Map();
+    telegramChatRegistry.set(connectionId, bucket);
+  }
+  bucket.set(chatId, { chatId, title, type: chat.type || "unknown", lastSeenAt: Date.now() });
+}
+
 class TelegramBridge implements PlatformBridge {
   private adapter: unknown;
+  private connectionId: string;
 
-  constructor(adapter: unknown) {
+  constructor(adapter: unknown, connectionId: string) {
     this.adapter = adapter;
+    this.connectionId = connectionId;
   }
 
   async resolveUser(_userId: string): Promise<{ name: string; image: string | null }> {
@@ -943,10 +977,17 @@ class TelegramBridge implements PlatformBridge {
   }
 
   async listChannels(): Promise<NormalizedChannel[]> {
-    throw Object.assign(
-      new Error("Telegram bots have no channel listing API"),
-      { data: { error: "not_supported" }, code: "NOT_SUPPORTED" },
-    );
+    const bucket = telegramChatRegistry.get(this.connectionId);
+    if (!bucket || bucket.size === 0) return [];
+    return Array.from(bucket.values()).map((c) => ({
+      channel_id: c.chatId,
+      name: c.title,
+      platform: "telegram",
+      is_member: true,
+      member_count: null,
+      topic: c.type,
+      purpose: null,
+    }));
   }
 
   async getChannel(id: string): Promise<NormalizedChannel> {
@@ -995,6 +1036,303 @@ class TelegramBridge implements PlatformBridge {
   }
 }
 
+// ── MattermostBridge ──────────────────────────────────────────────────────────
+// Calls Mattermost REST API v4 directly for channel listing and message history.
+// The chat-adapter-mattermost community adapter handles real-time WebSocket events
+// but does not expose listing/history methods.
+
+const mattermostUserCache = new Map<string, { name: string; image: string | null }>();
+
+class MattermostBridge implements PlatformBridge {
+  private baseUrl: string;
+  private botToken: string;
+  private connectionId: string;
+  private botUserId: string | null = null;
+
+  constructor(_adapter: unknown, connectionId: string, baseUrl: string, botToken: string) {
+    this.connectionId = connectionId;
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.botToken = botToken;
+  }
+
+  private async _fetch(path: string, init?: RequestInit): Promise<any> {
+    const url = `${this.baseUrl}/api/v4${path}`;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.botToken}`,
+      "Content-Type": "application/json",
+      ...(init?.headers as Record<string, string> || {}),
+    };
+
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const response = await fetch(url, { ...init, headers });
+      if (response.ok) return response.json();
+
+      if (response.status === 429 || response.status >= 500) {
+        lastErr = new Error(`Mattermost API ${response.status} on ${path}`);
+        const wait = 1000 * (2 ** attempt);
+        console.warn(`MattermostBridge: ${response.status} on ${path}, retrying in ${wait}ms (attempt ${attempt + 1}/3)`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+
+      const text = await response.text().catch(() => "");
+      throw new Error(`Mattermost API error ${response.status} on ${path}: ${text}`);
+    }
+    throw lastErr || new Error(`Mattermost API failed after retries on ${path}`);
+  }
+
+  private async _getBotUserId(): Promise<string> {
+    if (this.botUserId) return this.botUserId;
+    const me = await this._fetch("/users/me");
+    this.botUserId = me.id;
+    return me.id;
+  }
+
+  async resolveUser(userId: string): Promise<{ name: string; image: string | null }> {
+    if (mattermostUserCache.has(userId)) return mattermostUserCache.get(userId)!;
+    try {
+      const user = await this._fetch(`/users/${userId}`);
+      const name = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username || userId;
+      const resolved = { name, image: null };
+      mattermostUserCache.set(userId, resolved);
+      return resolved;
+    } catch {
+      const fallback = { name: userId, image: null };
+      mattermostUserCache.set(userId, fallback);
+      return fallback;
+    }
+  }
+
+  async listChannels(): Promise<NormalizedChannel[]> {
+    const botId = await this._getBotUserId();
+    const teams: any[] = await this._fetch("/users/me/teams");
+    const channels: NormalizedChannel[] = [];
+
+    for (const team of teams) {
+      const teamChannels: any[] = await this._fetch(`/users/${botId}/teams/${team.id}/channels`);
+      for (const ch of teamChannels) {
+        if (ch.type === "D" || ch.type === "G") continue;
+        if (ch.delete_at > 0) continue;
+        channels.push({
+          channel_id: ch.id,
+          name: ch.display_name || ch.name || "",
+          platform: "mattermost",
+          is_member: true,
+          member_count: null,
+          topic: ch.header || null,
+          purpose: ch.purpose || null,
+        });
+      }
+    }
+    return channels;
+  }
+
+  async getChannel(id: string): Promise<NormalizedChannel> {
+    const ch = await this._fetch(`/channels/${id}`);
+    return {
+      channel_id: ch.id,
+      name: ch.display_name || ch.name || "",
+      platform: "mattermost",
+      is_member: true,
+      member_count: null,
+      topic: ch.header || null,
+      purpose: ch.purpose || null,
+    };
+  }
+
+  private _normalizePost(post: any, channelName: string, userMap: Map<string, { name: string; image: string | null }>): NormalizedMessage {
+    const authorId = post.user_id || "unknown";
+    const userInfo = userMap.get(authorId);
+    const files: any[] = post.metadata?.files || [];
+
+    return {
+      content: post.message || "",
+      author: authorId,
+      author_name: userInfo?.name || authorId,
+      author_image: userInfo?.image || null,
+      platform: "mattermost",
+      channel_id: post.channel_id || "",
+      channel_name: channelName,
+      message_id: post.id || "",
+      timestamp: new Date(post.create_at).toISOString(),
+      thread_id: post.root_id || null,
+      attachments: files.map((f: any) => ({
+        type: f.mime_type?.startsWith("image/") ? "image"
+            : f.mime_type?.startsWith("video/") ? "video"
+            : "file",
+        url: `${this.baseUrl}/api/v4/files/${f.id}`,
+        name: f.name || "",
+        mimetype: f.mime_type || "",
+      })),
+      reactions: [],
+      reply_count: post.reply_count || 0,
+      is_bot: false,
+      subtype: null,
+      links: [],
+    };
+  }
+
+  async getMessages(channelId: string, opts: GetMessagesOpts): Promise<NormalizedMessage[]> {
+    // Mattermost API always returns newest-first and doesn't support forward
+    // cursor pagination via `since` the way Slack does. For ascending order
+    // (used by the sync runner), we walk backward with `before` cursor across
+    // multiple internal pages, then reverse to chronological order.
+    if (opts.order === "asc" && !opts.before) {
+      return this._getMessagesAsc(channelId, opts);
+    }
+
+    const params = new URLSearchParams({
+      per_page: String(opts.limit || 100),
+      // Mattermost default is collapsed threads which omits reply_count/last_reply_at.
+      // Without these flags, root posts look replyless and thread ingestion silently skips them.
+      collapsedThreads: "true",
+      collapsedThreadsExtended: "true",
+    });
+    if (opts.before) params.set("before", opts.before);
+    if (opts.since) {
+      const epochMs = new Date(opts.since).getTime();
+      params.set("since", String(epochMs));
+    }
+
+    const data = await this._fetch(`/channels/${channelId}/posts?${params}`);
+    const order: string[] = data.order || [];
+    const posts: Record<string, any> = data.posts || {};
+
+    let channelName = "";
+    try {
+      const ch = await this._fetch(`/channels/${channelId}`);
+      channelName = ch.display_name || ch.name || "";
+    } catch { /* ignore */ }
+
+    const userIds = [...new Set(order.map((id) => posts[id]?.user_id).filter(Boolean))];
+    const userMap = new Map<string, { name: string; image: string | null }>();
+    for (const uid of userIds) {
+      userMap.set(uid, await this.resolveUser(uid));
+    }
+
+    // Mattermost's /posts endpoint returns root posts, thread replies, AND
+    // system messages (join/leave/rename) mixed together. We only want
+    // user-authored root posts — matching Mattermost's total_msg_count_root.
+    // Thread replies are fetched separately via getThreadMessages() when
+    // reply_count > 0.
+    const messages = order
+      .filter((id) => posts[id] && !posts[id].root_id && !posts[id].type)
+      .map((id) => this._normalizePost(posts[id], channelName, userMap));
+
+    if (opts.order === "asc") messages.reverse();
+    return messages;
+  }
+
+  private async _getMessagesAsc(channelId: string, opts: GetMessagesOpts): Promise<NormalizedMessage[]> {
+    const totalLimit = opts.limit || 500;
+    const pageSize = 200;
+    const allPosts: Array<{ id: string; post: any }> = [];
+    let beforeCursor: string | undefined;
+    const sinceMs = opts.since ? new Date(opts.since).getTime() : 0;
+
+    let channelName = "";
+    try {
+      const ch = await this._fetch(`/channels/${channelId}`);
+      channelName = ch.display_name || ch.name || "";
+    } catch { /* ignore */ }
+
+    // Walk backward from newest, collecting pages until we've reached
+    // the `since` cutoff or exhausted all messages.
+    while (allPosts.length < totalLimit) {
+      const params = new URLSearchParams({
+        per_page: String(pageSize),
+        collapsedThreads: "true",
+        collapsedThreadsExtended: "true",
+      });
+      if (beforeCursor) params.set("before", beforeCursor);
+
+      const data = await this._fetch(`/channels/${channelId}/posts?${params}`);
+      const order: string[] = data.order || [];
+      const posts: Record<string, any> = data.posts || {};
+
+      if (order.length === 0) break;
+
+      let reachedSince = false;
+      for (const id of order) {
+        const post = posts[id];
+        if (!post) continue;
+        // Skip thread replies — they're fetched separately via getThreadMessages().
+        if (post.root_id) continue;
+        // Skip system messages (join/leave/rename) — not user content.
+        if (post.type) continue;
+        if (sinceMs > 0 && post.create_at <= sinceMs) {
+          reachedSince = true;
+          break;
+        }
+        allPosts.push({ id, post });
+      }
+
+      if (reachedSince) break;
+      if (order.length < pageSize) break; // last page
+
+      // Cursor: oldest post in this page (last in order array)
+      beforeCursor = order[order.length - 1];
+    }
+
+    // Reverse to chronological order (oldest first)
+    allPosts.reverse();
+
+    // Apply limit
+    const limited = allPosts.slice(0, totalLimit);
+
+    // Resolve users
+    const userIds = [...new Set(limited.map((e) => e.post.user_id).filter(Boolean))];
+    const userMap = new Map<string, { name: string; image: string | null }>();
+    for (const uid of userIds) {
+      userMap.set(uid, await this.resolveUser(uid));
+    }
+
+    return limited.map((e) => this._normalizePost(e.post, channelName, userMap));
+  }
+
+  async getMessageCount(channelId: string): Promise<number> {
+    const ch = await this._fetch(`/channels/${channelId}`);
+    return ch.total_msg_count_root ?? ch.total_msg_count ?? 0;
+  }
+
+  async getThreadMessages(channelId: string, threadId: string): Promise<NormalizedMessage[]> {
+    const data = await this._fetch(`/posts/${threadId}/thread`);
+    const posts: Record<string, any> = data.posts || {};
+
+    let channelName = "";
+    try {
+      const ch = await this._fetch(`/channels/${channelId}`);
+      channelName = ch.display_name || ch.name || "";
+    } catch { /* ignore */ }
+
+    const replies = Object.values(posts)
+      .filter((p: any) => p.id !== threadId)
+      .sort((a: any, b: any) => a.create_at - b.create_at);
+
+    const userIds = [...new Set(replies.map((p: any) => p.user_id).filter(Boolean))];
+    const userMap = new Map<string, { name: string; image: string | null }>();
+    for (const uid of userIds) {
+      userMap.set(uid as string, await this.resolveUser(uid as string));
+    }
+
+    return replies.map((p: any) => this._normalizePost(p, channelName, userMap));
+  }
+
+  async proxyFile(url: string): Promise<{ contentType: string; buffer: Buffer }> {
+    const fileUrl = url.startsWith("http") ? url : `${this.baseUrl}${url}`;
+    const response = await fetch(fileUrl, {
+      headers: { Authorization: `Bearer ${this.botToken}` },
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Mattermost file: ${response.status}`);
+    }
+    const contentType = response.headers.get("content-type") || "application/octet-stream";
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return { contentType, buffer };
+  }
+}
+
 // ── Bridge factory (singleton per connection) ────────────────────────────────
 
 /** Persistent bridge instances keyed by "{platform}:{connectionId}".
@@ -1005,19 +1343,29 @@ function clearBridgeCache(): void {
   bridgeCache.clear();
 }
 
-function newBridgeForPlatform(platform: string, adapter: unknown): PlatformBridge | null {
+function newBridgeForPlatform(platform: string, adapter: unknown, connectionId: string, chatManager?: ChatManager): PlatformBridge | null {
   if (platform === "slack") return new SlackBridge(adapter as SlackAdapter);
   if (platform === "discord") return new DiscordBridge(adapter);
   if (platform === "teams") return new TeamsBridge(adapter);
-  if (platform === "telegram") return new TelegramBridge(adapter);
+  if (platform === "telegram") return new TelegramBridge(adapter, connectionId);
+  if (platform === "mattermost") {
+    const config = chatManager?.getAdapterConfig(connectionId);
+    const baseUrl = config?.baseUrl || config?.server_url || "";
+    const botToken = config?.botToken || config?.bot_token || "";
+    if (!baseUrl || !botToken) {
+      console.error(`MattermostBridge: missing baseUrl or botToken for connection ${connectionId}`);
+      return null;
+    }
+    return new MattermostBridge(adapter, connectionId, baseUrl, botToken);
+  }
   return null;
 }
 
-function getOrCreateBridge(platform: string, connectionId: string, adapter: unknown): PlatformBridge | null {
+function getOrCreateBridge(platform: string, connectionId: string, adapter: unknown, chatManager?: ChatManager): PlatformBridge | null {
   const key = `${platform}:${connectionId}`;
   const cached = bridgeCache.get(key);
   if (cached) return cached;
-  const bridge = newBridgeForPlatform(platform, adapter);
+  const bridge = newBridgeForPlatform(platform, adapter, connectionId, chatManager);
   if (bridge) bridgeCache.set(key, bridge);
   return bridge;
 }
@@ -1026,19 +1374,29 @@ function getBridge(chatManager: ChatManager, platform: string, connectionId?: st
   if (connectionId) {
     const entry = chatManager.getAdapterByConnectionId(connectionId);
     if (!entry) return null;
-    return getOrCreateBridge(entry.platform, entry.connectionId, entry.adapter);
+    return getOrCreateBridge(entry.platform, entry.connectionId, entry.adapter, chatManager);
   }
   const adapter = chatManager.getAdapter(platform);
   if (!adapter) return null;
-  return getOrCreateBridge(platform, platform, adapter);
+  return getOrCreateBridge(platform, platform, adapter, chatManager);
 }
 
 function getBridgeByConnectionId(chatManager: ChatManager, connectionId: string): { platform: string; bridge: PlatformBridge } | null {
   const entry = chatManager.getAdapterByConnectionId(connectionId);
-  if (!entry) return null;
-  const bridge = getOrCreateBridge(entry.platform, entry.connectionId, entry.adapter);
-  if (!bridge) return null;
-  return { platform: entry.platform, bridge };
+  if (entry) {
+    const bridge = getOrCreateBridge(entry.platform, entry.connectionId, entry.adapter, chatManager);
+    if (bridge) return { platform: entry.platform, bridge };
+  }
+
+  // Fallback for platforms like Mattermost whose bridge uses direct REST calls and
+  // doesn't need the Chat SDK adapter instance. The adapter may not be in the bot's
+  // internal map (WebSocket init timing) but ChatManager has the credentials.
+  const info = chatManager.getConnectionInfo(connectionId);
+  if (info) {
+    const bridge = getOrCreateBridge(info.platform, connectionId, null, chatManager);
+    if (bridge) return { platform: info.platform, bridge };
+  }
+  return null;
 }
 
 function getFirstBridge(chatManager: ChatManager): { platform: string; bridge: PlatformBridge } | null {
@@ -1056,6 +1414,7 @@ function detectPlatformFromUrl(url: string): string | null {
   if (url.includes("cdn.discordapp.com") || url.includes("media.discordapp.net")) return "discord";
   if (url.includes("graph.microsoft.com") || url.includes("sharepoint.com")) return "teams";
   if (url.includes("api.telegram.org")) return "telegram";
+  if (url.includes("/api/v4/files/")) return "mattermost";
   return null;
 }
 
@@ -1445,6 +1804,24 @@ async function handleValidateAdapter(
       });
       // Teams adapter creation validates credentials format; no simple ping API
       jsonResponse(res, 200, { valid: true, message: "Adapter created successfully. Verify messaging endpoint is configured in Azure." });
+    } else if (platform === "mattermost") {
+      const baseUrl = (credentials.baseUrl || credentials.server_url || "").replace(/\/+$/, "");
+      const botToken = credentials.botToken || credentials.bot_token || "";
+      if (!baseUrl || !botToken) {
+        jsonResponse(res, 200, { valid: false, error: "Server URL and bot token are required" });
+        return;
+      }
+      const mmResp = await fetch(`${baseUrl}/api/v4/users/me`, {
+        headers: { Authorization: `Bearer ${botToken}` },
+      });
+      if (mmResp.ok) {
+        const me = await mmResp.json() as { username?: string };
+        jsonResponse(res, 200, { valid: true, message: `Connected as @${me.username || "bot"}` });
+      } else if (mmResp.status === 401) {
+        jsonResponse(res, 200, { valid: false, error: "Invalid bot token" });
+      } else {
+        jsonResponse(res, 200, { valid: false, error: `Mattermost API returned ${mmResp.status}` });
+      }
     } else if (platform === "telegram") {
       const { createTelegramAdapter } = await import("@chat-adapter/telegram" as any);
       // Verify adapter can be constructed (validates config shape)

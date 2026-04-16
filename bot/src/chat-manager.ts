@@ -15,6 +15,7 @@ import { createSlackAdapter } from "@chat-adapter/slack";
 import { createDiscordAdapter } from "@chat-adapter/discord";
 import { createTeamsAdapter } from "@chat-adapter/teams";
 import { createTelegramAdapter } from "@chat-adapter/telegram";
+import { createMattermostAdapter } from "chat-adapter-mattermost";
 import { createRedisState } from "@chat-adapter/state-redis";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -141,6 +142,7 @@ export class ChatManager {
       discord: ["botToken", "publicKey", "applicationId"],
       teams: ["appId", "appPassword"],
       telegram: ["botToken"],
+      mattermost: ["baseUrl", "botToken"],
     };
 
     const adapterInstances: Record<string, unknown> = {};
@@ -193,6 +195,11 @@ export class ChatManager {
           adapterInstances[key] = createTelegramAdapter({
             botToken: entry.config.botToken,
             secretToken: entry.config.secretToken,
+          });
+        } else if (entry.platform === "mattermost") {
+          adapterInstances[key] = createMattermostAdapter({
+            baseUrl: entry.config.baseUrl,
+            botToken: entry.config.botToken,
           });
         } else {
           console.warn(`ChatManager: unknown platform "${entry.platform}", skipping`);
@@ -249,6 +256,22 @@ export class ChatManager {
   /**
    * Look up an adapter by connection ID.
    */
+  getAdapterConfig(connectionId: string): Record<string, string> | null {
+    for (const [, entry] of this.adapters.entries()) {
+      if (entry.connectionId === connectionId) return entry.config;
+    }
+    return null;
+  }
+
+  getConnectionInfo(connectionId: string): { platform: string; connectionId: string; config: Record<string, string> } | null {
+    for (const [, entry] of this.adapters.entries()) {
+      if (entry.connectionId === connectionId) {
+        return { platform: entry.platform, connectionId: entry.connectionId, config: entry.config };
+      }
+    }
+    return null;
+  }
+
   getAdapterByConnectionId(connectionId: string): { platform: string; connectionId: string; adapter: unknown } | null {
     if (!this.currentBot) return null;
     const adaptersMap = (this.currentBot as any).adapters as Map<string, unknown> | undefined;
