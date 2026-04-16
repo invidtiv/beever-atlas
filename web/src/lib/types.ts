@@ -334,7 +334,7 @@ export interface MemoryTier1 {
 
 export interface PlatformConnection {
   id: string;
-  platform: "slack" | "discord" | "teams" | "telegram" | "file";
+  platform: "slack" | "discord" | "teams" | "telegram" | "mattermost" | "file";
   display_name: string;
   status: "connected" | "disconnected" | "error";
   error_message: string | null;
@@ -345,7 +345,7 @@ export interface PlatformConnection {
 }
 
 export interface PlatformCredentials {
-  platform: "slack" | "discord" | "teams" | "telegram";
+  platform: "slack" | "discord" | "teams" | "telegram" | "mattermost";
   credentials: Record<string, string>;
   display_name?: string;
 }

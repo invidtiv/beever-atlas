@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { X, ArrowLeft, ArrowRight, CheckCircle2, Loader2, AlertCircle, ExternalLink } from "lucide-react";
+import { X, ArrowLeft, ArrowRight, CheckCircle2, Loader2, AlertCircle, ExternalLink, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChannelSelector } from "./ChannelSelector";
 import { useCreateConnection } from "@/hooks/useConnections";
 import { useConnectionChannels, useUpdateChannels } from "@/hooks/useConnections";
 import type { PlatformConnection } from "@/lib/types";
 
-type Platform = "slack" | "discord" | "teams" | "telegram";
+type Platform = "slack" | "discord" | "teams" | "telegram" | "mattermost";
 
 interface ConnectionWizardProps {
   platform: Platform;
@@ -64,6 +64,12 @@ const TELEGRAM_INSTRUCTIONS = [
   { text: "Add the bot to your group chat and grant it admin permissions to read messages" },
 ];
 
+const MATTERMOST_INSTRUCTIONS = [
+  { text: "In Mattermost, go to System Console > Integrations > Bot Accounts and create a new bot. Copy the generated access token" },
+  { text: "Ensure your Mattermost server allows bot accounts and has the REST API and WebSocket gateway accessible (enabled by default)" },
+  { text: "Add the bot user to any channels where it should read from. The bot will only receive events from channels it is a member of" },
+];
+
 const CREDENTIAL_FIELDS: Record<Platform, { key: string; label: string; placeholder: string; type?: string; optional?: boolean }[]> = {
   slack: [
     { key: "bot_token", label: "Bot Token", placeholder: "xoxb-...", type: "password" },
@@ -83,7 +89,11 @@ const CREDENTIAL_FIELDS: Record<Platform, { key: string; label: string; placehol
   ],
   telegram: [
     { key: "bot_token", label: "Bot Token", placeholder: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", type: "password" },
-    { key: "secret_token", label: "Webhook Secret Token (optional)", placeholder: "Optional verification secret for webhook requests" },
+    { key: "secret_token", label: "Webhook Secret Token (optional)", placeholder: "Optional verification secret for webhook requests", optional: true },
+  ],
+  mattermost: [
+    { key: "base_url", label: "Server URL", placeholder: "https://your-mattermost.com" },
+    { key: "bot_token", label: "Bot Token", placeholder: "Your bot access token", type: "password" },
   ],
 };
 
@@ -104,9 +114,14 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
     discord: DISCORD_INSTRUCTIONS,
     teams: TEAMS_INSTRUCTIONS,
     telegram: TELEGRAM_INSTRUCTIONS,
+    mattermost: MATTERMOST_INSTRUCTIONS,
   };
   const instructions = INSTRUCTIONS_MAP[platform];
   const fields = CREDENTIAL_FIELDS[platform];
+
+  // Telegram and Teams bots are event-driven — they receive messages via webhook,
+  // so the bridge has no channel listing API for them.
+  const isWebhookOnly = platform === "telegram" || platform === "teams";
 
   function handleCredentialChange(key: string, value: string) {
     setCredentials((prev) => ({ ...prev, [key]: value }));
@@ -157,7 +172,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
         <div className="px-6 py-4 border-b border-border space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-foreground">
-              Connect {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram" }[platform]}
+              Connect {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram", mattermost: "Mattermost" }[platform]}
             </h2>
             <button
               type="button"
@@ -191,14 +206,18 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
             <StepValidating />
           )}
           {step === 4 && (
-            <StepChannels
-              channels={channels}
-              selected={selectedChannels}
-              onChange={setSelectedChannels}
-              loading={channelsLoading}
-              error={validationError}
-              platform={platform}
-            />
+            isWebhookOnly ? (
+              <StepWebhookMode platform={platform} />
+            ) : (
+              <StepChannels
+                channels={channels}
+                selected={selectedChannels}
+                onChange={setSelectedChannels}
+                loading={channelsLoading}
+                error={validationError}
+                platform={platform}
+              />
+            )
           )}
           {step === 5 && connection && (
             <StepConfirmation connection={connection} selectedChannels={selectedChannels} />
@@ -365,7 +384,7 @@ function StepInstructions({
     <div className="space-y-5">
       <div>
         <h3 className="text-sm font-semibold text-foreground mb-1">
-          Set up your {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram" }[platform]} app
+          Set up your {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram", mattermost: "Mattermost" }[platform]} app
         </h3>
         <p className="text-xs text-muted-foreground">Follow these steps before entering your credentials.</p>
       </div>
@@ -411,7 +430,7 @@ function StepInstructions({
           type="text"
           value={displayName}
           onChange={(e) => onDisplayNameChange(e.target.value)}
-          placeholder={`e.g. ${{ slack: "Engineering Workspace", discord: "Community Server", teams: "Corp Tenant", telegram: "Alerts Bot" }[platform]}`}
+          placeholder={`e.g. ${{ slack: "Engineering Workspace", discord: "Community Server", teams: "Corp Tenant", telegram: "Alerts Bot", mattermost: "Team Chat" }[platform]}`}
           className="w-full h-9 px-3 rounded-lg border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20"
         />
       </div>
@@ -505,6 +524,29 @@ function StepChannels({
       ) : (
         <ChannelSelector channels={channels} selected={selected} onChange={onChange} />
       )}
+    </div>
+  );
+}
+
+function StepWebhookMode({ platform }: { platform: Platform }) {
+  const label = platform === "telegram" ? "Telegram" : "Microsoft Teams";
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground mb-1">Webhook-driven ingestion</h3>
+        <p className="text-xs text-muted-foreground">
+          {label} bots receive messages via webhook and have no channel listing API. Channels appear
+          automatically once the bot receives its first message from a chat it&apos;s been added to.
+        </p>
+      </div>
+      <div className="flex items-start gap-2 rounded-lg bg-primary/5 border border-primary/20 px-3 py-2.5">
+        <Zap className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+        <p className="text-xs text-muted-foreground">
+          {platform === "telegram"
+            ? "Make sure the bot is added to your group and, for privacy-enabled bots, granted admin permission so it can read messages."
+            : "Make sure the Teams channel is configured in Azure Bot Service and the messaging endpoint points to this bridge."}
+        </p>
+      </div>
     </div>
   );
 }
