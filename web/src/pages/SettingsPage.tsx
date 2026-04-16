@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, MonitorSmartphone, Send, Settings2, FileText, Plug, Cpu } from "lucide-react";
+import { Plus, MonitorSmartphone, Settings2, FileText, Plug, Cpu } from "lucide-react";
 import { useConnections, useDeleteConnection } from "@/hooks/useConnections";
 import { PlatformCard } from "@/components/settings/PlatformCard";
 import { ConnectionWizard } from "@/components/settings/ConnectionWizard";
@@ -41,7 +41,6 @@ const PLATFORM_OPTIONS: { value: PickerOption; label: string; description: strin
   { value: "slack", label: "Slack", description: "Connect a Slack workspace", Icon: SlackIcon },
   { value: "discord", label: "Discord", description: "Connect a Discord server", Icon: DiscordIcon },
   { value: "teams", label: "Microsoft Teams", description: "Connect a Teams tenant", Icon: MonitorSmartphone },
-  { value: "telegram", label: "Telegram", description: "Connect a Telegram bot", Icon: Send },
   { value: "mattermost", label: "Mattermost", description: "Connect a Mattermost server", Icon: MattermostIcon },
   { value: "file", label: "File Import", description: "Upload a CSV / TSV / JSONL chat export", Icon: FileText },
 ];
