@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { MessageSquare, Monitor, Building2, Send, ChevronRight, Sparkles } from "lucide-react";
+import { MessageSquare, Monitor, Building2, ChevronRight, Sparkles } from "lucide-react";
 import EmojiPicker, { Theme } from "emoji-picker-react";
 import type { EmojiClickData } from "emoji-picker-react";
 import { cn } from "@/lib/utils";
@@ -13,7 +13,6 @@ const PLATFORMS: { key: string; label: string; icon: React.ComponentType<{ class
   { key: "slack", label: "Slack", icon: MessageSquare, desc: "Connect a Slack workspace" },
   { key: "discord", label: "Discord", icon: Monitor, desc: "Connect a Discord server" },
   { key: "teams", label: "Teams", icon: Building2, desc: "Connect a Teams tenant" },
-  { key: "telegram", label: "Telegram", icon: Send, desc: "Connect a Telegram bot" },
 ];
 
 export function WelcomeScreen({ onConnect }: WelcomeScreenProps) {
