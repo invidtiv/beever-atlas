@@ -640,10 +640,24 @@ async def proxy_file(
         raise HTTPException(status_code=501, detail="File proxy not available in mock mode")
 
     from beever_atlas.infra.config import get_settings
+    from beever_atlas.infra.http_safe import validate_proxy_url
+    from urllib.parse import quote, urlparse
+
+    try:
+        encoded_url = validate_proxy_url(url)
+    except (PermissionError, ValueError) as exc:
+        # Surface a generic message; never echo the attacker-controlled URL.
+        # Log the host only so operators can see legitimate misses.
+        host = urlparse(url).hostname if url else None
+        logger.warning(
+            "file_proxy rejected url: host=%s reason=%s", host, type(exc).__name__
+        )
+        raise HTTPException(status_code=400, detail="Invalid file URL") from None
+
     _settings = get_settings()
-    bridge_url = f"{_settings.bridge_url}/bridge/files?url={url}"
+    bridge_url = f"{_settings.bridge_url}/bridge/files?url={encoded_url}"
     if connection_id:
-        bridge_url += f"&connection_id={connection_id}"
+        bridge_url += f"&connection_id={quote(connection_id, safe='')}"
     headers = {}
     if _settings.bridge_api_key:
         headers["Authorization"] = f"Bearer {_settings.bridge_api_key}"
