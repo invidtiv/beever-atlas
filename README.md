@@ -353,6 +353,17 @@ All services read from a single `.env` file in the project root.
 | `BEEVER_ADMIN_TOKEN` | — | Token required for `/api/dev/*` endpoints (`X-Admin-Token` header). |
 | `CREDENTIAL_MASTER_KEY` | — | 64-char hex key for AES-256-GCM encryption of platform credentials. Generate: `openssl rand -hex 32` |
 | `NEO4J_PASSWORD` | — | Password used by `docker-compose` to initialize Neo4j (must match password half of `NEO4J_AUTH`). |
+| `BEEVER_SINGLE_TENANT` | `true` | When `true` (v1.0 default), channels owned by the `"legacy:shared"` sentinel are reachable by any authenticated user — preserves today's single-operator behaviour. Flip to `false` once per-user ownership is assigned so channel-scoped routes enforce per-principal access. |
+| `BEEVER_ALLOW_BRIDGE_AS_USER` | `false` | Emergency override. When `true`, the internal `BRIDGE_API_KEY` is accepted on user-facing routes — reopens security finding H4 (cross-tenant super-admin). Every boot with this set to `true` logs a loud warning. |
+| `FILE_PROXY_HOST_ALLOWLIST` | — | Comma-separated override for the platform host allowlist used by `/api/files/proxy` and the media processor. Entries prefixed with `suffix:` match any host ending in the suffix (e.g. `suffix:.sharepoint.com`). Defaults cover Slack, Discord, Teams/SharePoint, Telegram, Mattermost. |
+| `BRIDGE_ALLOW_UNAUTH` | — | **Bot-side.** Set to the literal string `"true"` to allow the bot's `/bridge/*` server to run without `BRIDGE_API_KEY`. Local-dev only; startup emits a loud warning. Any other value (`"TRUE"`, `"1"`, `"yes"`) does NOT activate the bypass. |
+
+**Trust model (v1.0):**
+
+- `BEEVER_API_KEYS` entries → **user principals** — accepted on all `/api/*` routes except `/api/internal/*`.
+- `BRIDGE_API_KEY` → **service principal** — accepted on `/api/internal/*` only. Rejected on user-facing routes unless `BEEVER_ALLOW_BRIDGE_AS_USER=true`.
+- Channel-scoped routes (`/api/channels/*/data`, `/api/memories`, `/api/graph`, `/api/sync`, `/api/topics`, `/api/stats`, `/api/imports/commit`) enforce per-principal ownership via `PlatformConnection.owner_principal_id`.
+- The bot's `/bridge/*` server requires `BRIDGE_API_KEY` unconditionally; `BRIDGE_ALLOW_UNAUTH=true` is the only accepted opt-out for local dev.
 
 ### Graph Backend
 
