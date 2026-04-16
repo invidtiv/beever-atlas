@@ -1,21 +1,64 @@
 """Authentication dependencies for the FastAPI app.
 
-API-key auth (v0.1.0): `Authorization: Bearer <token>` validated against
-`settings.api_keys` (env `BEEVER_API_KEYS`, comma-separated). Uses
+API-key auth: `Authorization: Bearer <token>` validated against
+`settings.api_keys` (env `BEEVER_API_KEYS`, comma-separated) using
 `hmac.compare_digest` for constant-time comparison.
+
+Two distinct dependencies are exposed so public user routes and internal
+bridge routes use different trust models:
+
+- `require_user(...)` → `Principal(kind="user")` for user-facing routes.
+- `require_bridge(...)` → `Principal(kind="bridge")` for `/api/internal/*`.
+
+The `BEEVER_ALLOW_BRIDGE_AS_USER` feature flag temporarily permits the
+bridge key on user routes during the migration that decouples them (the
+flag's default flips to `False` in the follow-up commit that closes
+finding H4).
 """
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Header, HTTPException, Query, status
 
 from beever_atlas.infra.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class Principal(str):
+    """Authenticated caller identity.
+
+    Subclasses ``str`` so handler code that type-hints the result as
+    ``str`` keeps working (logging, equality, formatting). The extra
+    attributes ``.kind`` and ``.id`` expose the structured form when a
+    caller explicitly needs it (e.g. `_assert_channel_access`).
+    """
+
+    __slots__ = ("_kind",)
+
+    def __new__(cls, id: str, kind: Literal["user", "bridge"]) -> "Principal":
+        inst = super().__new__(cls, id)
+        inst._kind = kind
+        return inst
+
+    @property
+    def kind(self) -> Literal["user", "bridge"]:
+        return self._kind  # type: ignore[return-value]
+
+    @property
+    def id(self) -> str:
+        return str.__str__(self)
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"Principal(kind={self._kind!r}, id={str.__str__(self)!r})"
+
+
+_BRIDGE_PRINCIPAL_ID = "bridge"
 
 
 def _parse_keys(raw: str) -> list[str]:
@@ -31,6 +74,51 @@ def _extract_bearer(authorization: Optional[str]) -> Optional[str]:
     return parts[1].strip() or None
 
 
+def _principal_id_for_key(key: str) -> str:
+    """Stable, non-reversible principal id derived from the raw API key.
+
+    Using sha256 prevents key material from leaking into logs (the
+    previous `key[:6]` prefix could collide across users).
+    """
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return f"user:{digest}"
+
+
+def _match_user_key(token: str, keys: list[str]) -> Optional[Principal]:
+    for key in keys:
+        if hmac.compare_digest(token, key):
+            return Principal(_principal_id_for_key(key), kind="user")
+    return None
+
+
+def _match_bridge_key(token: str, bridge_key: str) -> Optional[Principal]:
+    if bridge_key and hmac.compare_digest(token, bridge_key):
+        return Principal(_BRIDGE_PRINCIPAL_ID, kind="bridge")
+    return None
+
+
+def _resolve_token(
+    authorization: Optional[str],
+    access_token: Optional[str],
+    *,
+    allow_query_string: bool,
+) -> Optional[str]:
+    token = _extract_bearer(authorization)
+    if token:
+        return token
+    if allow_query_string and access_token:
+        return access_token.strip() or None
+    return None
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 def require_user(
     authorization: Optional[str] = Header(default=None),
     access_token: Optional[str] = Query(
@@ -38,83 +126,99 @@ def require_user(
         description="Fallback auth for URLs consumed by browser loaders "
         "(<img src>, <a href>) that cannot carry custom headers.",
     ),
-) -> str:
-    """Validate Bearer token against configured API keys.
+) -> Principal:
+    """Validate Bearer token against configured user API keys.
 
-    Accepts either a user-facing API key (from `BEEVER_API_KEYS`) or the
-    internal bridge shared secret (`BRIDGE_API_KEY`) used by the Discord/Slack
-    bot service. Endpoints with additional internal-only checks (e.g.
-    /api/internal/*) re-verify `BRIDGE_API_KEY` explicitly, so accepting it
-    here just unblocks the first-layer gate without weakening those routes.
+    Accepts values from ``BEEVER_API_KEYS`` and (while
+    ``BEEVER_ALLOW_BRIDGE_AS_USER`` is True) the internal ``BRIDGE_API_KEY``.
+    The flag exists solely to keep existing callers working while the
+    ownership model lands; commit H4 flips its default to ``False`` and
+    bridge tokens are then rejected here.
 
-    The token may be provided via `Authorization: Bearer <token>` header
-    (preferred) OR via `?access_token=<token>` query string (only for URLs
-    consumed by browser-native loaders like <img> / <a href> that cannot
-    set headers). The query-string path is equally validated but emits an
-    info log so operators can audit.
-
-    Returns a user identifier string on success, raises HTTP 401 otherwise.
+    May be provided via ``Authorization: Bearer <token>`` (preferred) OR
+    ``?access_token=<token>`` for `<img src>` / `<a href>` URLs that
+    cannot set headers. Query-string hits are logged at INFO so operators
+    can audit.
     """
     settings = get_settings()
     keys = _parse_keys(settings.api_keys)
     bridge_key = (settings.bridge_api_key or "").strip()
     if not keys and not bridge_key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API authentication not configured",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _unauthorized("API authentication not configured")
 
-    token = _extract_bearer(authorization)
-    if not token and access_token:
-        token = access_token.strip() or None
+    token = _resolve_token(authorization, access_token, allow_query_string=True)
     if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or malformed Authorization header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _unauthorized("Missing or malformed Authorization header")
 
-    for key in keys:
-        if hmac.compare_digest(token, key):
-            return f"user:{key[:6]}"
+    principal = _match_user_key(token, keys)
+    if principal is not None:
+        if not authorization and access_token:
+            logger.info(
+                "auth.query_string_user access principal=%s",
+                principal.id,
+            )
+        return principal
 
-    if bridge_key and hmac.compare_digest(token, bridge_key):
-        return "service:bridge"
+    allow_bridge_as_user = getattr(settings, "allow_bridge_as_user", True)
+    if allow_bridge_as_user:
+        bridge_principal = _match_bridge_key(token, bridge_key)
+        if bridge_principal is not None:
+            return bridge_principal
 
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid API key",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    raise _unauthorized("Invalid API key")
 
 
 def require_user_optional(
     authorization: Optional[str] = Header(default=None),
     access_token: Optional[str] = Query(default=None),
-) -> Optional[str]:
-    """Like `require_user` but returns None instead of 401 on missing/invalid bearer.
+) -> Optional[Principal]:
+    """Like `require_user` but returns None instead of 401.
 
-    Used by `/api/ask/shared/{token}` where auth is conditional on the share's
-    visibility tier. The endpoint handler inspects the return value and enforces
-    the appropriate tier requirement.
+    Used by `/api/ask/shared/{token}` where auth is conditional on the
+    share's visibility tier. Subject to the same
+    ``BEEVER_ALLOW_BRIDGE_AS_USER`` gate as ``require_user``.
     """
     settings = get_settings()
     keys = _parse_keys(settings.api_keys)
     bridge_key = (settings.bridge_api_key or "").strip()
 
-    token = _extract_bearer(authorization)
-    if not token and access_token:
-        token = access_token.strip() or None
+    token = _resolve_token(authorization, access_token, allow_query_string=True)
     if not token:
         return None
 
-    for key in keys:
-        if hmac.compare_digest(token, key):
-            return f"user:{key[:6]}"
-    if bridge_key and hmac.compare_digest(token, bridge_key):
-        return "service:bridge"
+    principal = _match_user_key(token, keys)
+    if principal is not None:
+        return principal
+
+    allow_bridge_as_user = getattr(settings, "allow_bridge_as_user", True)
+    if allow_bridge_as_user:
+        return _match_bridge_key(token, bridge_key)
     return None
+
+
+def require_bridge(
+    authorization: Optional[str] = Header(default=None),
+) -> Principal:
+    """Validate Bearer token against the internal bridge key only.
+
+    Mounted on ``/api/internal/*``. User API keys are rejected here so
+    a leaked user token cannot reach internal routes, and the
+    ``?access_token=`` query-string path is deliberately not accepted —
+    internal callers always use the header.
+    """
+    settings = get_settings()
+    bridge_key = (settings.bridge_api_key or "").strip()
+    if not bridge_key:
+        raise _unauthorized("Bridge authentication not configured")
+
+    token = _extract_bearer(authorization)
+    if not token:
+        raise _unauthorized("Missing or malformed Authorization header")
+
+    principal = _match_bridge_key(token, bridge_key)
+    if principal is None:
+        raise _unauthorized("Invalid bridge key")
+    return principal
 
 
 def require_admin(
