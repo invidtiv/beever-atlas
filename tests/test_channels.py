@@ -64,11 +64,13 @@ class TestGetChannel:
 
     @pytest.mark.asyncio
     async def test_not_found_channel(self, client: AsyncClient):
-        # RES-177 H1: channels not associated with any owned
-        # PlatformConnection return 403 (access-denied) rather than 404
-        # so we do not leak channel existence across tenants.
+        # RES-177 H1 (revised): in single-tenant mode (the test default)
+        # a user principal may browse any channel id — `selected_channels`
+        # is a sync pick-list, not an access ACL. The guard admits the
+        # request and the adapter then returns 404 because no such channel
+        # exists. In multi-tenant mode the guard would return 403.
         response = await client.get("/api/channels/NONEXISTENT")
-        assert response.status_code == 403
+        assert response.status_code == 404
 
 
 class TestGetMessages:
