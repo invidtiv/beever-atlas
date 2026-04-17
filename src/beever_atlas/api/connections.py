@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-import hmac
 import logging
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from beever_atlas.infra.auth import Principal, require_user
 from beever_atlas.infra.config import get_settings
 from beever_atlas.stores import get_stores
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Internal routes (bot → backend). Mounted separately in `server/app.py` with
+# `Depends(require_bridge)` so they are NOT subject to the public
+# `require_user` gate that now rejects BRIDGE_API_KEY (finding H4).
+internal_router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
@@ -194,28 +199,13 @@ class _InternalConnectionItem(BaseModel):
     status: str
 
 
-@router.get("/api/internal/connections/credentials")
-async def list_connections_with_credentials(request: Request) -> list[_InternalConnectionItem]:
+@internal_router.get("/api/internal/connections/credentials")
+async def list_connections_with_credentials() -> list[_InternalConnectionItem]:
     """Internal endpoint for bot startup sync — returns decrypted credentials.
 
-    Secured by BRIDGE_API_KEY header. Never expose to end users.
+    Secured by the router-level `require_bridge` dependency (mounted in
+    `server/app.py`). Never expose to end users.
     """
-    settings = get_settings()
-    expected_key = settings.bridge_api_key
-    if not expected_key:
-        raise HTTPException(status_code=403, detail="BRIDGE_API_KEY not configured")
-
-    auth = request.headers.get("authorization", "")
-    expected = f"Bearer {expected_key}"
-    if not hmac.compare_digest(auth, expected):
-        if getattr(settings, "bridge_hmac_dual", False) and auth == expected:
-            logger.warning(
-                "bridge auth accepted via legacy == path (BEEVER_BRIDGE_HMAC_DUAL); "
-                "retire this flag after the next release"
-            )
-        else:
-            raise HTTPException(status_code=401, detail="Unauthorized")
-
     stores = get_stores()
     connections = await stores.platform.list_connections()
     result: list[_InternalConnectionItem] = []
@@ -236,7 +226,10 @@ async def list_connections_with_credentials(request: Request) -> list[_InternalC
 
 
 @router.post("/api/connections", response_model=ConnectionResponse, status_code=201)
-async def create_connection(body: CreateConnectionRequest) -> ConnectionResponse:
+async def create_connection(
+    body: CreateConnectionRequest,
+    principal: Principal = Depends(require_user),
+) -> ConnectionResponse:
     """Create a new platform connection.
 
     Flow:
@@ -306,7 +299,10 @@ async def create_connection(body: CreateConnectionRequest) -> ConnectionResponse
             await _unregister_adapter(connection_id)
             raise
 
-    # Step 3: persist encrypted connection
+    # Step 3: persist encrypted connection.
+    # `owner_principal_id` is stamped with the authenticated caller's principal
+    # id (RES-177 H1) so `_assert_channel_access` can gate downstream routes.
+    owner_id = getattr(principal, "id", None) or str(principal)
     conn = await stores.platform.create_connection(
         platform=platform,
         display_name=body.display_name.strip(),
@@ -314,6 +310,7 @@ async def create_connection(body: CreateConnectionRequest) -> ConnectionResponse
         status="connected",
         source="ui",
         connection_id=connection_id,
+        owner_principal_id=owner_id,
     )
 
     logger.info("Created platform connection id=%s platform=%s", conn.id, conn.platform)

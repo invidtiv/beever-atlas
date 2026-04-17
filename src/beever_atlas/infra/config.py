@@ -284,6 +284,28 @@ class Settings(BaseSettings):
     # Admin token for /api/dev/* endpoints
     admin_token: str = Field(default="", alias="BEEVER_ADMIN_TOKEN")
 
+    # Emergency override for security finding H4. When False (the v1.0
+    # default), `require_user` rejects BRIDGE_API_KEY on user-facing
+    # routes — a leaked bridge key can no longer act as a super-admin
+    # on /api/memories, /api/channels/*/data, etc. Set to True only as a
+    # temporary escape hatch if a downstream integration breaks; every
+    # boot with True logs a loud warning so operators notice.
+    allow_bridge_as_user: bool = Field(
+        default=False, alias="BEEVER_ALLOW_BRIDGE_AS_USER"
+    )
+
+    # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
+    # any authenticated user principal is granted access to channels whose
+    # owning PlatformConnection has ``owner_principal_id`` set to the shared
+    # sentinel ``"legacy:shared"`` (or missing) — this preserves today's
+    # behaviour for solo / operator deployments that never assigned per-user
+    # ownership. Post-v1.0 this default flips to ``False`` so multi-tenant
+    # operators must explicitly backfill ownership on legacy rows (see
+    # ``stores.platform_store.PlatformStore.backfill_legacy_owners``).
+    beever_single_tenant: bool = Field(
+        default=True, alias="BEEVER_SINGLE_TENANT"
+    )
+
     @property
     def neo4j_user(self) -> str:
         return self.neo4j_auth.split("/")[0]
@@ -295,6 +317,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production(self) -> "Settings":
+        if self.allow_bridge_as_user:
+            logger.warning(
+                "config: BEEVER_ALLOW_BRIDGE_AS_USER=true — emergency override "
+                "active. The internal bridge key is accepted on user-facing "
+                "routes, which reopens security finding H4. Turn this off as "
+                "soon as the downstream integration is fixed."
+            )
+
         problems: list[str] = []
         key = self.credential_master_key or ""
         hex_ok = len(key) == 64 and all(c in "0123456789abcdefABCDEF" for c in key)
