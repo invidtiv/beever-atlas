@@ -261,11 +261,32 @@ class MediaProcessor:
             await self._http_client.aclose()
 
     async def _download_file(self, url: str, _retries: int = 3, connection_id: str | None = None) -> bytes | None:
-        """Download a file via the bridge file proxy with retry on 429."""
+        """Download a file via the bridge file proxy with retry on 429.
+
+        The raw ``url`` originates from platform message attachments or
+        file-import pipelines and is attacker-controllable. We therefore
+        validate it against the platform allowlist and encode it before
+        forwarding — mitigation for security finding H3.
+        """
+        from urllib.parse import quote, urlparse
+
+        from beever_atlas.infra.http_safe import validate_proxy_url
+
+        try:
+            encoded_url = validate_proxy_url(url)
+        except (PermissionError, ValueError) as exc:
+            host = urlparse(url).hostname if url else None
+            logger.warning(
+                "MediaProcessor: rejected non-allowlisted file url host=%s reason=%s",
+                host,
+                type(exc).__name__,
+            )
+            return None
+
         settings = self._settings
-        proxy_url = f"{settings.bridge_url}/bridge/files?url={url}"
+        proxy_url = f"{settings.bridge_url}/bridge/files?url={encoded_url}"
         if connection_id:
-            proxy_url += f"&connection_id={connection_id}"
+            proxy_url += f"&connection_id={quote(connection_id, safe='')}"
         headers: dict[str, str] = {}
         if settings.bridge_api_key:
             headers["Authorization"] = f"Bearer {settings.bridge_api_key}"

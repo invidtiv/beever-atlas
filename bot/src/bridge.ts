@@ -66,19 +66,15 @@ interface PlatformBridge {
 }
 
 // ── Auth ────────────────────────────────────────────────────────────────────
-
-const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || "";
-const BRIDGE_HMAC_DUAL = process.env.BEEVER_BRIDGE_HMAC_DUAL === "true";
-const IS_PROD =
-  process.env.BEEVER_ENV === "production" ||
-  process.env.NODE_ENV === "production";
-
-if (!BRIDGE_API_KEY && IS_PROD) {
-  console.error(
-    "FATAL: BRIDGE_API_KEY is required in production (BEEVER_ENV/NODE_ENV=production)",
-  );
-  process.exit(1);
-}
+//
+// Security finding M1 mitigation: BRIDGE_API_KEY is required unconditionally.
+// The legacy "no key configured = no auth" dev-mode bypass keyed off
+// BEEVER_ENV/NODE_ENV is gone — a staging environment that forgot to set
+// BEEVER_ENV=production used to land wide open.
+//
+// For genuine local development, set BRIDGE_ALLOW_UNAUTH="true" (strict
+// string match) AND leave BRIDGE_API_KEY unset. Any other combination
+// enforces the bearer.
 
 function constantTimeEqual(a: string, b: string): boolean {
   const aBuf = Buffer.from(a);
@@ -87,23 +83,67 @@ function constantTimeEqual(a: string, b: string): boolean {
   return timingSafeEqual(aBuf, bBuf);
 }
 
-function checkAuth(req: IncomingMessage, res: ServerResponse): boolean {
-  if (!BRIDGE_API_KEY) return true; // No key configured = no auth required (dev mode)
+function unauthorized(res: ServerResponse): false {
+  res.writeHead(401, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Unauthorized", code: "AUTH_FAILED" }));
+  return false;
+}
+
+export function checkAuth(
+  req: IncomingMessage,
+  res: ServerResponse,
+): boolean {
+  // Read env per-call so tests can mutate process.env between requests
+  // and operators can swap keys without restarting (cost is negligible —
+  // process.env lookup is a hash hit).
+  const bridgeKey = process.env.BRIDGE_API_KEY || "";
+  const allowUnauth = process.env.BRIDGE_ALLOW_UNAUTH === "true";
+  const hmacDual = process.env.BEEVER_BRIDGE_HMAC_DUAL === "true";
+
+  if (!bridgeKey) {
+    if (allowUnauth) return true; // explicit local-dev opt-in
+    return unauthorized(res);
+  }
 
   const authHeader = req.headers.authorization || "";
-  const expected = `Bearer ${BRIDGE_API_KEY}`;
+  const expected = `Bearer ${bridgeKey}`;
   if (!constantTimeEqual(authHeader, expected)) {
-    if (BRIDGE_HMAC_DUAL && authHeader === expected) {
+    if (hmacDual && authHeader === expected) {
       console.warn(
         "Bridge auth: accepted via legacy == path (BEEVER_BRIDGE_HMAC_DUAL). Retire flag next release.",
       );
       return true;
     }
-    res.writeHead(401, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Unauthorized", code: "AUTH_FAILED" }));
-    return false;
+    return unauthorized(res);
   }
   return true;
+}
+
+/**
+ * Fail-fast guard for production misconfiguration. Called from
+ * `registerBridgeRoutes` the first time the bridge is wired up, so
+ * importing this module (e.g. from a test) is a pure side-effect-free
+ * operation.
+ */
+export function assertBridgeAuthReady(): void {
+  const bridgeKey = process.env.BRIDGE_API_KEY || "";
+  const allowUnauth = process.env.BRIDGE_ALLOW_UNAUTH === "true";
+  const isProd =
+    process.env.BEEVER_ENV === "production" ||
+    process.env.NODE_ENV === "production";
+
+  if (!bridgeKey && isProd) {
+    console.error(
+      "FATAL: BRIDGE_API_KEY is required in production (BEEVER_ENV/NODE_ENV=production)",
+    );
+    process.exit(1);
+  }
+
+  if (!bridgeKey && allowUnauth) {
+    console.warn(
+      "⚠️  BRIDGE_ALLOW_UNAUTH=true — running without bridge authentication. Do NOT use in production.",
+    );
+  }
 }
 
 // ── SSRF guard for proxyFile: block RFC1918, loopback, link-local, cloud metadata ──
@@ -1935,6 +1975,10 @@ export function registerBridgeRoutes(
   chatManager: ChatManager,
   lazySyncFn?: () => Promise<boolean>,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<boolean> {
+  // Run the production fail-fast / local-dev loud-warning check once at
+  // wiring time. Moved out of module-load so tests can import the file.
+  assertBridgeAuthReady();
+
   // Subscribe to adapter rebuilds to clear the bridge singleton cache.
   // This ensures stale adapter references are never reused after unregister/reregister.
   chatManager.onRebuild(() => {
