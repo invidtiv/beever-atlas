@@ -142,8 +142,25 @@ async def test_single_tenant_fallback_admits_missing_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unknown_channel_is_rejected(monkeypatch):
-    """No connection includes the channel → 403."""
+async def test_unclaimed_channel_allowed_in_single_tenant(monkeypatch):
+    """`selected_channels` is a sync pick-list, not an access ACL. A
+    single-tenant user principal must be able to browse / pre-sync a
+    channel that no connection has yet added to its pick-list —
+    otherwise the UI can't discover new Slack/Discord channels."""
+    user = Principal("user:abc", kind="user")
+    _install_fake_stores(
+        monkeypatch,
+        [_conn(connection_id="c1", selected=["OTHER"], owner="user:abc")],
+    )
+    _force_settings(monkeypatch)  # single-tenant (default)
+    # Must not raise.
+    await channel_access_mod.assert_channel_access(user, "C1")
+
+
+@pytest.mark.asyncio
+async def test_unclaimed_channel_rejected_in_multi_tenant(monkeypatch):
+    """Multi-tenant mode stays strict: unclaimed channels are unreachable
+    until an operator adds them to an owned connection's selected_channels."""
     from fastapi import HTTPException
 
     user = Principal("user:abc", kind="user")
@@ -151,9 +168,26 @@ async def test_unknown_channel_is_rejected(monkeypatch):
         monkeypatch,
         [_conn(connection_id="c1", selected=["OTHER"], owner="user:abc")],
     )
-    _force_settings(monkeypatch)
+    _force_settings(monkeypatch, beever_single_tenant=False)
     with pytest.raises(HTTPException) as exc:
         await channel_access_mod.assert_channel_access(user, "C1")
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_unclaimed_channel_rejected_for_bridge_even_in_single_tenant(monkeypatch):
+    """Bridge principals never inherit the single-tenant browsing grace
+    — the browsing UX is for users, not the internal bridge."""
+    from fastapi import HTTPException
+
+    bridge = Principal("bridge", kind="bridge")
+    _install_fake_stores(
+        monkeypatch,
+        [_conn(connection_id="c1", selected=["OTHER"], owner="user:abc")],
+    )
+    _force_settings(monkeypatch, beever_single_tenant=True)
+    with pytest.raises(HTTPException) as exc:
+        await channel_access_mod.assert_channel_access(bridge, "C1")
     assert exc.value.status_code == 403
 
 
