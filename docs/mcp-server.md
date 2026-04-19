@@ -263,7 +263,7 @@ Archive the current conversation and start a fresh ADK session. Useful when you 
 ### Deprecation Shim (1 tool)
 
 #### `search_channel_knowledge` (DEPRECATED)
-The legacy unauthenticated `/mcp` tool has been retired. This tool returns a structured error.
+This tool has been retired. It now returns a structured error so migrating callers know which replacements to use.
 
 **Returns:** `{"error": "tool_renamed", "replacement": ["ask_channel", "search_channel_facts"]}`
 

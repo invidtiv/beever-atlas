@@ -42,7 +42,6 @@ from beever_atlas.api.models import router as models_router
 from beever_atlas.api.dev import router as dev_router
 from beever_atlas.api.media import router as media_router
 from beever_atlas.api.admin import router as admin_router
-from beever_atlas.api.mcp import mcp as mcp_server
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
 from beever_atlas.llm.provider import init_llm_provider
@@ -220,27 +219,12 @@ app.include_router(wiki_router, dependencies=_auth)
 app.include_router(config_router, dependencies=_auth)
 app.include_router(media_router, dependencies=_auth)
 
-# Legacy MCP mount (openspec hotfix/mcp-auth-gate). The underlying mount is
-# UNAUTHENTICATED — gated off by BEEVER_MCP_ENABLED=false by default. Enable
-# ONLY in local dev. The secure replacement is the /mcp/v2 mount below.
-if _settings.beever_mcp_enabled:
-    app.mount("/mcp", mcp_server.http_app(path="/"))
-    logging.getLogger(__name__).warning(
-        "MCP endpoint mounted WITHOUT authentication (BEEVER_MCP_ENABLED=true). "
-        "This is intended for local dev only. Do not enable in production."
-    )
-else:
-    logging.getLogger(__name__).info(
-        "MCP endpoint disabled (BEEVER_MCP_ENABLED=false). "
-        "Set BEEVER_MCP_ENABLED=true to enable — unauthenticated for now, "
-        "do not use in production."
-    )
-
-# Secure v2 MCP mount (openspec change atlas-mcp-server). Gated behind
-# BEEVER_MCP_V2=true (default off) until Phase 3 ships the full tool catalog.
-# Auth is enforced by MCPAuthMiddleware at the ASGI layer BEFORE any protocol
-# message reaches FastMCP; the caller's mcp:<hash> principal is attached to
-# ASGI scope.state for tool handlers to consume.
+# Secure MCP mount (openspec change atlas-mcp-server). Gated behind
+# BEEVER_MCP_V2=true (default off). Auth is enforced by MCPAuthMiddleware at
+# the ASGI layer BEFORE any protocol message reaches FastMCP; the caller's
+# mcp:<hash> principal is attached to ASGI scope.state for tool handlers to
+# consume. This is the sole MCP surface; the legacy unauthenticated /mcp
+# mount has been retired.
 if _settings.beever_mcp_v2:
     from starlette.middleware import Middleware
 
@@ -255,10 +239,6 @@ if _settings.beever_mcp_v2:
         json_response=True,
         transport="streamable-http",
     )
-    # Mount under a distinct path so it does not collide with the legacy
-    # `/mcp` mount above (the legacy mount handles `/mcp/...`; the v2 mount
-    # handles `/mcp/v2/...`). Once the legacy mount is removed this can move
-    # to `/mcp`.
     app.mount("/mcp/v2", _mcp_v2_asgi)
     logging.getLogger(__name__).info(
         "MCP v2 endpoint mounted at /mcp/v2 with auth middleware"

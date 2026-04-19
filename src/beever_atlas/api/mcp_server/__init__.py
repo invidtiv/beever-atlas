@@ -1,10 +1,8 @@
-"""FastMCP server factory for the v2 /mcp mount.
+"""FastMCP server factory for the /mcp/v2 mount.
 
-This is the curated agent-facing surface introduced by openspec change
-``atlas-mcp-server``. It is DISTINCT from ``src/beever_atlas/api/mcp.py`` —
-the latter is the legacy unauthenticated mount (gated off by
-``BEEVER_MCP_ENABLED=false`` via the Phase 0 hotfix) and will be removed once
-all clients migrate to the v2 surface.
+This is the sole agent-facing MCP surface, introduced by openspec change
+``atlas-mcp-server``. The legacy unauthenticated ``/mcp`` mount has been
+retired; all clients connect through this curated, auth-gated surface.
 
 Phase 2 shipped the factory skeleton with auth wiring; Phase 3 registers the
 full tool catalog:
@@ -250,18 +248,18 @@ def _emit_audit(
 def _register_deprecation_shim(mcp: FastMCP) -> None:
     """Register the tool-renamed shim for the legacy ``search_channel_knowledge``.
 
-    External integrations that already point at the old unauthenticated mount
-    will receive a structured error pointing at the v2 replacements instead of
-    a silent 404. This shim is exempt from rate limiting.
+    External integrations still pointing at the retired tool name will receive
+    a structured error pointing at the replacements instead of a silent 404.
+    This shim is exempt from rate limiting.
     """
 
     @mcp.tool(
         name="search_channel_knowledge",
         description=(
-            "DEPRECATED. The unauthenticated /mcp tool 'search_channel_knowledge' "
-            "has been retired. Use 'ask_channel' for natural-language questions "
-            "with citations, or 'search_channel_facts' for targeted BM25+vector "
-            "fact search. This tool returns a structured tool_renamed error."
+            "DEPRECATED. 'search_channel_knowledge' has been retired. Use "
+            "'ask_channel' for natural-language questions with citations, or "
+            "'search_channel_facts' for targeted BM25+vector fact search. "
+            "This tool returns a structured tool_renamed error."
         ),
     )
     async def search_channel_knowledge_deprecated(

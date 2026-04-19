@@ -3,11 +3,11 @@
 Why a dedicated middleware:
   FastAPI ``Depends(...)`` applied via ``include_router(..., dependencies=...)``
   does NOT propagate to ``app.mount(...)`` sub-applications — Starlette Mounts
-  are a separate ASGI tree. The pre-existing ``/mcp`` mount at ``server/app.py``
-  relied on a false assumption and was served unauthenticated (closed by the
-  hotfix in ``BEEVER_MCP_ENABLED=false``). This middleware is the structural
-  fix: it runs at the ASGI layer, BEFORE FastMCP dispatches any protocol
-  message, so unauthenticated requests never reach tool handling.
+  are a separate ASGI tree. A prior ``/mcp`` mount relied on that false
+  assumption and was served unauthenticated; it has since been retired. This
+  middleware is the structural fix: it runs at the ASGI layer, BEFORE FastMCP
+  dispatches any protocol message, so unauthenticated requests never reach
+  tool handling.
 
 Acceptance criteria (from ``specs/mcp-auth/spec.md``):
   - Missing/invalid Bearer → 401 with ``WWW-Authenticate: Bearer realm="atlas-mcp"``
