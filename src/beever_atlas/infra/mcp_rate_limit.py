@@ -206,16 +206,19 @@ async def _check_and_record_redis(
                 suffix,
             )
     except Exception:
-        # If Redis is unreachable, fail-open but loud. A rate-limit outage
-        # should NOT take down MCP — the audit log will show the spike.
+        # Redis unreachable: fall back to the in-process memory limiter so
+        # we degrade into a per-worker slider rather than disabling rate
+        # limiting entirely. A pure fail-open would let an attacker burn
+        # expensive tools (ask_channel, trigger_sync) without bound whenever
+        # Redis is flaky. The warning remains so ops notice the spike.
         logger.warning(
             "event=mcp_rate_limit_redis_unavailable "
-            "principal=%s tool=%s — failing open",
+            "principal=%s tool=%s — falling back to in-process memory limiter",
             principal_id,
             tool_name,
             exc_info=True,
         )
-        return True, None
+        return await _check_and_record_memory(principal_id, tool_name)
 
     allowed = int(result[0]) == 1
     retry_after = int(result[1]) if not allowed else None

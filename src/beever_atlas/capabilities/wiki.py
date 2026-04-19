@@ -175,6 +175,9 @@ async def get_topic_overview(
     return await _get_topic_overview_impl(channel_id, topic_name)
 
 
+_WIKI_REFRESH_COOLDOWN_MINUTES = 5
+
+
 async def refresh_wiki(
     principal_id: str,
     channel_id: str,
@@ -182,23 +185,56 @@ async def refresh_wiki(
 ) -> dict:
     """Trigger async wiki regeneration for *channel_id*.
 
-    Enforces :func:`assert_channel_access`, then creates a ``sync_jobs``
-    record with ``kind="wiki_refresh"`` and dispatches generation via
-    ``wiki/builder.py``.
+    Enforces :func:`assert_channel_access`, enforces a ``5``-minute cooldown
+    per channel so an external agent cannot queue concurrent
+    LLM-heavy regeneration runs, then creates a ``sync_jobs`` record with
+    ``kind="wiki_refresh"`` and dispatches generation via ``wiki/builder.py``.
+
+    Raises :class:`~capabilities.errors.CooldownActive` when a
+    ``wiki_refresh`` job for the same channel completed within the cooldown
+    window. Caller (MCP tool / dashboard endpoint) translates that into the
+    ``cooldown_active`` structured error.
 
     Returns ``{"job_id": "...", "status_uri": "atlas://job/<id>", "status": "queued"}``.
     """
+    from datetime import UTC, datetime, timedelta
+
     try:
         await assert_channel_access(principal_id, channel_id)
     except Exception as exc:
         raise ChannelAccessDenied(channel_id) from exc
 
+    from beever_atlas.capabilities.errors import CooldownActive
     from beever_atlas.infra.config import get_settings
     from beever_atlas.stores import get_stores
     from beever_atlas.wiki.cache import WikiCache
 
     stores = get_stores()
     settings = get_settings()
+
+    # Cooldown check: reject if a prior wiki_refresh completed within the
+    # window. A still-running job is NOT blocked here — the rate limiter
+    # caps concurrency upstream, and callers may legitimately check status
+    # via get_job_status while another run is in flight.
+    try:
+        recent = await stores.mongodb.get_sync_status(channel_id)
+    except Exception:
+        recent = None
+    if (
+        recent
+        and getattr(recent, "kind", "sync") == "wiki_refresh"
+        and recent.status in {"completed", "failed"}
+        and recent.completed_at is not None
+    ):
+        completed = recent.completed_at
+        if completed.tzinfo is None:
+            completed = completed.replace(tzinfo=UTC)
+        elapsed = datetime.now(tz=UTC) - completed
+        window = timedelta(minutes=_WIKI_REFRESH_COOLDOWN_MINUTES)
+        if elapsed < window:
+            remaining = window - elapsed
+            raise CooldownActive(int(remaining.total_seconds()))
+
     cache = WikiCache(settings.mongodb_uri)
 
     # Create a sync_jobs record and use the *persisted* job id so the

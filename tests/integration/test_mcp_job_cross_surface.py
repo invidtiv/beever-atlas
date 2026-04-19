@@ -30,29 +30,31 @@ _OTHER_MCP_PRINCIPAL = "mcp:other456hash"
 
 
 def _make_job_doc(job_id: str, owner: str, channel_id: str = _CHANNEL_ID) -> dict:
-    """Minimal sync_jobs document for mocking find_one."""
+    """Dict matching the SyncJob pydantic model.
+
+    Fields omitted rely on SyncJob defaults (errors=[], started_at=auto).
+    """
     return {
         "id": job_id,
         "channel_id": channel_id,
         "status": "queued",
         "kind": "sync",
         "owner_principal_id": owner,
-        "started_at": None,
-        "completed_at": None,
         "processed_messages": 0,
         "total_messages": 0,
         "current_stage": None,
-        "errors": None,
     }
 
 
 def _mock_stores(job_doc: dict | None):
-    """Build a mock stores object whose _sync_jobs.find_one returns job_doc."""
-    sync_jobs_mock = MagicMock()
-    sync_jobs_mock.find_one = AsyncMock(return_value=job_doc)
+    """Build a mock stores object whose ``mongodb.get_sync_job`` returns a
+    ``SyncJob`` built from *job_doc*, or ``None`` if *job_doc* is ``None``."""
+    from beever_atlas.models.persistence import SyncJob
+
+    returned = SyncJob(**job_doc) if job_doc is not None else None
 
     mongodb_mock = MagicMock()
-    mongodb_mock._sync_jobs = sync_jobs_mock
+    mongodb_mock.get_sync_job = AsyncMock(return_value=returned)
 
     stores_mock = MagicMock()
     stores_mock.mongodb = mongodb_mock
