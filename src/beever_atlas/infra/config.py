@@ -350,6 +350,19 @@ class Settings(BaseSettings):
             "Leave false until the full change ships."
         ),
     )
+
+    # MCP rate-limit backend. "memory" (default) is a per-process sliding
+    # window — safe for single-worker deploys. "redis" uses the configured
+    # redis_url so counters are shared across workers; required before
+    # flipping BEEVER_MCP_V2=true in multi-worker production.
+    beever_mcp_rate_limit_backend: Literal["memory", "redis"] = Field(
+        default="memory",
+        alias="BEEVER_MCP_RATE_LIMIT_BACKEND",
+        description=(
+            "MCP rate-limiter backend. 'memory' is per-process (v1 default). "
+            "'redis' uses REDIS_URL for distributed sliding-window counters."
+        ),
+    )
     # Admin token for /api/dev/* endpoints
     admin_token: str = Field(default="", alias="BEEVER_ADMIN_TOKEN")
 
