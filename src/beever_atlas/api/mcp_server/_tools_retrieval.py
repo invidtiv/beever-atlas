@@ -65,13 +65,6 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
         if err:
             return err
 
-        logger.warning(
-            "event=mcp_ask_channel_stub channel_id=%s principal=%s "
-            "detail='ADK runner not yet wired; Phase 9 gate requires real implementation'",
-            channel_id,
-            principal_id,
-        )
-
         try:
             from beever_atlas.infra.channel_access import assert_channel_access
 
@@ -81,21 +74,52 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
 
             if isinstance(exc, HTTPException) and exc.status_code == 403:
                 return {"error": "channel_access_denied", "channel_id": channel_id}
+            # Any other exception surfaces as an adk_error — the caller sees a
+            # structured dict rather than a protocol-level failure.
+            logger.warning(
+                "event=mcp_ask_channel_access_check_failed channel=%s err=%r",
+                channel_id,
+                exc,
+            )
+            return {"error": "channel_access_denied", "channel_id": channel_id}
 
-        effective_session_id = session_id or f"mcp:{principal_id}"
-        await ctx.info(
-            f"ask_channel stub: channel={channel_id} session={effective_session_id} "
-            f"(ADK runner integration pending Phase 3b)"
-        )
+        if mode not in {"quick", "summarize", "deep"}:
+            return {
+                "error": "invalid_parameter",
+                "parameter": "mode",
+                "detail": "mode must be one of: quick, summarize, deep",
+            }
 
-        return {
-            "error": "not_implemented_in_phase3",
-            "detail": (
-                "ask_channel requires Phase 3b ADK runner integration. "
-                "The tool is registered and channel access is enforced, "
-                "but the QA pipeline is not yet wired."
-            ),
-        }
+        import asyncio
+
+        from beever_atlas.api.mcp_server._ask_runner import run_ask_channel
+
+        try:
+            return await run_ask_channel(
+                principal_id=principal_id,
+                channel_id=channel_id,
+                question=question,
+                mode=mode,
+                session_id=session_id,
+                ctx=ctx,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "event=mcp_ask_channel_timeout channel=%s principal=%s",
+                channel_id,
+                principal_id,
+            )
+            return {"error": "answer_timeout"}
+        except Exception as exc:
+            logger.exception(
+                "event=mcp_ask_channel_runner_error channel=%s principal=%s",
+                channel_id,
+                principal_id,
+            )
+            return {
+                "error": "adk_error",
+                "detail": str(exc)[:200],
+            }
 
     @mcp.tool(name="search_channel_facts")
     async def search_channel_facts(

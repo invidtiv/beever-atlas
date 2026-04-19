@@ -42,8 +42,50 @@ def _ctx():
 
 
 @pytest.mark.asyncio
-async def test_ask_channel_stub_returns_not_implemented():
-    """ask_channel Phase 3 stub returns a structured not_implemented payload."""
+async def test_ask_channel_returns_structured_answer_from_runner():
+    """ask_channel drives the ADK runner wrapper and returns {answer, citations, follow_ups, metadata}."""
+    from beever_atlas.api.mcp_server import build_mcp
+
+    fake_answer = {
+        "answer": "Alice owns billing.",
+        "citations": [{"type": "channel_fact", "number": "1", "author": "@alice"}],
+        "follow_ups": [],
+        "metadata": {"session_id": "mcp:testhash", "mode": "deep", "duration_ms": 42, "tool_calls": []},
+    }
+    with patch("fastmcp.server.dependencies.get_http_request", return_value=_req()), \
+         patch("beever_atlas.infra.channel_access.assert_channel_access",
+               new=AsyncMock(return_value=None)), \
+         patch("beever_atlas.api.mcp_server._ask_runner.run_ask_channel",
+               new=AsyncMock(return_value=fake_answer)):
+        mcp = build_mcp()
+        fn = _get_tool_fn(mcp, "ask_channel")
+        result = await fn(channel_id="ch-a", question="Who owns the billing module?", ctx=_ctx())
+
+    assert result == fake_answer
+    assert set(result.keys()) == {"answer", "citations", "follow_ups", "metadata"}
+
+
+@pytest.mark.asyncio
+async def test_ask_channel_timeout_returns_answer_timeout():
+    """ask_channel surfaces asyncio.TimeoutError as structured answer_timeout error."""
+    import asyncio as _asyncio
+
+    from beever_atlas.api.mcp_server import build_mcp
+
+    with patch("fastmcp.server.dependencies.get_http_request", return_value=_req()), \
+         patch("beever_atlas.infra.channel_access.assert_channel_access",
+               new=AsyncMock(return_value=None)), \
+         patch("beever_atlas.api.mcp_server._ask_runner.run_ask_channel",
+               new=AsyncMock(side_effect=_asyncio.TimeoutError())):
+        mcp = build_mcp()
+        fn = _get_tool_fn(mcp, "ask_channel")
+        result = await fn(channel_id="ch-a", question="Long question", ctx=_ctx())
+
+    assert result == {"error": "answer_timeout"}
+
+
+@pytest.mark.asyncio
+async def test_ask_channel_invalid_mode_returns_invalid_parameter():
     from beever_atlas.api.mcp_server import build_mcp
 
     with patch("fastmcp.server.dependencies.get_http_request", return_value=_req()), \
@@ -51,9 +93,12 @@ async def test_ask_channel_stub_returns_not_implemented():
                new=AsyncMock(return_value=None)):
         mcp = build_mcp()
         fn = _get_tool_fn(mcp, "ask_channel")
-        result = await fn(channel_id="ch-a", question="Who owns the billing module?", ctx=_ctx())
+        result = await fn(
+            channel_id="ch-a", question="anything", mode="reckless", ctx=_ctx()
+        )
 
-    assert result["error"] == "not_implemented_in_phase3"
+    assert result["error"] == "invalid_parameter"
+    assert result["parameter"] == "mode"
 
 
 @pytest.mark.asyncio
