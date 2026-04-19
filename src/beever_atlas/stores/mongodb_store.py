@@ -239,6 +239,20 @@ class MongoDBStore:
         doc.pop("_id", None)
         return SyncJob(**doc)
 
+    async def get_sync_job(self, job_id: str) -> SyncJob | None:
+        """Return the ``SyncJob`` for the given id, or ``None`` if missing.
+
+        Public accessor used by the MCP ``get_job_status`` capability; keeps
+        the private ``_sync_jobs`` collection encapsulated so a schema
+        refactor (rename, index change, partitioning) does not silently
+        break cross-module callers.
+        """
+        doc = await self._sync_jobs.find_one({"id": job_id})
+        if doc is None:
+            return None
+        doc.pop("_id", None)
+        return SyncJob(**doc)
+
     async def get_sync_jobs_for_channel(
         self,
         channel_id: str,

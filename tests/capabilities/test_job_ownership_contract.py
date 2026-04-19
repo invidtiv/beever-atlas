@@ -25,8 +25,12 @@ from beever_atlas.capabilities.errors import JobNotFound
 
 
 def _make_record(*, job_id: str, owner: str | None, status: str = "running") -> dict:
-    """Build a raw sync_jobs MongoDB document with the schema the real
-    collection uses (key is ``id``, not ``job_id``)."""
+    """Build a dict matching the SyncJob pydantic model.
+
+    The real ``stores.mongodb.get_sync_job`` returns a ``SyncJob`` instance,
+    so the mock here constructs one via ``SyncJob(**record)``. Fields omitted
+    here rely on SyncJob's defaults (errors=[], started_at=auto, version=0).
+    """
     return {
         "id": job_id,
         "kind": "sync",
@@ -36,20 +40,24 @@ def _make_record(*, job_id: str, owner: str | None, status: str = "running") -> 
         "processed_messages": 10,
         "total_messages": 20,
         "current_stage": "ingesting",
-        "started_at": None,
-        "completed_at": None,
-        "errors": None,
     }
 
 
 def _patch_stores(monkeypatch, records: list[dict]):
-    by_id = {rec["id"]: rec for rec in records}
+    """Patch the public ``get_sync_job`` method on ``stores.mongodb``.
 
-    async def _fake_find_one(query):
-        return by_id.get(query.get("id"))
+    The capability goes through ``stores.mongodb.get_sync_job(job_id)``, not
+    the private ``_sync_jobs`` collection — so the test mocks that method
+    and returns a ``SyncJob`` model (the real store converts the BSON doc).
+    """
+    from beever_atlas.models.persistence import SyncJob
 
-    fake_sync_jobs = SimpleNamespace(find_one=_fake_find_one)
-    fake_mongodb = SimpleNamespace(_sync_jobs=fake_sync_jobs)
+    by_id = {rec["id"]: SyncJob(**rec) for rec in records}
+
+    async def _fake_get_sync_job(job_id):
+        return by_id.get(job_id)
+
+    fake_mongodb = SimpleNamespace(get_sync_job=_fake_get_sync_job)
     fake_stores = SimpleNamespace(mongodb=fake_mongodb)
 
     monkeypatch.setattr(stores_mod, "get_stores", lambda: fake_stores)
