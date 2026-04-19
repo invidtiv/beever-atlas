@@ -36,12 +36,14 @@ async def get_job_status(principal_id: str, job_id: str) -> dict:
     from beever_atlas.stores import get_stores
 
     stores = get_stores()
-    # Use the internal MongoDB find_one path via the sync_jobs collection.
-    doc = await stores.mongodb._sync_jobs.find_one({"id": job_id})  # type: ignore[attr-defined]
-    if doc is None:
+    job = await stores.mongodb.get_sync_job(job_id)
+    if job is None:
         raise JobNotFound(job_id)
 
-    doc.pop("_id", None)
+    # Convert the typed model back to a dict for the shared `_build_status`
+    # helper. Using model_dump keeps any future SyncJob schema additions
+    # flowing through without editing this function.
+    doc = job.model_dump(mode="json")
 
     owner = doc.get("owner_principal_id")
 
