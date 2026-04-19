@@ -41,6 +41,7 @@ from beever_atlas.api.policies import router as policies_router
 from beever_atlas.api.models import router as models_router
 from beever_atlas.api.dev import router as dev_router
 from beever_atlas.api.media import router as media_router
+from beever_atlas.api.admin import router as admin_router
 from beever_atlas.api.mcp import mcp as mcp_server
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
@@ -212,6 +213,9 @@ app.include_router(models_router, dependencies=_auth)
 # Dev router: only mounted in development; its own endpoints require admin token.
 if _settings.beever_env == "development":
     app.include_router(dev_router)
+# Admin router: always mounted in every env, admin-token gated. Hosts the
+# MCP operator view among other ops endpoints.
+app.include_router(admin_router)
 app.include_router(wiki_router, dependencies=_auth)
 app.include_router(config_router, dependencies=_auth)
 app.include_router(media_router, dependencies=_auth)
