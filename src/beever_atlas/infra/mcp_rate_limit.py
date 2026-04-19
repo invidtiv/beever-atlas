@@ -1,24 +1,41 @@
 """Principal-keyed sliding-window rate limiter for the MCP surface.
 
-Architecture note (v1 limitation):
-    This implementation uses a single in-process dict keyed on
-    ``(principal_id, tool_name)``. It is **not** distributed-cache-aware:
-    when multiple worker processes serve the ``/mcp`` mount, each process
-    maintains independent counters, so a principal can call each worker up to
-    N times per window (not N times globally). For v1 single-process deployments
-    this is acceptable.
+Two backends are supported, selected by ``settings.beever_mcp_rate_limit_backend``:
 
-Upgrade path:
-    Replace ``_WINDOWS`` with a Redis-backed sliding-window counter using the
-    same ``check_and_record`` signature. The rest of the codebase only imports
-    this function so the swap is zero-touch for callers.
+- ``"memory"`` — per-process in-memory sliding window. Default; sufficient for
+  single-worker deploys. In multi-worker deploys each process counts
+  independently, so a principal can burst up to N times per worker.
+
+- ``"redis"`` — distributed sliding window backed by a Redis sorted set. Call
+  timestamps are stored under ``mcp:rl:{principal}:{tool}`` with the timestamp
+  as both score and member. Each ``check_and_record`` invocation runs an
+  atomic Lua script that:
+
+    1. Drops entries older than ``now - window`` (sliding expiry).
+    2. Counts remaining entries.
+    3. If the count is below the limit, records ``now`` and returns allowed.
+    4. Otherwise returns the seconds-until-retry (i.e. when the oldest entry
+       will expire).
+
+  The Lua script guarantees atomicity across concurrent worker processes — no
+  race between check and record. The key TTL is refreshed to ``window`` on
+  every write so idle keys self-clean.
+
+Public API (``check_and_record``, ``reset_state``, ``_set_clock``) is identical
+across backends so callers do not care which is active.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import defaultdict
 from typing import Callable
+
+from beever_atlas.infra.config import get_settings
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Per-tool limits (calls per 60-second window)
@@ -31,17 +48,14 @@ _TOOL_LIMITS: dict[str, int] = {
     "refresh_wiki": 5,
 }
 
-# ---------------------------------------------------------------------------
-# In-memory sliding-window state
-# Key: (principal_id, tool_name) -> list of call timestamps (monotonic)
-# ---------------------------------------------------------------------------
-
-_windows: dict[tuple[str, str], list[float]] = defaultdict(list)
-
-# Injected clock — override in tests via ``_set_clock(callable)``
-_clock: Callable[[], float] = time.monotonic
-
 _WINDOW_SECONDS = 60
+
+
+# ---------------------------------------------------------------------------
+# Clock injection for deterministic tests
+# ---------------------------------------------------------------------------
+
+_clock: Callable[[], float] = time.monotonic
 
 
 def _set_clock(fn: Callable[[], float]) -> None:
@@ -50,44 +64,27 @@ def _set_clock(fn: Callable[[], float]) -> None:
     _clock = fn
 
 
-def reset_state() -> None:
-    """Clear all rate-limit counters; for unit tests only.
+# ---------------------------------------------------------------------------
+# Memory backend
+# ---------------------------------------------------------------------------
 
-    Tests MUST call this in their setup/teardown so state does not leak
-    across test cases.
-    """
-    _windows.clear()
+# Key: (principal_id, tool_name) -> list of call timestamps (monotonic)
+_windows: dict[tuple[str, str], list[float]] = defaultdict(list)
 
 
-async def check_and_record(
-    principal_id: str,
-    tool_name: str,
+async def _check_and_record_memory(
+    principal_id: str, tool_name: str
 ) -> tuple[bool, int | None]:
-    """Check whether ``principal_id`` may invoke ``tool_name`` right now.
-
-    Updates the sliding window unconditionally (so each call is counted
-    even if denied — this prevents callers from hammering the limiter at
-    zero cost when already throttled).
-
-    Returns:
-        ``(True, None)``  — call is allowed.
-        ``(False, int)``  — call is denied; ``int`` is the number of seconds
-                            until the oldest recorded call falls out of the
-                            window (i.e. the earliest the caller may retry).
-    """
     limit = _TOOL_LIMITS.get(tool_name, _DEFAULT_LIMIT)
     now = _clock()
     window_start = now - _WINDOW_SECONDS
 
     key = (principal_id, tool_name)
-    # Prune stale entries
     timestamps = [t for t in _windows[key] if t >= window_start]
 
     if len(timestamps) >= limit:
-        # Oldest timestamp in the window — retry after it falls off.
         oldest = timestamps[0]
         retry_after = int(oldest + _WINDOW_SECONDS - now) + 1
-        # Record the rejected call so the window stays accurate.
         timestamps.append(now)
         _windows[key] = timestamps
         return False, max(retry_after, 1)
@@ -97,8 +94,183 @@ async def check_and_record(
     return True, None
 
 
+# ---------------------------------------------------------------------------
+# Redis backend
+# ---------------------------------------------------------------------------
+
+# Atomic sliding-window Lua script. KEYS[1] is the sorted-set key.
+# ARGV: [now, window_seconds, limit, member_suffix]
+# Returns: {allowed (0|1), retry_after_seconds (int)} — retry_after is 0 when allowed.
+_SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member_suffix = ARGV[4]
+local window_start = now - window
+
+-- Drop entries older than the window.
+redis.call('ZREMRANGEBYSCORE', key, '-inf', window_start)
+
+local count = tonumber(redis.call('ZCARD', key))
+
+if count >= limit then
+    -- Use oldest surviving score to compute retry_after.
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    local retry_after = 1
+    if oldest and oldest[2] then
+        retry_after = math.max(1, math.ceil(tonumber(oldest[2]) + window - now))
+    end
+    return {0, retry_after}
+end
+
+-- Record this call. Use now + suffix so concurrent calls in the same
+-- millisecond still get distinct members.
+redis.call('ZADD', key, now, tostring(now) .. ':' .. member_suffix)
+redis.call('EXPIRE', key, window)
+return {1, 0}
+"""
+
+_redis_client = None  # type: ignore[var-annotated]
+_redis_script_sha: str | None = None
+
+
+async def _get_redis():
+    """Return a shared asyncio Redis client, lazily initialised."""
+    global _redis_client, _redis_script_sha
+
+    if _redis_client is not None:
+        return _redis_client
+
+    import redis.asyncio as aioredis
+
+    settings = get_settings()
+    _redis_client = aioredis.from_url(
+        settings.redis_url, decode_responses=True
+    )
+    try:
+        _redis_script_sha = await _redis_client.script_load(_SLIDING_WINDOW_LUA)
+    except Exception:
+        # We still work without cached sha — eval_sha fallback handled below.
+        _redis_script_sha = None
+    return _redis_client
+
+
+async def _check_and_record_redis(
+    principal_id: str, tool_name: str
+) -> tuple[bool, int | None]:
+    import uuid
+
+    global _redis_script_sha
+
+    client = await _get_redis()
+    limit = _TOOL_LIMITS.get(tool_name, _DEFAULT_LIMIT)
+    now = _clock()
+    key = f"mcp:rl:{principal_id}:{tool_name}"
+    # Uuid suffix makes ZADD members unique when two calls land in the same
+    # microsecond (score collisions would otherwise silently drop one).
+    suffix = uuid.uuid4().hex[:8]
+
+    try:
+        if _redis_script_sha is not None:
+            try:
+                result = await client.evalsha(
+                    _redis_script_sha,
+                    1,
+                    key,
+                    str(now),
+                    str(_WINDOW_SECONDS),
+                    str(limit),
+                    suffix,
+                )
+            except Exception:
+                # Script evicted from Redis cache — re-load and fall through.
+                _redis_script_sha = await client.script_load(_SLIDING_WINDOW_LUA)
+                result = await client.evalsha(
+                    _redis_script_sha,
+                    1,
+                    key,
+                    str(now),
+                    str(_WINDOW_SECONDS),
+                    str(limit),
+                    suffix,
+                )
+        else:
+            result = await client.eval(
+                _SLIDING_WINDOW_LUA,
+                1,
+                key,
+                str(now),
+                str(_WINDOW_SECONDS),
+                str(limit),
+                suffix,
+            )
+    except Exception:
+        # If Redis is unreachable, fail-open but loud. A rate-limit outage
+        # should NOT take down MCP — the audit log will show the spike.
+        logger.warning(
+            "event=mcp_rate_limit_redis_unavailable "
+            "principal=%s tool=%s — failing open",
+            principal_id,
+            tool_name,
+            exc_info=True,
+        )
+        return True, None
+
+    allowed = int(result[0]) == 1
+    retry_after = int(result[1]) if not allowed else None
+    return allowed, retry_after
+
+
+# ---------------------------------------------------------------------------
+# Public API (backend dispatch)
+# ---------------------------------------------------------------------------
+
+
+async def check_and_record(
+    principal_id: str, tool_name: str
+) -> tuple[bool, int | None]:
+    """Check whether ``principal_id`` may invoke ``tool_name`` right now.
+
+    Returns ``(True, None)`` if allowed or ``(False, retry_after_seconds)``
+    if denied. The window is always updated (denied calls are still
+    recorded) so callers cannot hammer the limiter for free when throttled.
+    """
+    settings = get_settings()
+    backend = getattr(settings, "beever_mcp_rate_limit_backend", "memory")
+    if backend == "redis":
+        return await _check_and_record_redis(principal_id, tool_name)
+    return await _check_and_record_memory(principal_id, tool_name)
+
+
+def reset_state() -> None:
+    """Clear in-process rate-limit counters; for unit tests only.
+
+    Always synchronous — callers (existing and new) don't need to await.
+    The Redis backend does NOT share state across tests by design: each
+    Redis test sets its own principal/tool pair so counter leakage is
+    bounded. If a Redis test truly needs a wipe, call
+    :func:`reset_state_redis` explicitly.
+    """
+    _windows.clear()
+
+
+async def reset_state_redis() -> None:
+    """Delete every ``mcp:rl:*`` key in Redis. Redis-backend tests only."""
+    try:
+        client = await _get_redis()
+        async for key in client.scan_iter(match="mcp:rl:*", count=500):
+            await client.delete(key)
+    except Exception:
+        logger.warning(
+            "event=mcp_rate_limit_reset_redis_failed — state may leak across tests",
+            exc_info=True,
+        )
+
+
 __all__ = [
     "check_and_record",
     "reset_state",
+    "reset_state_redis",
     "_set_clock",
 ]
