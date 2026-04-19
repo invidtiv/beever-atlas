@@ -102,6 +102,41 @@ async def test_ask_channel_invalid_mode_returns_invalid_parameter():
 
 
 @pytest.mark.asyncio
+async def test_ask_channel_rejects_oversized_question():
+    """Length cap prevents cost/availability abuse via huge prompts."""
+    from beever_atlas.api.mcp_server import build_mcp
+
+    with patch("fastmcp.server.dependencies.get_http_request", return_value=_req()), \
+         patch("beever_atlas.infra.channel_access.assert_channel_access",
+               new=AsyncMock(return_value=None)):
+        mcp = build_mcp()
+        fn = _get_tool_fn(mcp, "ask_channel")
+        result = await fn(
+            channel_id="ch-a",
+            question="x" * 4001,
+            ctx=_ctx(),
+        )
+
+    assert result["error"] == "invalid_parameter"
+    assert result["parameter"] == "question"
+
+
+@pytest.mark.asyncio
+async def test_ask_channel_rejects_empty_question():
+    from beever_atlas.api.mcp_server import build_mcp
+
+    with patch("fastmcp.server.dependencies.get_http_request", return_value=_req()), \
+         patch("beever_atlas.infra.channel_access.assert_channel_access",
+               new=AsyncMock(return_value=None)):
+        mcp = build_mcp()
+        fn = _get_tool_fn(mcp, "ask_channel")
+        result = await fn(channel_id="ch-a", question="", ctx=_ctx())
+
+    assert result["error"] == "invalid_parameter"
+    assert result["parameter"] == "question"
+
+
+@pytest.mark.asyncio
 async def test_ask_channel_rejects_cross_principal_session_id():
     """Principal A cannot pass a session_id namespaced under principal B.
 

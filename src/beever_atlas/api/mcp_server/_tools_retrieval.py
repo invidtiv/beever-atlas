@@ -65,6 +65,16 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
         if err:
             return err
 
+        # Cost / availability guard: cap question length so a caller cannot
+        # submit a megabyte prompt that burns the Gemini quota and holds a
+        # 90s worker. 4KB is ample for natural-language questions.
+        if not question or len(question) > 4000:
+            return {
+                "error": "invalid_parameter",
+                "parameter": "question",
+                "detail": "length must be 1..4000 characters",
+            }
+
         try:
             from beever_atlas.infra.channel_access import assert_channel_access
 

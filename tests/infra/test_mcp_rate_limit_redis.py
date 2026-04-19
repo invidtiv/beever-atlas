@@ -98,8 +98,13 @@ async def test_redis_denied_response_returns_retry_after():
 
 
 @pytest.mark.asyncio
-async def test_redis_failure_fails_open():
-    """Redis unreachable -> fail-open but log a warning. MCP must not go down."""
+async def test_redis_failure_falls_back_to_memory_limiter():
+    """Redis unreachable → fall back to the in-process memory limiter.
+
+    Defence-in-depth: a pure fail-open would let a flaky Redis become a
+    DoS amplifier on expensive tools. Falling back means each worker
+    degrades to per-process limits instead of disabling rate limiting.
+    """
     fake_client = SimpleNamespace(
         script_load=AsyncMock(side_effect=ConnectionError("redis down")),
         evalsha=AsyncMock(side_effect=ConnectionError("redis down")),
@@ -109,12 +114,25 @@ async def test_redis_failure_fails_open():
         "beever_atlas.infra.mcp_rate_limit.get_settings",
         return_value=_redis_settings(),
     ), patch("redis.asyncio.from_url", return_value=fake_client):
+        # First call goes through — memory limiter has capacity.
         allowed, retry = await mcp_rate_limit.check_and_record(
             "mcp:charlie", "ask_channel"
         )
+        assert allowed is True
+        assert retry is None
 
-    assert allowed is True, "Rate-limiter must fail open on Redis outage"
-    assert retry is None
+        # Exhaust the ask_channel 30/min budget on this principal — the
+        # memory fallback is still enforcing, not fail-open forever.
+        for _ in range(29):
+            await mcp_rate_limit.check_and_record("mcp:charlie", "ask_channel")
+        allowed_over_budget, retry_over = await mcp_rate_limit.check_and_record(
+            "mcp:charlie", "ask_channel"
+        )
+        assert allowed_over_budget is False, (
+            "Fallback memory limiter MUST still enforce per-tool limits — "
+            "otherwise a flaky Redis becomes an unbounded-burst DoS path"
+        )
+        assert retry_over is not None and retry_over > 0
 
 
 @pytest.mark.asyncio
