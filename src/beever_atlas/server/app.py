@@ -220,12 +220,21 @@ app.include_router(wiki_router, dependencies=_auth)
 app.include_router(config_router, dependencies=_auth)
 app.include_router(media_router, dependencies=_auth)
 
-# Legacy MCP mount. WARNING: this mount is currently UNAUTHENTICATED — the
-# hotfix on branch hotfix/mcp-auth-gate (commit 0b4467c) gates it behind
-# BEEVER_MCP_ENABLED=false by default. That fix will arrive on main via its
-# own PR. Until then, do NOT deploy this branch to production without also
-# carrying the hotfix.
-app.mount("/mcp", mcp_server.http_app(path="/"))
+# Legacy MCP mount (openspec hotfix/mcp-auth-gate). The underlying mount is
+# UNAUTHENTICATED — gated off by BEEVER_MCP_ENABLED=false by default. Enable
+# ONLY in local dev. The secure replacement is the /mcp/v2 mount below.
+if _settings.beever_mcp_enabled:
+    app.mount("/mcp", mcp_server.http_app(path="/"))
+    logging.getLogger(__name__).warning(
+        "MCP endpoint mounted WITHOUT authentication (BEEVER_MCP_ENABLED=true). "
+        "This is intended for local dev only. Do not enable in production."
+    )
+else:
+    logging.getLogger(__name__).info(
+        "MCP endpoint disabled (BEEVER_MCP_ENABLED=false). "
+        "Set BEEVER_MCP_ENABLED=true to enable — unauthenticated for now, "
+        "do not use in production."
+    )
 
 # Secure v2 MCP mount (openspec change atlas-mcp-server). Gated behind
 # BEEVER_MCP_V2=true (default off) until Phase 3 ships the full tool catalog.
