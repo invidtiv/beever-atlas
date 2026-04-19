@@ -24,14 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README Quick Start section now includes MCP server overview with link to full docs.
 
 ### Fixed (Security)
-- `/mcp` mount was previously unauthenticated (Phase 0 hotfix `BEEVER_MCP_ENABLED=false`);
-  the new `/mcp/v2` mount requires bearer authentication via `BEEVER_MCP_API_KEYS`
-  and enforces per-tool channel-access checks.
+- The legacy unauthenticated `/mcp` mount is removed (previously gated off by
+  a Phase 0 hotfix). The `/mcp/v2` mount is the sole MCP surface; it requires
+  bearer authentication via `BEEVER_MCP_API_KEYS` and enforces per-tool
+  channel-access checks.
 
 ### Deprecated
-- The legacy `search_channel_knowledge` MCP tool (from unauthenticated `/mcp` mount)
-  is removed. Callers receive a structured `tool_renamed` error pointing at
-  `ask_channel` and `search_channel_facts`.
+- The legacy `search_channel_knowledge` MCP tool is removed. Callers now
+  receive a structured `tool_renamed` error pointing at `ask_channel` and
+  `search_channel_facts`.
+
+### Removed
+- Legacy unauthenticated `/mcp` mount (`BEEVER_MCP_ENABLED` flag). The secure
+  `/mcp/v2` surface (`BEEVER_MCP_V2`) is the single MCP endpoint. Callers
+  of the old `search_channel_knowledge` tool still receive a structured
+  `tool_renamed` error directing them to `ask_channel` / `search_channel_facts`.
 
 ## [0.1.1] - 2026-04-14
 

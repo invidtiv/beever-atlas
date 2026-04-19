@@ -338,16 +338,15 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Mount the v2 /mcp server (with auth middleware + ACL enforcement).
-    # Default off until Phase 3 ships the full tool catalog. The legacy
-    # unauthenticated mount (BEEVER_MCP_ENABLED) remains available for
-    # local dev only — set BEEVER_MCP_V2=true to activate the secure mount.
+    # Mount the /mcp/v2 server (with auth middleware + ACL enforcement).
+    # Default off; flip to true to expose the sole MCP surface.
     beever_mcp_v2: bool = Field(
         default=False,
         alias="BEEVER_MCP_V2",
         description=(
-            "Mount the v2 /mcp server (with auth middleware + ACL enforcement). "
-            "Leave false until the full change ships."
+            "Mount the /mcp/v2 server (with auth middleware + ACL enforcement). "
+            "This is the sole MCP surface; the legacy unauthenticated /mcp "
+            "mount has been retired."
         ),
     )
 
@@ -374,14 +373,6 @@ class Settings(BaseSettings):
     # boot with True logs a loud warning so operators notice.
     allow_bridge_as_user: bool = Field(
         default=False, alias="BEEVER_ALLOW_BRIDGE_AS_USER"
-    )
-
-    # Default OFF. Mount the /mcp endpoint. The current /mcp surface is
-    # UNAUTHENTICATED — enabling this exposes all channel data to any
-    # network-reachable caller. Leave off in production until the MCP auth
-    # middleware ships.
-    beever_mcp_enabled: bool = Field(
-        default=False, alias="BEEVER_MCP_ENABLED"
     )
 
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
