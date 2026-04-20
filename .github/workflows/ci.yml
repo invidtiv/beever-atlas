@@ -191,3 +191,27 @@ jobs:
             exit 1
           fi
           echo "OK — every FROM / image: is digest-pinned."
+
+      - name: Reject caret/tilde ranges on chat SDK family in bot/package.json
+        run: |
+          set -e
+          # RES-195 (H6): the Vercel `chat` + @chat-adapter/* family must stay
+          # pinned to exact versions. Caret/tilde ranges reopen the supply-chain
+          # vector a compromised-maintainer release would exploit.
+          violations=0
+          while IFS= read -r line; do
+            # Extract the specifier string from `"name": "spec",` lines.
+            spec="$(echo "$line" | sed -nE 's/.*"(chat|@chat-adapter\/[a-z-]+|chat-adapter-mattermost)": "([^"]+)".*/\2/p')"
+            [ -z "$spec" ] && continue
+            case "$spec" in
+              [\^~]*)
+                echo "::error file=bot/package.json::non-exact chat-family pin: $line"
+                violations=$((violations+1))
+                ;;
+            esac
+          done < bot/package.json
+          if [ "$violations" -gt 0 ]; then
+            echo "Found $violations non-exact chat-SDK pin(s). Strip ^ and ~."
+            exit 1
+          fi
+          echo "OK — chat SDK family pinned to exact versions."
