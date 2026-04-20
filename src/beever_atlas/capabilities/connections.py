@@ -17,6 +17,7 @@ import os
 
 from beever_atlas.capabilities.errors import ConnectionAccessDenied
 from beever_atlas.infra.channel_access import assert_connection_owned
+from beever_atlas.services.channel_discovery import fetch_connection_channels_safe
 from beever_atlas.stores import get_stores
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,20 @@ def _is_single_tenant() -> bool:
         return os.environ.get("BEEVER_SINGLE_TENANT", "true").lower() != "false"
 
 
+async def _batch_sync_states(stores, channel_ids: list[str]) -> dict:
+    """Batch-fetch ChannelSyncState keyed by channel_id; empty dict on failure."""
+    if not channel_ids:
+        return {}
+    try:
+        return await stores.mongodb.get_channel_sync_states_batch(channel_ids)
+    except Exception:
+        logger.debug(
+            "capabilities.connections: sync-state batch fetch failed",
+            exc_info=True,
+        )
+        return {}
+
+
 async def list_connections(principal_id: str) -> list[dict]:
     """Return the list of platform connections visible to *principal_id*.
 
@@ -47,27 +62,50 @@ async def list_connections(principal_id: str) -> list[dict]:
     The returned dicts contain:
     ``connection_id, platform, display_name, status, last_synced_at,
     selected_channel_count, source``.
+
+    ``last_synced_at`` is the most recent ``last_sync_ts`` across the
+    connection's selected channels, or ``None`` when no channel has been
+    synced or when the connection is a file connection (files aren't synced).
     """
     stores = get_stores()
     connections = await stores.platform.list_connections()
     single_tenant = _is_single_tenant()
 
-    results: list[dict] = []
+    visible = []
+    all_selected_ids: set[str] = set()
     for conn in connections:
         owner = getattr(conn, "owner_principal_id", None)
         owned = owner == principal_id
         legacy = owner in (None, _LEGACY_SHARED_OWNER)
         if owned or (single_tenant and legacy):
-            source = owned if owned else "inherited"
-            results.append({
-                "connection_id": conn.id,
-                "platform": conn.platform,
-                "display_name": conn.display_name,
-                "status": conn.status,
-                "last_synced_at": None,  # not yet in PlatformConnection model
-                "selected_channel_count": len(conn.selected_channels or []),
-                "source": conn.source,
-            })
+            visible.append(conn)
+            if conn.platform != "file":
+                for cid in (conn.selected_channels or []):
+                    all_selected_ids.add(cid)
+
+    states_map = await _batch_sync_states(stores, list(all_selected_ids))
+
+    results: list[dict] = []
+    for conn in visible:
+        selected = conn.selected_channels or []
+        if conn.platform == "file" or not selected:
+            last_synced_at = None
+        else:
+            timestamps = [
+                states_map[cid].last_sync_ts
+                for cid in selected
+                if cid in states_map
+            ]
+            last_synced_at = max(timestamps) if timestamps else None
+        results.append({
+            "connection_id": conn.id,
+            "platform": conn.platform,
+            "display_name": conn.display_name,
+            "status": conn.status,
+            "last_synced_at": last_synced_at,
+            "selected_channel_count": len(selected),
+            "source": conn.source,
+        })
     return results
 
 
@@ -78,11 +116,33 @@ async def list_channels(principal_id: str, connection_id: str) -> list[dict]:
     principal does not own the connection (mirrors ``assert_connection_owned``
     semantics: existence is not leaked).
 
+    Channel discovery is delegated to
+    :func:`beever_atlas.services.channel_discovery.fetch_connection_channels_safe`
+    — the same path used by the dashboard's ``/api/channels`` endpoint,
+    except this capability passes ``is_member_only=True`` so non-file
+    platforms are filtered to channels the bot is actually a member of
+    (i.e. channels it can read messages from). That matches what the
+    dashboard Channels page considers "CONNECTED". The dashboard itself
+    keeps ``is_member_only=False`` so it can still render the
+    CONNECTED/AVAILABLE split. Specifically:
+
+    - For file connections (``platform == "file"``), the list is
+      ``selected_channels`` with filenames pulled from the activity log.
+    - For every other platform, the bridge adapter is queried for the full
+      channel list. When ``selected_channels`` is non-empty it is applied
+      as a filter — the user's explicit pick-list wins. When
+      ``selected_channels`` is empty, only channels where
+      ``ChannelInfo.is_member`` is True are returned (so the agent only
+      sees channels it can actually read). If the bridge errors out, an
+      empty list is returned rather than failing the whole tool call.
+
     The returned dicts contain:
     ``channel_id, name, platform, last_sync_ts, sync_status,
     message_count_estimate``.
 
-    Fields not yet stored on the connection model are ``None``.
+    File connections report ``sync_status = "n/a"`` since uploaded files
+    are not synced; ``last_sync_ts`` / ``message_count_estimate`` stay
+    ``None``.
     """
     # Will raise ConnectionAccessDenied if principal doesn't own the connection.
     await assert_connection_owned(principal_id, connection_id)
@@ -94,15 +154,41 @@ async def list_channels(principal_id: str, connection_id: str) -> list[dict]:
         # practice but keeps the return type honest.
         raise ConnectionAccessDenied(connection_id)
 
+    channels = await fetch_connection_channels_safe(
+        conn.id,
+        conn.selected_channels or [],
+        conn.platform,
+        is_member_only=True,
+    )
+    if not channels:
+        return []
+
+    is_file_conn = conn.platform == "file"
+    channel_ids = [ch.channel_id for ch in channels]
+    states_map = (
+        {} if is_file_conn else await _batch_sync_states(stores, channel_ids)
+    )
+
     results: list[dict] = []
-    for channel_id in conn.selected_channels or []:
+    for ch in channels:
+        state = states_map.get(ch.channel_id) if not is_file_conn else None
+        if is_file_conn:
+            sync_status: str | None = "n/a"
+            last_sync_ts: str | None = None
+            message_count: int | None = None
+        else:
+            sync_status = "synced" if state else "never_synced"
+            last_sync_ts = getattr(state, "last_sync_ts", None) if state else None
+            message_count = (
+                getattr(state, "total_synced_messages", None) if state else None
+            )
         results.append({
-            "channel_id": channel_id,
-            "name": channel_id,  # display name not in model yet
-            "platform": conn.platform,
-            "last_sync_ts": None,
-            "sync_status": None,
-            "message_count_estimate": None,
+            "channel_id": ch.channel_id,
+            "name": ch.name or ch.channel_id,
+            "platform": ch.platform or conn.platform,
+            "last_sync_ts": last_sync_ts,
+            "sync_status": sync_status,
+            "message_count_estimate": message_count,
         })
     return results
 

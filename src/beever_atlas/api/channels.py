@@ -18,6 +18,10 @@ from beever_atlas.adapters import ChannelInfo, get_adapter
 from beever_atlas.adapters.bridge import BridgeError, ChatBridgeAdapter
 from beever_atlas.infra.auth import Principal, require_user
 from beever_atlas.infra.channel_access import assert_channel_access
+from beever_atlas.services.channel_discovery import (
+    fetch_connection_channels,
+    make_bridge_adapter,
+)
 from beever_atlas.stores import get_stores
 
 logger = logging.getLogger(__name__)
@@ -52,18 +56,6 @@ def _get_adapter_for_connection(connection_id: str | None = None):
     return ChatBridgeAdapter()
 
 
-def _make_bridge_adapter(connection_id: str):
-    """Construct a per-connection adapter, honoring ADAPTER_MOCK=true.
-
-    Replaces direct `ChatBridgeAdapter(connection_id=...)` calls so that
-    mock mode routes to the MockAdapter singleton uniformly.
-    """
-    import os
-    if os.environ.get("ADAPTER_MOCK", "").lower() in ("true", "1", "yes"):
-        return get_adapter()
-    return ChatBridgeAdapter(connection_id=connection_id)
-
-
 async def _resolve_adapter_for_channel(
     channel_id: str, connection_id: str | None = None
 ):
@@ -71,10 +63,10 @@ async def _resolve_adapter_for_channel(
 
     Tries the explicit connection_id first. If that fails (wrong workspace),
     searches all connections to find the one that owns this channel.
-    Honors ADAPTER_MOCK=true via `_make_bridge_adapter`.
+    Honors ADAPTER_MOCK=true via `make_bridge_adapter`.
     """
     if connection_id:
-        adapter = _make_bridge_adapter(connection_id)
+        adapter = make_bridge_adapter(connection_id)
         try:
             await adapter.get_channel_info(channel_id)
             return adapter
@@ -95,7 +87,7 @@ async def _resolve_adapter_for_channel(
     for conn in candidates:
         if conn.id == connection_id:
             continue  # Already tried this one
-        adapter = _make_bridge_adapter(conn.id)
+        adapter = make_bridge_adapter(conn.id)
         try:
             await adapter.get_channel_info(channel_id)
             return adapter
@@ -191,16 +183,6 @@ def _apply_language_state(
     })
 
 
-_PER_CONNECTION_TIMEOUT = 10.0  # seconds — prevent one slow platform from blocking all
-
-# Simple in-memory cache for channel lists to avoid hammering platform APIs
-# on every page navigation. Cache is per-connection with a 60s TTL.
-import time as _time
-
-_channel_cache: dict[str, tuple[float, list[ChannelInfo]]] = {}
-_CHANNEL_CACHE_TTL = 60.0  # seconds
-
-
 async def _fetch_file_messages(
     channel_id: str,
     limit: int,
@@ -254,75 +236,6 @@ async def _fetch_file_messages(
     return MessagesListResponse(messages=messages, total_count=total)
 
 
-async def _fetch_file_connection_channels(
-    conn_id: str, selected: list[str],
-) -> list[ChannelInfo]:
-    """Synthesize ChannelInfo for file-import channels from MongoDB.
-
-    File connections don't live on the bridge — their channels are the list
-    of ``selected_channels`` the connection tracks, with names pulled from
-    the activity log.
-    """
-    stores = get_stores()
-    if not selected:
-        return []
-    names = await asyncio.gather(
-        *[stores.mongodb.get_channel_display_name(cid) for cid in selected]
-    )
-    return [
-        ChannelInfo(
-            channel_id=cid,
-            name=name or cid,
-            platform="file",
-            is_member=True,
-            connection_id=conn_id,
-        )
-        for cid, name in zip(selected, names)
-    ]
-
-
-async def _fetch_connection_channels(
-    conn_id: str, selected: list[str],
-    platform: str = "",
-) -> list[ChannelInfo]:
-    """Fetch channels for a single connection, filtering by selected_channels.
-
-    Each call creates a short-lived adapter that is closed after use to avoid
-    leaking httpx connections.  A per-connection timeout prevents one slow
-    platform (e.g. Discord rate limits) from blocking the entire response.
-    """
-    # File connections don't go through the bridge — synthesize directly.
-    if platform == "file":
-        return await _fetch_file_connection_channels(conn_id, selected)
-
-    # Check cache first
-    cache_key = conn_id
-    cached = _channel_cache.get(cache_key)
-    if cached:
-        cached_at, cached_channels = cached
-        if _time.monotonic() - cached_at < _CHANNEL_CACHE_TTL:
-            if selected:
-                selected_set = set(selected)
-                return [ch for ch in cached_channels if ch.channel_id in selected_set]
-            return cached_channels
-
-    adapter = _make_bridge_adapter(conn_id)
-    try:
-        channels = await asyncio.wait_for(
-            adapter.list_channels(),
-            timeout=_PER_CONNECTION_TIMEOUT,
-        )
-        # Cache the unfiltered result
-        _channel_cache[cache_key] = (_time.monotonic(), channels)
-        # If selected_channels configured, filter to only those
-        if selected:
-            selected_set = set(selected)
-            channels = [ch for ch in channels if ch.channel_id in selected_set]
-        return channels
-    finally:
-        await adapter.close()
-
-
 @router.get("/api/channels", response_model=list[ChannelResponse])
 async def list_channels() -> list[ChannelResponse]:
     """List channels from all connected platform connections.
@@ -344,7 +257,7 @@ async def list_channels() -> list[ChannelResponse]:
 
     if connected:
         tasks = [
-            _fetch_connection_channels(conn.id, conn.selected_channels, conn.platform)
+            fetch_connection_channels(conn.id, conn.selected_channels, conn.platform)
             for conn in connected
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -403,7 +316,7 @@ async def get_channel(
     """
     await assert_channel_access(principal, channel_id)
     if connection_id:
-        adapter = _make_bridge_adapter(connection_id)
+        adapter = make_bridge_adapter(connection_id)
         try:
             info = await adapter.get_channel_info(channel_id)
             return await _enrich_with_language(_channel_to_response(info))
@@ -432,7 +345,7 @@ async def get_channel(
         candidates = connected
 
     for conn in candidates:
-        adapter = _make_bridge_adapter(conn.id)
+        adapter = make_bridge_adapter(conn.id)
         try:
             info = await adapter.get_channel_info(channel_id)
             return await _enrich_with_language(_channel_to_response(info))

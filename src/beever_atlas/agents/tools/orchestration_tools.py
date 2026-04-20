@@ -119,6 +119,14 @@ async def list_connections_tool() -> dict:
     with ``connection_id``, ``platform``, ``display_name``, ``status``,
     ``last_synced_at``, ``selected_channel_count``, ``source``), or a
     structured error dict if access fails.
+
+    **Important:** ``selected_channel_count`` is the size of the user's sync
+    pick-list for this connection — it is NOT the number of channels
+    available on the platform. A value of ``0`` means no channels are
+    currently in the sync subset; it does NOT mean the connection has no
+    channels. To discover what channels are actually accessible, call
+    ``list_channels_tool(connection_id)`` — that reads the full platform
+    catalog.
     """
     from beever_atlas.capabilities.connections import list_connections
 
@@ -139,7 +147,8 @@ async def list_connections_tool() -> dict:
 
 
 async def list_channels_tool(connection_id: str) -> dict:
-    """List the selected channels for a given connection.
+    """List the channels **available** on a given connection (from the
+    platform's full channel catalog).
 
     **When to call:**
     - The user asks "what channels do I have in connection X?" or "list
@@ -147,6 +156,11 @@ async def list_channels_tool(connection_id: str) -> dict:
     - You have a ``connection_id`` (from ``list_connections_tool`` or
       from the user's message) and need channel-level details.
     - This is a cheap read-only call; safe to use under untrusted context.
+    - ALWAYS call this per connection you care about — don't infer channel
+      availability from ``selected_channel_count`` in
+      ``list_connections_tool``. That count is a sync pick-list, not an
+      ACL; a connection with ``selected_channel_count: 0`` can still have
+      many channels available.
 
     **When NOT to call:**
     - You already have the ``channel_id`` the user is asking about.
@@ -157,7 +171,14 @@ async def list_channels_tool(connection_id: str) -> dict:
     Returns a dict with key ``channels`` (list of channel dicts, each
     with ``channel_id``, ``name``, ``platform``, ``last_sync_ts``,
     ``sync_status``, ``message_count_estimate``), or a structured error
-    dict on access failure.
+    dict on access failure. The returned list is scoped to channels the
+    bot can actually read messages from — i.e. channels where the bot is
+    a member (``is_member=True``) OR channels the user has explicitly
+    opted into via ``selected_channels`` on the connection. When
+    ``selected_channels`` is non-empty the user's pick-list wins and ALL
+    picked channels are returned regardless of membership; when empty,
+    only member channels are returned. This matches the dashboard's
+    "CONNECTED" set and excludes channels the bot cannot read.
     """
     from beever_atlas.capabilities.connections import list_channels
 
