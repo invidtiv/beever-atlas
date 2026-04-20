@@ -67,7 +67,23 @@ def register_discovery_tools(mcp: FastMCP) -> None:
         access, then drill into a specific connection with ``list_channels``.
         Results are filtered by ownership — you only see your own connections.
 
-        Do NOT use to check channel access — use ``list_channels`` for that.
+        **IMPORTANT — field semantics (don't misread these):**
+
+        - ``selected_channel_count`` is the size of the user's **sync pick-list**
+          for this connection. It is NOT the number of channels available on
+          the platform. ``selected_channel_count: 0`` means no channels are
+          explicitly opted into sync — it does NOT mean the connection has no
+          channels. A Slack workspace with 0 selected channels can still have
+          dozens of channels the bot can read.
+        - ``last_synced_at`` is scoped to the same pick-list. When the pick-list
+          is empty, this field is ``null`` even if channels on the connection
+          were synced through another path. Do not use it to infer "this
+          connection has never been used."
+
+        **To discover actual channels, always call ``list_channels(connection_id)``**
+        — that reads the live platform catalog (scoped to channels the bot can
+        read) and is the ground truth. Do NOT infer channel availability from
+        ``selected_channel_count``.
 
         Returns: ``{connections: [<connection dict>, ...]}``
         """
@@ -96,15 +112,27 @@ def register_discovery_tools(mcp: FastMCP) -> None:
         ],
         ctx: Context,
     ) -> dict:
-        """Return channels selected for sync on a specific connection you own.
+        """Return the channels the bot can actually read on a connection.
+
+        This is the **ground truth** for what channels exist on this connection —
+        always prefer it over ``list_connections.selected_channel_count``.
 
         Each channel entry contains: ``channel_id``, ``name``, ``platform``,
         ``last_sync_ts``, ``sync_status``, and ``message_count_estimate``.
 
-        When to use: after ``list_connections`` to see which specific channels
-        (Slack channels, Discord channels) are available for querying under a
-        given connection. Use the returned ``channel_id`` values with retrieval
-        tools like ``ask_channel``, ``search_channel_facts``, etc.
+        Scoping: the returned set matches the dashboard's "CONNECTED" view.
+        When the user has picked specific channels for sync
+        (``selected_channels`` non-empty on the connection), those are returned.
+        Otherwise every channel where the bot is a member (``is_member=True``)
+        is returned — because those are exactly the channels the bot can read
+        messages from. File-import connections return every file that has been
+        uploaded.
+
+        When to use: after ``list_connections``, to enumerate real channels
+        before calling any retrieval tool. Always call this per connection you
+        care about. ``sync_status="never_synced"`` on a channel is normal and
+        does NOT mean the channel is inaccessible — it just hasn't been indexed
+        yet. ``trigger_sync(channel_id)`` can be used to ingest it.
 
         Raises a structured ``connection_access_denied`` error if the principal
         does not own the requested connection — connection existence is not leaked.
