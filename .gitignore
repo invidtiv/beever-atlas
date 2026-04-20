@@ -70,9 +70,6 @@ web/dist/
 .impeccable.md
 *.pen
 
-# OpenSpec workflow artifacts
-openspec/
-
 # Stray version artifacts (e.g. pip's '=3.6.0' sentinel files)
 =*
 
