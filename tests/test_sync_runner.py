@@ -193,13 +193,14 @@ async def test_start_sync_recovers_stale_running_job(monkeypatch: pytest.MonkeyP
         async def complete_sync_job(self, job_id: str, status: str, errors: list[str] | None = None) -> None:
             calls["complete_sync_job"] = {"job_id": job_id, "status": status, "errors": errors}
 
-        async def create_sync_job(self, channel_id: str, sync_type: str, total_messages: int, batch_size: int, parent_messages: int = 0):
+        async def create_sync_job(self, channel_id: str, sync_type: str, total_messages: int, batch_size: int, parent_messages: int = 0, **kwargs):
             calls["create_sync_job"] = {
                 "channel_id": channel_id,
                 "sync_type": sync_type,
                 "total_messages": total_messages,
                 "parent_messages": parent_messages,
                 "batch_size": batch_size,
+                **kwargs,
             }
             return SimpleNamespace(id="job-new")
 
