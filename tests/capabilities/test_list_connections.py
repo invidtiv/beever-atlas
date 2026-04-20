@@ -127,6 +127,54 @@ async def test_selected_channel_count_in_response():
 
 
 @pytest.mark.asyncio
+async def test_last_synced_at_is_max_of_channel_sync_timestamps():
+    """For non-file connections, last_synced_at is the max last_sync_ts of selected channels."""
+    conn = _make_conn(
+        "conn-1", owner="user-A", selected_channels=["C1", "C2"],
+    )
+
+    s1 = MagicMock()
+    s1.last_sync_ts = "2026-04-10T00:00:00Z"
+    s2 = MagicMock()
+    s2.last_sync_ts = "2026-04-18T12:00:00Z"
+
+    mock_stores = MagicMock()
+    mock_stores.platform.list_connections = AsyncMock(return_value=[conn])
+    mock_stores.mongodb.get_channel_sync_states_batch = AsyncMock(
+        return_value={"C1": s1, "C2": s2},
+    )
+
+    with patch("beever_atlas.capabilities.connections.get_stores", return_value=mock_stores), \
+         patch("beever_atlas.capabilities.connections._is_single_tenant", return_value=True):
+        result = await list_connections("user-A")
+
+    assert result[0]["last_synced_at"] == "2026-04-18T12:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_file_connection_last_synced_at_is_none():
+    """File connections don't sync; last_synced_at stays None even with selected 'channels'."""
+    conn = _make_conn(
+        "conn-file",
+        platform="file",
+        owner="user-A",
+        selected_channels=["file-abc"],
+    )
+
+    mock_stores = MagicMock()
+    mock_stores.platform.list_connections = AsyncMock(return_value=[conn])
+    # No sync-state batch call expected for file-only connections — leave
+    # the mock un-stubbed so any call would surface as a failure.
+
+    with patch("beever_atlas.capabilities.connections.get_stores", return_value=mock_stores), \
+         patch("beever_atlas.capabilities.connections._is_single_tenant", return_value=True):
+        result = await list_connections("user-A")
+
+    assert result[0]["last_synced_at"] is None
+    assert result[0]["selected_channel_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_mixed_ownership_filtered_correctly():
     """Only owned and legacy connections are returned; foreign-owned ones are excluded."""
     owned = _make_conn("conn-owned", owner="user-A")
