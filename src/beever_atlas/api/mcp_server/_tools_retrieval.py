@@ -4,7 +4,6 @@ get_recent_activity, search_media_references (Phase 3, tasks 3.4–3.5)."""
 from __future__ import annotations
 
 import logging
-import uuid as _uuid
 from typing import Annotated
 
 from fastmcp import Context, FastMCP
@@ -170,6 +169,10 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
         if err:
             return err
 
+        # Fix #8: clamp to the documented 1–50 bound server-side so a
+        # misbehaving client cannot burn retrieval cost with limit=999.
+        limit = max(1, min(limit, 50))
+
         try:
             from beever_atlas.capabilities import memory as mem_cap
             from beever_atlas.capabilities.errors import ChannelAccessDenied
@@ -282,6 +285,10 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
         if err:
             return err
 
+        # Fix #8: clamp to documented ranges.
+        days = max(1, min(days, 90))
+        limit = max(1, min(limit, 50))
+
         try:
             from beever_atlas.capabilities import memory as mem_cap
             from beever_atlas.capabilities.errors import ChannelAccessDenied
@@ -337,6 +344,9 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
         err = _validate_id(channel_id, "channel_id")
         if err:
             return err
+
+        # Fix #8: clamp limit to documented 1–20 bound.
+        limit = max(1, min(limit, 20))
 
         try:
             from beever_atlas.capabilities import memory as mem_cap

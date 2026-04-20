@@ -182,3 +182,30 @@ async def test_retry_after_is_positive_integer():
     assert allowed is False
     assert isinstance(retry, int)
     assert retry >= 1
+
+
+# ---------------------------------------------------------------------------
+# Fix #9: rejected timestamps MUST NOT grow the window list.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_denied_calls_do_not_grow_window_list():
+    """Fire 100 rapid-fire calls at a 5/min tool and assert the internal
+    window list never exceeds 5 entries. Before Fix #9 the list would grow
+    by one every denial (100 - 5 = 95 extra entries retained)."""
+    pid = "mcp:abuser"
+    tool = "trigger_sync"  # limit=5
+    # Freeze the clock so all 100 calls land inside the window.
+    frozen_now = 1000.0
+    mcp_rate_limit._set_clock(lambda: frozen_now)
+
+    for _ in range(100):
+        await mcp_rate_limit.check_and_record(pid, tool)
+
+    key = (pid, tool)
+    assert len(mcp_rate_limit._windows[key]) <= 5, (
+        f"window list grew to {len(mcp_rate_limit._windows[key])} entries "
+        "after 100 rapid-fire denied calls — Fix #9 regression"
+    )
+

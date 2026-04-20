@@ -85,7 +85,9 @@ async def _check_and_record_memory(
     if len(timestamps) >= limit:
         oldest = timestamps[0]
         retry_after = int(oldest + _WINDOW_SECONDS - now) + 1
-        timestamps.append(now)
+        # Fix #9: store the pruned list but DO NOT append the rejected
+        # timestamp. Otherwise an abusive caller can grow the list without
+        # bound by firing faster than the window can expire entries.
         _windows[key] = timestamps
         return False, max(retry_after, 1)
 
@@ -236,8 +238,10 @@ async def check_and_record(
     """Check whether ``principal_id`` may invoke ``tool_name`` right now.
 
     Returns ``(True, None)`` if allowed or ``(False, retry_after_seconds)``
-    if denied. The window is always updated (denied calls are still
-    recorded) so callers cannot hammer the limiter for free when throttled.
+    if denied. Denied calls are NOT recorded in the memory backend (Fix #9
+    — keeping rejected timestamps would let an abusive caller grow the
+    window list without bound); the Redis backend's Lua script is already
+    atomic and also only records on accept.
     """
     settings = get_settings()
     backend = getattr(settings, "beever_mcp_rate_limit_backend", "memory")
