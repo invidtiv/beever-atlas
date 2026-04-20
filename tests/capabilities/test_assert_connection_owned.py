@@ -186,3 +186,82 @@ async def test_bridge_principal_unchanged_no_legacy_fallback():
     ):
         with pytest.raises(ConnectionAccessDenied):
             await assert_connection_owned(bridge_principal, "conn-1")
+
+
+# ----------------------------------------------------------------------
+# MCP single-tenant fallback for user-owned rows (RES-232).
+# Dashboard-created connections stamp ``owner_principal_id`` with a user
+# principal id (``user:<hash>``); MCP must reach them in single-tenant
+# mode because the MCP api-key represents the same operator.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_allows_user_owned_for_mcp_in_single_tenant():
+    """MCP principal can access a user-owned connection in single-tenant mode."""
+    conn = _make_conn(owner="user:abc123")
+    mcp_principal = Principal("mcp:xyz789", kind="mcp")
+
+    with (
+        patch("beever_atlas.infra.channel_access.get_stores", return_value=_mock_stores(conn)),
+        patch(
+            "beever_atlas.infra.channel_access.get_settings",
+            return_value=_mock_settings(single_tenant=True),
+        ),
+    ):
+        await assert_connection_owned(mcp_principal, "conn-1")  # should not raise
+
+
+@pytest.mark.asyncio
+async def test_denies_user_owned_for_mcp_in_multi_tenant():
+    """Regression guard: in multi-tenant, MCP cannot reach user-owned rows without explicit match."""
+    conn = _make_conn(owner="user:abc123")
+    mcp_principal = Principal("mcp:xyz789", kind="mcp")
+
+    with (
+        patch("beever_atlas.infra.channel_access.get_stores", return_value=_mock_stores(conn)),
+        patch(
+            "beever_atlas.infra.channel_access.get_settings",
+            return_value=_mock_settings(single_tenant=False),
+        ),
+    ):
+        with pytest.raises(ConnectionAccessDenied):
+            await assert_connection_owned(mcp_principal, "conn-1")
+
+
+@pytest.mark.asyncio
+async def test_user_principal_denied_other_user_row_in_single_tenant():
+    """Regression guard: a user principal must not inherit another user's row.
+
+    The MCP fallback widens inheritance for MCP only — user principals keep
+    their existing strict behaviour (``owner in {None, "legacy:shared"}``).
+    """
+    conn = _make_conn(owner="user:bbbb")
+    user_a = Principal("user:aaaa", kind="user")
+
+    with (
+        patch("beever_atlas.infra.channel_access.get_stores", return_value=_mock_stores(conn)),
+        patch(
+            "beever_atlas.infra.channel_access.get_settings",
+            return_value=_mock_settings(single_tenant=True),
+        ),
+    ):
+        with pytest.raises(ConnectionAccessDenied):
+            await assert_connection_owned(user_a, "conn-1")
+
+
+@pytest.mark.asyncio
+async def test_bridge_denied_user_owned_in_single_tenant():
+    """Regression guard: bridge principals still never inherit in single-tenant mode."""
+    conn = _make_conn(owner="user:abc123")
+    bridge_principal = Principal("bridge", kind="bridge")
+
+    with (
+        patch("beever_atlas.infra.channel_access.get_stores", return_value=_mock_stores(conn)),
+        patch(
+            "beever_atlas.infra.channel_access.get_settings",
+            return_value=_mock_settings(single_tenant=True),
+        ),
+    ):
+        with pytest.raises(ConnectionAccessDenied):
+            await assert_connection_owned(bridge_principal, "conn-1")
