@@ -9,8 +9,6 @@ Total: 17 (within the 18-tool v1 cap).
 
 from __future__ import annotations
 
-import pytest
-
 from beever_atlas.api.mcp_server import build_mcp
 
 # Phase 5b adds 3 orchestration tools on top of the 13 v1 + 1 shim = 14.
