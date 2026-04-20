@@ -142,6 +142,17 @@ async def assert_channel_access(principal: Principal | str, channel_id: str) -> 
         if all_legacy:
             return
 
+    # Additional single-tenant fallback for MCP principals: dashboard-created
+    # connections stamp ``owner_principal_id`` with a user principal id
+    # (e.g. ``"user:<hash>"``), which the ``all_legacy`` branch above does
+    # NOT admit. In single-tenant mode the MCP api-key represents the same
+    # operator as the dashboard user, so MCP must still reach those rows.
+    # Scoped to MCP only — user principals keep the stricter ``all_legacy``
+    # check so two users in a single-tenant deployment don't see each
+    # other's rows.
+    if single_tenant and kind == "mcp":
+        return
+
     logger.info(
         "channel_access deny: channel=%s principal=%s kind=%s reason=owner_mismatch",
         channel_id,
@@ -217,6 +228,15 @@ async def assert_connection_owned(principal: Principal | str, connection_id: str
     # with `list_connections` (capabilities/connections.py) so the same
     # principal sees the same connection set on both endpoints.
     if single_tenant and kind in ("user", "mcp") and owner in (None, _LEGACY_SHARED_OWNER):
+        return
+
+    # Additional single-tenant fallback for MCP: dashboard-created
+    # connections are stamped with a user principal id (e.g. ``"user:<hash>"``),
+    # which the branch above does NOT admit. In single-tenant mode the MCP
+    # api-key represents the same operator as the dashboard user, so MCP
+    # must still reach those rows. Scoped to MCP only — user principals
+    # keep the stricter ``owner in (None, "legacy:shared")`` check.
+    if single_tenant and kind == "mcp":
         return
 
     logger.info(

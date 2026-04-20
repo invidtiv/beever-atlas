@@ -212,3 +212,67 @@ async def test_mixed_ownership_filtered_correctly():
     assert "conn-owned" in ids
     assert "conn-legacy" in ids
     assert "conn-foreign" not in ids
+
+
+# ----------------------------------------------------------------------
+# MCP single-tenant fallback (RES-232): MCP principals must see
+# dashboard-created connections (owned by a user principal id) in
+# single-tenant mode. Before the fix, MCP saw only legacy:shared/None rows.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_principal_sees_user_owned_connection_in_single_tenant():
+    """In single-tenant mode, an MCP principal sees dashboard-created (user-owned) connections."""
+    user_owned = _make_conn("conn-user", owner="user:abc123")
+    legacy = _make_conn("conn-legacy", owner="legacy:shared")
+
+    mock_stores = MagicMock()
+    mock_stores.platform.list_connections = AsyncMock(return_value=[user_owned, legacy])
+
+    with (
+        patch("beever_atlas.capabilities.connections.get_stores", return_value=mock_stores),
+        patch("beever_atlas.capabilities.connections._is_single_tenant", return_value=True),
+    ):
+        result = await list_connections("mcp:xyz789")
+
+    ids = {r["connection_id"] for r in result}
+    assert "conn-user" in ids, "MCP must see user-owned connections in single-tenant mode"
+    assert "conn-legacy" in ids, "MCP must still see legacy:shared in single-tenant mode"
+
+
+@pytest.mark.asyncio
+async def test_mcp_principal_blocked_from_user_owned_in_multi_tenant():
+    """In multi-tenant mode, MCP principals stay strict: no inheritance of user rows."""
+    user_owned = _make_conn("conn-user", owner="user:abc123")
+
+    mock_stores = MagicMock()
+    mock_stores.platform.list_connections = AsyncMock(return_value=[user_owned])
+
+    with (
+        patch("beever_atlas.capabilities.connections.get_stores", return_value=mock_stores),
+        patch("beever_atlas.capabilities.connections._is_single_tenant", return_value=False),
+    ):
+        result = await list_connections("mcp:xyz789")
+
+    assert result == [], "MCP must not see user-owned connections in multi-tenant mode"
+
+
+@pytest.mark.asyncio
+async def test_user_principal_does_not_inherit_other_user_rows_in_single_tenant():
+    """Regression guard: user-A must still NOT see user-B's rows, even in single-tenant mode.
+
+    The MCP fallback widens inheritance for MCP only — not for user principals.
+    """
+    user_b_owned = _make_conn("conn-b", owner="user:bbbb")
+
+    mock_stores = MagicMock()
+    mock_stores.platform.list_connections = AsyncMock(return_value=[user_b_owned])
+
+    with (
+        patch("beever_atlas.capabilities.connections.get_stores", return_value=mock_stores),
+        patch("beever_atlas.capabilities.connections._is_single_tenant", return_value=True),
+    ):
+        result = await list_connections("user:aaaa")
+
+    assert result == [], "User-A must not see user-B's rows (inheritance is MCP-only)"

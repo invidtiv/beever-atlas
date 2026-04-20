@@ -57,7 +57,17 @@ async def list_connections(principal_id: str) -> list[dict]:
     1. If ``connection.owner_principal_id == principal_id`` → always included.
     2. Single-tenant fallback (``BEEVER_SINGLE_TENANT=true`` AND
        ``owner_principal_id in {None, "legacy:shared"}``) → included.
-    3. Everything else → excluded.
+    3. Single-tenant fallback for MCP principals: when
+       ``BEEVER_SINGLE_TENANT=true`` AND the caller is an MCP principal
+       (``principal_id`` starts with ``"mcp:"``), inherit ALL rows —
+       including rows owned by a user principal. In single-tenant mode
+       the MCP api-key represents the same operator as the dashboard
+       user, so dashboard-created connections (stamped with the user's
+       principal id) must remain reachable via MCP. This is scoped to
+       MCP only: user principals still stay on the ``{None, "legacy:shared"}``
+       fallback so they cannot see another user's rows in a single-tenant
+       deployment with multiple API keys.
+    4. Everything else → excluded.
 
     The returned dicts contain:
     ``connection_id, platform, display_name, status, last_synced_at,
@@ -71,13 +81,18 @@ async def list_connections(principal_id: str) -> list[dict]:
     connections = await stores.platform.list_connections()
     single_tenant = _is_single_tenant()
 
+    # In single-tenant mode, an MCP principal represents the same operator
+    # as the dashboard user and inherits every connection (including rows
+    # stamped with a user principal id). See rule 3 in the docstring.
+    mcp_single_tenant = single_tenant and principal_id.startswith("mcp:")
+
     visible = []
     all_selected_ids: set[str] = set()
     for conn in connections:
         owner = getattr(conn, "owner_principal_id", None)
         owned = owner == principal_id
         legacy = owner in (None, _LEGACY_SHARED_OWNER)
-        if owned or (single_tenant and legacy):
+        if owned or (single_tenant and legacy) or mcp_single_tenant:
             visible.append(conn)
             if conn.platform != "file":
                 for cid in conn.selected_channels or []:
