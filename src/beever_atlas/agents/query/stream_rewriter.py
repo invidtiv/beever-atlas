@@ -35,10 +35,14 @@ _SRC_BRACKET_RE = re.compile(r"\[([^\[\]]*?src:src_[a-f0-9]{10}[^\[\]]*?)\]")
 # Individual tag within a bracket's content.
 _INNER_TAG_RE = re.compile(r"src:(src_[a-f0-9]{10})(\s+inline)?", re.IGNORECASE)
 
-# Safety-net: any leftover `[src:...]` or `[External: ...]` literal that the
-# main passes didn't consume. Stripped at flush time.
+# Safety-net: any leftover `[src:...]` or `[External: src_<10hex> ...]`
+# citation literal that the main passes didn't consume. The `External:`
+# arm matches only the citation-registry's `src_<10hex>` id format so
+# legitimate `[External: https://...]` or `[External: casual note]` user
+# text is preserved (Fix #7).
 _LEFTOVER_TAG_RE = re.compile(
-    r"\[\s*(?:src:[^\[\]]*?|External:[^\[\]]*?)\]", re.IGNORECASE
+    r"\[\s*(?:src:[^\[\]]*?|External:\s*src_[a-f0-9]{10}\b[^\[\]]*?)\]",
+    re.IGNORECASE,
 )
 
 # Truncated tag openers at the tail of a buffer that must be flushed
@@ -50,6 +54,11 @@ _TRUNCATED_NUM_OPENER_RE = re.compile(r"\[\d+$")
 # Maximum buffered bytes we'll hold waiting for a tag to close. Larger
 # than any realistic tag even in combined form (~150 chars for 5 tags).
 _MAX_BUFFER = 1024
+
+# LiteralSrcStripper never buffers more than this many chars waiting for a
+# closing ``]``; past this cap we emit what we have minus any leftover
+# literals we can still strip (Fix #12).
+_LITERAL_STRIPPER_BUF_CAP = 512
 
 
 @dataclass
@@ -153,12 +162,22 @@ class StreamRewriter:
             out.append(self._buffer)
             self._buffer = ""
             break
-        # Malformed tags (inner id not matching strict 10-hex memory-id
-        # format, or `[External: ...]` literals) pass through the streaming
-        # pass untouched. The flush pass (`_strip_leftovers`) is the sole
-        # cleaner for these shapes so the `leftover_stripped_count`
-        # observability counter reflects reality.
-        return "".join(out)
+        # Scrub bogus `[src:tool_name_response]` / `[External:...]` literals
+        # from the safe-to-emit portion before returning. `_find_open_tag`
+        # already held back any partial opener, so a full bracket here is
+        # guaranteed complete and safe to strip. Doing this per-drain (not
+        # only at flush) prevents the client from seeing the literal in a
+        # `response_delta` event.
+        joined = "".join(out)
+        # Gate the regex by a literal '[' check — chunks without any
+        # bracket cannot possibly match and would otherwise pay for a full
+        # regex pass per SSE event (Fix #13).
+        if joined and "[" in joined:
+            cleaned, n = _LEFTOVER_TAG_RE.subn("", joined)
+            if n:
+                self._leftover_stripped += n
+            return cleaned
+        return joined
 
     def _find_next_src_bracket(self) -> re.Match[str] | None:
         """Return the next `[...]` in the buffer whose content carries a src tag."""
@@ -275,3 +294,70 @@ def _is_src_prefix(s: str) -> bool:
         if s == target[:n]:
             return True
     return False
+
+
+class LiteralSrcStripper:
+    """Lightweight stream filter that strips leftover `[src:...]` literals.
+
+    Used when the citation registry is OFF: the LLM can still hallucinate
+    tool-name citation markers like `[src:get_topic_overview_response]`
+    despite prompt guardrails. This stripper runs unconditionally so those
+    literals never reach the UI.
+
+    Chunk-safe: if a chunk ends with a truncated `[src:` opener, the opener
+    is buffered until the closing `]` arrives (or until `flush()`, which
+    drops any dangling opener).
+
+    Mirrors the `StreamRewriter` public surface (`feed` / `flush`) so the
+    SSE emitter in `api/ask.py` can drive either with the same idiom.
+    """
+
+    def __init__(self) -> None:
+        self._buf: str = ""
+
+    def feed(self, chunk: str) -> str:
+        """Accept a chunk; return whatever is safe to emit now.
+
+        Chunks from Gemini can land token-by-token (``[``, then ``src:``,
+        then ``tool_name_response]``). To avoid leaking a half-arrived
+        ``[src:...]`` span, buffer from the LAST unclosed ``[`` until its
+        matching ``]`` arrives. Matching the final `[` (not any earlier
+        one) is enough because a complete earlier pair already lives in
+        the emittable portion and will be stripped by the leftover regex
+        below. Non-src brackets like ``[1]`` still round-trip verbatim
+        because the regex only rewrites ``[src:...]`` / ``[External:...]``.
+        """
+        if not chunk:
+            return ""
+        self._buf += chunk
+        # Buffer cap: a pathological stream (long text starting with `[`
+        # that never closes) would otherwise keep the entire tail buffered
+        # forever. Above the cap, emit what we have after one strip pass
+        # and reset (Fix #12).
+        if len(self._buf) > _LITERAL_STRIPPER_BUF_CAP:
+            emittable = self._buf
+            self._buf = ""
+            if "[" in emittable:
+                return _LEFTOVER_TAG_RE.sub("", emittable)
+            return emittable
+        last_open = self._buf.rfind("[")
+        last_close = self._buf.rfind("]")
+        if last_open > last_close:
+            emit_end = last_open
+            emittable = self._buf[:emit_end]
+            self._buf = self._buf[emit_end:]
+        else:
+            emittable = self._buf
+            self._buf = ""
+        # Fix #13: skip the regex when the chunk contains no `[`.
+        if "[" in emittable:
+            return _LEFTOVER_TAG_RE.sub("", emittable)
+        return emittable
+
+    def flush(self) -> str:
+        """Emit residue. Drop any dangling truncated opener defensively."""
+        residue = self._buf
+        self._buf = ""
+        cleaned = _LEFTOVER_TAG_RE.sub("", residue)
+        cleaned = _TRUNCATED_SRC_OPENER_RE.sub("", cleaned)
+        return cleaned

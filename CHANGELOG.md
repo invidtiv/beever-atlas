@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- MCP server at `/mcp` with auth middleware, 16 curated tools, 5 resources,
+  3 prompts, and principal-keyed rate limits (gated by `BEEVER_MCP_ENABLED=true`).
+  See `docs/mcp-server.md`.
+- Comprehensive MCP documentation: server architecture, tool catalog, error codes,
+  rate limits, long-running job pattern, and client setup guides for Claude Code
+  and Cursor.
+- MCP client configuration examples for Claude Code (`.mcp.json`) and Cursor
+  (mcp-remote proxy).
+
+### Changed
+- Internal capability layer extracted to `src/beever_atlas/capabilities/` —
+  ADK tools and MCP tools now share a single implementation.
+- README Quick Start section now includes MCP server overview with link to full docs.
+
+### Fixed (Security)
+- The legacy unauthenticated `/mcp` mount is removed (previously gated off by
+  a Phase 0 hotfix). The `/mcp` mount is the sole MCP surface; it requires
+  bearer authentication via `BEEVER_MCP_API_KEYS` and enforces per-tool
+  channel-access checks.
+
+### Deprecated
+- The legacy `search_channel_knowledge` MCP tool is removed. Callers now
+  receive a structured `tool_renamed` error pointing at `ask_channel` and
+  `search_channel_facts`.
+
+### Removed
+- Legacy unauthenticated `/mcp` mount (`BEEVER_MCP_ENABLED` flag). The secure
+  `/mcp` surface (`BEEVER_MCP_ENABLED`) is the single MCP endpoint. Callers
+  of the old `search_channel_knowledge` tool still receive a structured
+  `tool_renamed` error directing them to `ask_channel` / `search_channel_facts`.
+
 ## [0.1.1] - 2026-04-14
 
 First public open-source release. v0.1.0 was tagged before this work

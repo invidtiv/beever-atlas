@@ -58,14 +58,22 @@ _LEGACY_SHARED_OWNER = "legacy:shared"
 
 
 def _principal_kind(principal: Principal | str) -> str:
-    """Return the principal kind ('user' / 'bridge' / 'unknown').
+    """Return the principal kind ('user' / 'bridge' / 'mcp').
 
     Accepts bare strings (test conftests that pre-date the Principal type)
-    and treats them as ``'user'`` to preserve backward compatibility.
+    and falls back to inspecting the id prefix so MCP principals created
+    directly as strings by middleware still route correctly. Unknown
+    shapes default to ``'user'`` for backward compatibility.
     """
     kind = getattr(principal, "kind", None)
-    if kind in ("user", "bridge"):
+    if kind in ("user", "bridge", "mcp"):
         return kind  # type: ignore[return-value]
+    # String-principal fallback: detect MCP by id prefix.
+    pid = str(principal)
+    if pid.startswith("mcp:"):
+        return "mcp"
+    if pid.startswith("bridge"):
+        return "bridge"
     return "user"
 
 
@@ -97,11 +105,13 @@ async def assert_channel_access(
         # No connection explicitly claims this channel. `selected_channels`
         # is a sync pick-list, not the authoritative access list — a
         # single-tenant operator legitimately browses channels before
-        # syncing them. Allow user principals through in single-tenant
-        # mode; in multi-tenant mode the operator must have explicitly
-        # claimed the channel via `selected_channels` on an owned
-        # connection first.
-        if single_tenant and kind == "user":
+        # syncing them. Allow user AND mcp principals through in
+        # single-tenant mode (the MCP api-key represents the same
+        # single tenant); in multi-tenant mode the operator must have
+        # explicitly claimed the channel via `selected_channels` on an
+        # owned connection first. Bridge principals stay strict — they
+        # can be cross-tenant.
+        if single_tenant and kind in ("user", "mcp"):
             return
         logger.info(
             "channel_access deny: channel=%s principal=%s kind=%s reason=no_matching_connection",
@@ -120,9 +130,13 @@ async def assert_channel_access(
         if owner and owner == pid:
             return
 
-    # Single-tenant fallback: user principals are admitted when every
-    # matching row is un-owned or sentinel-owned.
-    if single_tenant and kind == "user":
+    # Single-tenant fallback: user AND mcp principals are admitted when
+    # every matching row is un-owned or sentinel-owned. Bridge principals
+    # stay strict (see the `kind == "bridge"` cross-tenant rationale in
+    # assert_connection_owned). The MCP inclusion keeps this consistent
+    # with list_connections and with assert_connection_owned so a caller
+    # that can list a connection can also read the channels on it.
+    if single_tenant and kind in ("user", "mcp"):
         all_legacy = all(
             (getattr(c, "owner_principal_id", None) in (None, _LEGACY_SHARED_OWNER))
             for c in matching
@@ -140,3 +154,83 @@ async def assert_channel_access(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Channel access denied",
     )
+
+
+async def assert_connection_owned(
+    principal: Principal | str, connection_id: str
+) -> None:
+    """Raise ``ConnectionAccessDenied`` if ``principal`` doesn't own ``connection_id``.
+
+    Mirrors :func:`assert_channel_access` semantics for connection-scoped
+    operations (e.g. listing the channels of a single connection):
+
+    Allow when:
+
+    1. The connection's ``owner_principal_id`` equals ``principal.id``.
+    2. Single-tenant mode (``BEEVER_SINGLE_TENANT=true``), the principal is
+       a ``user`` or ``mcp`` kind, AND the connection is un-owned
+       (``owner_principal_id in {None, "legacy:shared"}``) — the legacy
+       fallback for pre-migration rows and env-provisioned connections.
+       MCP keys inherit because in single-tenant deployments the api-key
+       represents the same caller as the dashboard user; without this,
+       ``list_connections`` (which already admits the fallback) and
+       ``list_channels`` (which calls this function) would disagree and
+       leave MCP clients with empty channel lists.
+
+    Bridge principals never inherit the single-tenant fallback — they can
+    be cross-tenant by design and must always carry an explicit owner.
+
+    Raises:
+        ConnectionAccessDenied: when the connection does not exist OR the
+            principal is not permitted to access it. The two cases are not
+            distinguished in the raised exception so callers cannot probe
+            for connection existence without ownership.
+    """
+    # Import here to avoid a circular import: `capabilities.errors` is a
+    # small leaf module but keeping this local makes the dependency
+    # direction obvious (infra → capabilities.errors, not the reverse).
+    from beever_atlas.capabilities.errors import ConnectionAccessDenied
+
+    stores = get_stores()
+    conn = await stores.platform.get_connection(connection_id)
+
+    pid = _principal_id(principal)
+    kind = _principal_kind(principal)
+    settings = get_settings()
+    single_tenant = bool(getattr(settings, "beever_single_tenant", True))
+
+    if conn is None:
+        logger.info(
+            "connection_access deny: connection=%s principal=%s kind=%s reason=not_found",
+            connection_id,
+            pid,
+            kind,
+        )
+        raise ConnectionAccessDenied(connection_id)
+
+    owner = getattr(conn, "owner_principal_id", None)
+
+    # Explicit ownership match wins for any principal kind.
+    if owner and owner == pid:
+        return
+
+    # Single-tenant fallback: user AND mcp principals are admitted on
+    # un-owned / sentinel-owned rows. Bridge principals don't inherit
+    # this — they can be cross-tenant by design and must have an
+    # explicit match. The MCP inclusion keeps `list_channels` consistent
+    # with `list_connections` (capabilities/connections.py) so the same
+    # principal sees the same connection set on both endpoints.
+    if (
+        single_tenant
+        and kind in ("user", "mcp")
+        and owner in (None, _LEGACY_SHARED_OWNER)
+    ):
+        return
+
+    logger.info(
+        "connection_access deny: connection=%s principal=%s kind=%s reason=owner_mismatch",
+        connection_id,
+        pid,
+        kind,
+    )
+    raise ConnectionAccessDenied(connection_id)

@@ -196,9 +196,18 @@ When the question…
 - names a person or asks 'who': add `search_relationships`.
 - asks how a decision evolved: add `trace_decision_history`.
 - asks 'who knows about X': add `find_experts`.
-- asks about images, diagrams, or attachments: add `search_media_references`.
+- asks about images, diagrams, or media STORED IN THE CHANNEL: add `search_media_references`.
 - asks about recent activity: add `get_recent_activity`.
-If none of those fit, Tier 0 + Tier 2 is usually enough."""
+If none of those fit, Tier 0 + Tier 2 is usually enough.
+
+## User-attached files
+When the user message contains a `## User-attached file:` section, the user
+uploaded that file in THIS turn. References to "this image", "this file",
+"this document", "the attached …", or "what is this" refer to that
+attachment's content — NOT to channel media. Answer directly from the
+extracted text in that section. Do NOT call `search_media_references` for
+user-attached content unless the user explicitly asks to find channel
+media matching it (e.g. "is there a similar image in the channel?")."""
 
 ANTI_META_COMMENTARY = """\
 Never describe your reasoning, plan, or next steps in the final answer. \
@@ -231,6 +240,99 @@ DEEP_MODE_INSTRUCTIONS = """\
 - Quote or paraphrase specific facts with citations; don't generalize.
 - Exhaust relevant tools before concluding — use the full tool-call budget when justified.
 - End with a "Summary" paragraph."""
+
+EMPTY_RETRIEVAL_RECOVERY = """\
+## Empty-retrieval recovery (deep mode)
+
+When the channel appears un-synced, stop searching and offer to help the
+user sync or build a wiki. DO NOT call `trigger_sync_tool` or
+`refresh_wiki_tool` just because retrieval came back empty — only call
+them on explicit user consent.
+
+**Stop condition:** If after 2–3 retrieval calls (`get_wiki_page`,
+`get_topic_overview`, `search_channel_facts`, `search_qa_history`,
+`get_recent_activity`) the channel has returned NO memories, NO wiki
+pages, and NO recent activity, stop calling retrieval tools. Additional
+retrieval will not produce new facts.
+
+**Acknowledge the un-synced state plainly.** Example prose: "This
+channel hasn't been synced yet — there are no indexed memories, facts,
+or wiki pages I can draw from." Do not pretend you searched thoroughly
+when the channel is simply un-synced.
+
+**Offer the recovery path in prose:**
+- If the channel has never been synced: "Would you like me to sync this
+  channel now? I can queue a background job — just say 'sync this
+  channel' (or 'yes, sync')."
+- If the channel has been synced recently but has no wiki: offer a wiki
+  refresh instead ("Would you like me to build a wiki for this
+  channel?").
+
+**Guardrail — no auto-trigger.** Do NOT call `trigger_sync_tool` or
+`refresh_wiki_tool` automatically on an empty retrieval. Only call them
+when the user has explicitly asked to sync / refresh / re-ingest /
+rebuild — e.g. "sync it", "yes please sync", "refresh the wiki",
+"re-ingest", "rebuild the wiki" — or when consent is clear from
+conversational context (the user's previous turn asked to sync and this
+turn confirms it)."""
+
+
+EMPTY_RETRIEVAL_FOLLOW_UP_CHIPS = """\
+## Empty-retrieval follow-up chips
+
+**Follow-up chips must include an action.** When you call
+`suggest_follow_ups` for an un-synced / empty-retrieval answer, include
+at least ONE action-oriented chip phrased as a plain-English user
+command. Good examples:
+- "Sync this channel now"
+- "Build a wiki for this channel"
+- "Check what platforms I have connected"
+
+It is fine to also include one content-oriented chip ("Try searching
+for specific keywords") — just don't let generic content chips dominate
+the list when the channel is clearly un-synced."""
+
+
+ORCHESTRATION_TOOLS_GUIDANCE = """\
+## Orchestration tools (deep mode only)
+
+You have access to five orchestration tools. Use them sparingly and only when
+the conditions below are met.
+
+### list_connections_tool
+Call when the user explicitly asks which platforms or connections they have
+(e.g. "what connections do I have?", "which Slack workspaces are linked?").
+This is read-only and safe to call at any time. Do NOT call it proactively
+when you already have a channel_id.
+
+### list_channels_tool(connection_id)
+Call when the user asks to see their channels for a specific connection, or
+when you need a channel_id before calling another tool. Read-only. Do NOT
+call if you already know the channel_id.
+
+### trigger_sync_tool(channel_id, sync_type="incremental")
+Call ONLY in these two situations:
+1. The user EXPLICITLY requests a sync or data refresh (e.g. "please sync
+   #general", "refresh the data", "re-ingest messages").
+2. Retrieval tools returned empty or clearly stale results AND the channel's
+   last_sync_ts was more than 24 hours ago.
+
+**Do NOT call for every question.** Most questions are answered adequately
+from existing indexed facts. Triggering a sync is a background operation and
+does not return data — it only enqueues a job. After calling, tell the user
+the job_id and that results will be available after the sync completes.
+
+### refresh_wiki_tool(channel_id, page_types=None)
+Call ONLY after a sync has completed and added new facts, OR when the user
+explicitly requests a wiki regeneration. Wiki pages are cached and usually
+fresh — always try get_wiki_page first. Do NOT call this speculatively or
+before confirming new data exists from a recent sync.
+
+### get_job_status_tool(job_id)
+Call when the user references a specific job_id from an earlier session or
+from the current conversation (e.g. "is that sync done?", "what happened to
+job abc123?"). Do NOT poll repeatedly — mention the status_uri and let the
+user or client poll via REST if they want continuous updates."""
 
 
 def build_qa_system_prompt(
@@ -289,12 +391,21 @@ def build_qa_system_prompt(
             MAX_TOOL_CALLS_INSTRUCTION.format(max_tool_calls=max_tool_calls),
         ]
         if mode == "deep":
-            parts.extend(["", DEEP_MODE_INSTRUCTIONS])
+            parts.extend([
+                "",
+                DEEP_MODE_INSTRUCTIONS,
+                "",
+                ORCHESTRATION_TOOLS_GUIDANCE,
+                "",
+                EMPTY_RETRIEVAL_RECOVERY,
+            ])
         else:
             parts.extend(["", ONBOARDING_LENGTH_HINT])
         if include_follow_ups:
             follow_up_block = FOLLOW_UPS_TOOL_INSTRUCTION if registry_on else FOLLOW_UP_INSTRUCTION
             parts.extend(["", follow_up_block])
+            if mode == "deep":
+                parts.extend(["", EMPTY_RETRIEVAL_FOLLOW_UP_CHIPS])
         return "\n".join(parts)
 
     # Legacy path — flag off: byte-identical to pre-redesign output
@@ -316,12 +427,21 @@ def build_qa_system_prompt(
         LANGUAGE_DIRECTIVE,
     ]
     if mode == "deep":
-        parts.extend(["", DEEP_MODE_INSTRUCTIONS])
+        parts.extend([
+            "",
+            DEEP_MODE_INSTRUCTIONS,
+            "",
+            ORCHESTRATION_TOOLS_GUIDANCE,
+            "",
+            EMPTY_RETRIEVAL_RECOVERY,
+        ])
     else:
         parts.extend(["", ONBOARDING_LENGTH_HINT])
     if include_follow_ups:
         follow_up_block = FOLLOW_UPS_TOOL_INSTRUCTION if registry_on else FOLLOW_UP_INSTRUCTION
         parts.extend(["", follow_up_block])
+        if mode == "deep":
+            parts.extend(["", EMPTY_RETRIEVAL_FOLLOW_UP_CHIPS])
     return "\n".join(parts)
 
 

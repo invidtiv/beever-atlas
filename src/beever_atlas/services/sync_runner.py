@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from beever_atlas.adapters import get_adapter
 from beever_atlas.adapters.bridge import ChatBridgeAdapter
@@ -68,12 +68,24 @@ class SyncRunner:
         sync_type: str = "auto",
         use_batch_api: bool = False,
         connection_id: str | None = None,
+        owner_principal_id: str | None = None,
+        progress_callback: Callable[[float, str], Awaitable[None]] | None = None,
     ) -> str:
         """Kick off a sync for *channel_id* and return the new job_id.
 
         Args:
             channel_id: Platform channel identifier.
             sync_type: ``"auto"`` (default), ``"full"``, or ``"incremental"``.
+            owner_principal_id: Principal id stamped on the created
+                ``sync_jobs`` row; required for MCP ownership checks in
+                ``capabilities.jobs.get_job_status``.
+            progress_callback: Optional async callable ``(fraction: float,
+                message: str) -> None`` invoked at key milestones during the
+                sync. Intended for MCP ``ctx.report_progress`` wiring (Phase
+                6+). The callback slot is added here so callers can attach it
+                without a further API change; the ``_run_sync`` inner loop does
+                not yet forward calls to this callback — see Phase 5.5 gap
+                note in the commit message.
 
         Returns:
             The MongoDB SyncJob ID for the created job.
@@ -81,6 +93,8 @@ class SyncRunner:
         Raises:
             ValueError: If a sync is already running for this channel.
         """
+        # Store callback for future use by _run_sync (Phase 6+ wiring).
+        self._progress_callback = progress_callback
         stores = get_stores()
         settings = get_settings()
         if sync_type not in {"auto", "full", "incremental"}:
@@ -167,6 +181,7 @@ class SyncRunner:
                     since=since,
                     use_batch_api=use_batch_api,
                     resolved_type=resolved_type,
+                    owner_principal_id=owner_principal_id,
                 )
 
         adapter = ChatBridgeAdapter(connection_id=resolved_connection_id) if resolved_connection_id else get_adapter()
@@ -216,6 +231,8 @@ class SyncRunner:
             total_messages=len(messages),
             parent_messages=parent_count,
             batch_size=settings.sync_batch_size,
+            owner_principal_id=owner_principal_id,
+            kind="sync",
         )
         job_id: str = job.id
 
@@ -463,6 +480,7 @@ class SyncRunner:
         since: datetime | str | None,
         use_batch_api: bool,
         resolved_type: str,
+        owner_principal_id: str | None = None,
     ) -> str:
         """Start a sync for a file-imported channel.
 
@@ -529,6 +547,8 @@ class SyncRunner:
             total_messages=len(messages),
             parent_messages=parent_count,
             batch_size=settings.sync_batch_size,
+            owner_principal_id=owner_principal_id,
+            kind="sync",
         )
 
         task = asyncio.create_task(
