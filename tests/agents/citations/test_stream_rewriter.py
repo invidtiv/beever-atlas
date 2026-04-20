@@ -99,12 +99,35 @@ def test_unknown_tag_stripped():
     assert rw.unknown_tag_count == 1
 
 
-def test_malformed_tag_passes_through():
+def test_malformed_tag_stripped_at_stream_time():
+    """Malformed `[src:tool_name_response]`-style literals must be scrubbed
+    from `response_delta` output, not just at flush. Without this, the
+    client sees the raw literal render in the UI before the stream ends."""
     r, _ = _registry_with("A")
     rw = StreamRewriter(r)
-    # Invalid hex — regex doesn't match; text flows through literally.
+    # Invalid hex — doesn't match the strict [src:src_<10hex>] pattern,
+    # so it's treated as a leftover literal and stripped during streaming.
     out = _collect(rw, ["x [src:notvalid] y"])
-    assert out == "x [src:notvalid] y"
+    assert out == "x  y"
+    assert "[src:" not in out
+
+
+def test_bogus_tool_name_literal_stripped_midstream():
+    """Regression for the UX-visible `[src:get_wiki_page_response]` leak:
+    the stripper runs on every drain output, not only at flush, so the
+    literal never reaches `response_delta` events."""
+    r, _ = _registry_with("A")
+    rw = StreamRewriter(r)
+    # Feed a single chunk that already contains the full bogus literal —
+    # this is the path that previously leaked because `_find_open_tag`
+    # saw the closing `]` and didn't hold the buffer back.
+    emitted = rw.feed(
+        "There is no wiki content [src:get_wiki_page_response]. Sync it?"
+    )
+    assert "[src:" not in emitted
+    assert emitted == "There is no wiki content . Sync it?"
+    # Flush is a no-op now because the literal was already removed.
+    assert rw.flush() == ""
 
 
 def test_non_tag_brackets_pass_through():
@@ -292,11 +315,15 @@ def test_flush_strips_leftover_src_tag():
     assert rw.leftover_stripped_count == 1
 
 
-def test_flush_strips_leftover_external_tag():
-    """_strip_leftovers removes [External: some_url] at flush time."""
+def test_flush_strips_leftover_external_citation_literal():
+    """_strip_leftovers removes only citation-literal [External: src_<10hex> ...] shapes.
+
+    Fix #7: URL-style or user-text ``[External: ...]`` content is preserved.
+    Only the citation-registry's ``src_<10hex>`` id form is still stripped.
+    """
     r, _ = _registry_with("A")
     rw = StreamRewriter(r)
-    rw._buffer = "see [External: https://example.com] for more"  # noqa: SLF001
+    rw._buffer = "see [External: src_ab12cd34ef inline] for more"  # noqa: SLF001
     out = rw.flush()
     assert "[External:" not in out
     assert "see" in out
@@ -304,11 +331,21 @@ def test_flush_strips_leftover_external_tag():
     assert rw.leftover_stripped_count == 1
 
 
-def test_flush_strips_both_leftover_shapes():
-    """_strip_leftovers handles both [src:...] and [External: ...] in one pass."""
+def test_flush_preserves_external_url_in_user_content():
+    """Fix #7 regression: plain ``[External: https://...]`` URLs survive flush."""
     r, _ = _registry_with("A")
     rw = StreamRewriter(r)
-    rw._buffer = "a [src:bad-hex] b [External: https://x.com/page] c"  # noqa: SLF001
+    rw._buffer = "see [External: https://example.com] for more"  # noqa: SLF001
+    out = rw.flush()
+    assert "[External: https://example.com]" in out
+    assert rw.leftover_stripped_count == 0
+
+
+def test_flush_strips_both_leftover_citation_shapes():
+    """_strip_leftovers handles both ``[src:...]`` and ``[External: src_<hex> ...]``."""
+    r, _ = _registry_with("A")
+    rw = StreamRewriter(r)
+    rw._buffer = "a [src:bad-hex] b [External: src_ffee112233 inline] c"  # noqa: SLF001
     out = rw.flush()
     assert "[src:" not in out
     assert "[External:" not in out

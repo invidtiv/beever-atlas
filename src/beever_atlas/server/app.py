@@ -41,7 +41,7 @@ from beever_atlas.api.policies import router as policies_router
 from beever_atlas.api.models import router as models_router
 from beever_atlas.api.dev import router as dev_router
 from beever_atlas.api.media import router as media_router
-from beever_atlas.api.mcp import mcp as mcp_server
+from beever_atlas.api.admin import router as admin_router
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
 from beever_atlas.llm.provider import init_llm_provider
@@ -122,6 +122,31 @@ async def _migrate_env_connection(stores: StoreClients, settings) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Build the MCP ASGI app at module-load time (only if enabled). We must
+# construct it BEFORE the FastAPI ``lifespan`` below so the lifespan can
+# chain ``_mcp_asgi.lifespan`` — FastMCP's StreamableHTTPSessionManager is
+# started inside that chained lifespan, so skipping the chain means every
+# request 500s with "Task group is not initialized".
+# ---------------------------------------------------------------------------
+_boot_settings = get_settings()
+_mcp_asgi = None
+if _boot_settings.beever_mcp_enabled:
+    from starlette.middleware import Middleware
+
+    from beever_atlas.api.mcp_server import build_mcp
+    from beever_atlas.infra.mcp_auth import MCPAuthMiddleware
+
+    _mcp_instance = build_mcp()
+    _mcp_asgi = _mcp_instance.http_app(
+        path="/",
+        middleware=[Middleware(MCPAuthMiddleware)],
+        stateless_http=True,
+        json_response=True,
+        transport="streamable-http",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage store connections and background tasks."""
@@ -149,7 +174,14 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning("MCP registry init failed (non-fatal): %s", exc)
 
     try:
-        yield
+        # Chain FastMCP's lifespan so its StreamableHTTPSessionManager task
+        # group starts before any request hits the mount. Without this chain,
+        # every /mcp request returns 500 with "Task group is not initialized".
+        if _mcp_asgi is not None:
+            async with _mcp_asgi.lifespan(app):
+                yield
+        else:
+            yield
     finally:
         try:
             await scheduler.shutdown()
@@ -212,23 +244,23 @@ app.include_router(models_router, dependencies=_auth)
 # Dev router: only mounted in development; its own endpoints require admin token.
 if _settings.beever_env == "development":
     app.include_router(dev_router)
+# Admin router: always mounted in every env, admin-token gated. Hosts the
+# MCP operator view among other ops endpoints.
+app.include_router(admin_router)
 app.include_router(wiki_router, dependencies=_auth)
 app.include_router(config_router, dependencies=_auth)
 app.include_router(media_router, dependencies=_auth)
 
-# WARNING: the /mcp mount is currently UNAUTHENTICATED. Full auth middleware
-# is tracked in openspec change 'atlas-mcp-server'.
-if _settings.beever_mcp_enabled:
-    app.mount("/mcp", mcp_server.http_app(path="/"))
-    logging.getLogger(__name__).warning(
-        "MCP endpoint mounted WITHOUT authentication (BEEVER_MCP_ENABLED=true). "
-        "This is intended for local dev only. Do not enable in production."
-    )
-else:
+# Secure MCP mount (openspec change atlas-mcp-server). The ASGI app was
+# built at module-load time above so its lifespan could be chained into
+# the FastAPI lifespan; here we just attach it to the route tree.
+# Auth is enforced by MCPAuthMiddleware at the ASGI layer BEFORE any
+# protocol message reaches FastMCP; the caller's mcp:<hash> principal is
+# attached to ASGI scope.state for tool handlers to consume.
+if _mcp_asgi is not None:
+    app.mount("/mcp", _mcp_asgi)
     logging.getLogger(__name__).info(
-        "MCP endpoint disabled (BEEVER_MCP_ENABLED=false). "
-        "Set BEEVER_MCP_ENABLED=true to enable — unauthenticated for now, "
-        "do not use in production."
+        "MCP endpoint mounted at /mcp with auth middleware"
     )
 
 register_health_checks()
