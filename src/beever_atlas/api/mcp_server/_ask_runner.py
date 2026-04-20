@@ -137,7 +137,9 @@ async def run_ask_channel(
 
     agent = get_agent_for_mode(mode)
     runner = create_runner(agent)
-    session = await create_session(user_id=principal_id)
+    session = await create_session(
+        user_id=principal_id, session_id=effective_session_id
+    )
 
     new_message = genai_types.Content(
         role="user",

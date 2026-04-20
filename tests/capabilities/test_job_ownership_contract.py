@@ -115,21 +115,30 @@ async def test_mcp_principal_cannot_read_dashboard_job(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Contract: legacy:shared rows are invisible to MCP principals but visible
-# to user principals (legacy single-tenant fallback).
+# Contract: in multi-tenant mode legacy:shared rows stay invisible to MCP
+# principals. Single-tenant admission is covered in test_jobs_mcp_access.py.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_mcp_principal_cannot_read_legacy_shared_job(monkeypatch):
+async def test_mcp_principal_cannot_read_legacy_shared_job_multi_tenant(monkeypatch):
     job_id = "job-dddddddd"
     _patch_stores(
         monkeypatch,
         [_make_record(job_id=job_id, owner="legacy:shared", status="done")],
     )
     mcp_principal = "mcp:agent_principal_bb"
-    with pytest.raises(JobNotFound):
-        await jobs_mod.get_job_status(mcp_principal, job_id)
+
+    # Force multi-tenant so the single-tenant fallback does not apply.
+    from beever_atlas.infra.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("BEEVER_SINGLE_TENANT", "false")
+    try:
+        with pytest.raises(JobNotFound):
+            await jobs_mod.get_job_status(mcp_principal, job_id)
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

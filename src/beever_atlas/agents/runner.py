@@ -32,20 +32,36 @@ def create_runner(agent: BaseAgent) -> Runner:
     )
 
 
-async def create_session(user_id: str = "anonymous", state: dict | None = None) -> Session:
-    """Create a new session for a request.
+async def create_session(
+    user_id: str = "anonymous",
+    state: dict | None = None,
+    session_id: str | None = None,
+) -> Session:
+    """Create or retrieve a session.
 
     Args:
         user_id: User identifier from auth middleware.
         state: Optional initial session state (used by ingestion pipeline).
+        session_id: If provided, attempt to retrieve an existing session
+            first; only create a new one if it does not exist. ADK's
+            InMemorySessionService raises AlreadyExistsError on duplicate
+            session_id, so get-or-create is the only correct pattern here.
 
     Returns:
-        An ADK Session with a unique ID.
+        An ADK Session.
     """
+    if session_id is not None:
+        existing = await _session_service.get_session(
+            app_name=APP_NAME, user_id=user_id, session_id=session_id
+        )
+        if existing is not None:
+            return existing
+
+    actual_id = session_id if session_id is not None else str(uuid.uuid4())
     session = await _session_service.create_session(
         app_name=APP_NAME,
         user_id=user_id,
-        session_id=str(uuid.uuid4()),
+        session_id=actual_id,
         state=state or {},
     )
     return session

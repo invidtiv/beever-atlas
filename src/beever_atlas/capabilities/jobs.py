@@ -51,11 +51,24 @@ async def get_job_status(principal_id: str, job_id: str) -> dict:
     if owner == principal_id:
         return _build_status(doc)
 
-    # Legacy / unowned rows: allow non-MCP principals only.
-    if owner in (None, _LEGACY_SHARED_OWNER) and not principal_id.startswith("mcp:"):
-        return _build_status(doc)
+    # Legacy / unowned rows: mirror the single-tenant fallback in
+    # channel_access._assert_channel_access and assert_connection_owned so
+    # MCP principals see the same job history as their dashboard counterpart
+    # under single-tenant mode. Multi-tenant keeps the original non-MCP-only
+    # fallback (operators must migrate legacy rows before flipping).
+    if owner in (None, _LEGACY_SHARED_OWNER):
+        from beever_atlas.infra.channel_access import _principal_kind
+        from beever_atlas.infra.config import get_settings
 
-    # Principal is MCP and the job is owned by someone else (or legacy).
+        settings = get_settings()
+        single_tenant = bool(getattr(settings, "beever_single_tenant", True))
+        kind = _principal_kind(principal_id)
+        if single_tenant and kind in ("user", "mcp"):
+            return _build_status(doc)
+        if kind != "mcp":
+            return _build_status(doc)
+
+    # Principal is not the owner and no fallback applies.
     raise JobNotFound(job_id)
 
 
