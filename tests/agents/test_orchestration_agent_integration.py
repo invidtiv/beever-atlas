@@ -12,8 +12,6 @@ Tasks 6.5 and 6.6 of openspec change ``atlas-mcp-server``.
 
 from __future__ import annotations
 
-import pytest
-
 from beever_atlas.agents.query.qa_agent import _filter_tools_for_untrusted
 from beever_atlas.agents.tools import QA_TOOLS
 from beever_atlas.agents.tools.orchestration_tools import (
