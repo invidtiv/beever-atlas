@@ -49,6 +49,9 @@ def register_graph_tools(mcp: FastMCP) -> None:
         if err:
             return err
 
+        # Fix #8: clamp limit to documented 1–20 bound.
+        limit = max(1, min(limit, 20))
+
         try:
             from beever_atlas.capabilities import graph as graph_cap
             from beever_atlas.capabilities.errors import ChannelAccessDenied
@@ -99,6 +102,9 @@ def register_graph_tools(mcp: FastMCP) -> None:
         err = _validate_id(channel_id, "channel_id")
         if err:
             return err
+
+        # Fix #8: clamp hops to documented 1–4 bound.
+        hops = max(1, min(hops, 4))
 
         try:
             from beever_atlas.capabilities import graph as graph_cap

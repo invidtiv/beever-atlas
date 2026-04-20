@@ -30,6 +30,7 @@ Read-only tools (``list_connections_tool``, ``list_channels_tool``,
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from contextvars import ContextVar, Token
 
@@ -69,8 +70,37 @@ def bind_principal(principal_id: str) -> Token:
 
 
 def reset_principal(token: Token) -> None:
-    """Reset the contextvar to its previous value."""
-    _current_principal_id.reset(token)
+    """Reset the contextvar to its previous value.
+
+    Swallows ``ValueError`` / ``LookupError`` / ``RuntimeError`` so a
+    cross-task reset or a double-reset (defensive error-path reset that
+    races with the normal turn-end reset) does not crash the request
+    handler (Fix #6). CPython raises ``RuntimeError`` on token-already-used
+    and ``ValueError`` on cross-task reset; we cover both so the request
+    handler never crashes on a misbehaving reset path. Logs a warning so
+    the mis-use is still visible.
+    """
+    try:
+        _current_principal_id.reset(token)
+    except (ValueError, LookupError, RuntimeError):
+        logger.warning(
+            "reset_principal: token invalid (cross-task or double-reset)"
+        )
+
+
+@contextlib.contextmanager
+def bound_principal(principal_id: str):
+    """Bind ``principal_id`` to the contextvar for the duration of the block.
+
+    ``with bound_principal("user:alice"):`` binds on entry and resets on
+    exit — even if the block raises. Prefer this to the raw
+    ``bind_principal`` / ``reset_principal`` pair for new call sites.
+    """
+    token = bind_principal(principal_id)
+    try:
+        yield token
+    finally:
+        reset_principal(token)
 
 
 def _get_principal() -> str | None:
@@ -407,6 +437,7 @@ ORCHESTRATION_TOOLS = [
 __all__ = [
     "bind_principal",
     "reset_principal",
+    "bound_principal",
     "list_connections_tool",
     "list_channels_tool",
     "trigger_sync_tool",
