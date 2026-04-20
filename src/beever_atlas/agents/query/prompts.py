@@ -274,7 +274,11 @@ when the user has explicitly asked to sync / refresh / re-ingest /
 rebuild — e.g. "sync it", "yes please sync", "refresh the wiki",
 "re-ingest", "rebuild the wiki" — or when consent is clear from
 conversational context (the user's previous turn asked to sync and this
-turn confirms it).
+turn confirms it)."""
+
+
+EMPTY_RETRIEVAL_FOLLOW_UP_CHIPS = """\
+## Empty-retrieval follow-up chips
 
 **Follow-up chips must include an action.** When you call
 `suggest_follow_ups` for an un-synced / empty-retrieval answer, include
@@ -400,6 +404,8 @@ def build_qa_system_prompt(
         if include_follow_ups:
             follow_up_block = FOLLOW_UPS_TOOL_INSTRUCTION if registry_on else FOLLOW_UP_INSTRUCTION
             parts.extend(["", follow_up_block])
+            if mode == "deep":
+                parts.extend(["", EMPTY_RETRIEVAL_FOLLOW_UP_CHIPS])
         return "\n".join(parts)
 
     # Legacy path — flag off: byte-identical to pre-redesign output
@@ -434,6 +440,8 @@ def build_qa_system_prompt(
     if include_follow_ups:
         follow_up_block = FOLLOW_UPS_TOOL_INSTRUCTION if registry_on else FOLLOW_UP_INSTRUCTION
         parts.extend(["", follow_up_block])
+        if mode == "deep":
+            parts.extend(["", EMPTY_RETRIEVAL_FOLLOW_UP_CHIPS])
     return "\n".join(parts)
 
 
