@@ -102,17 +102,20 @@ def _conn(owner, selected):
 
 
 @pytest.mark.asyncio
-async def test_mcp_principal_denied_on_unowned_channel_in_single_tenant(monkeypatch):
-    """User principals get a browsing fallback in single-tenant mode; MCP
-    principals do NOT. This is the core strictness property we care about."""
+async def test_mcp_principal_permitted_on_unowned_channel_in_single_tenant(monkeypatch):
+    """Updated intent: in single-tenant mode the MCP api-key represents
+    the dashboard owner, so the browsing fallback applies to MCP as it
+    does to user. Without this, retrieval / graph / wiki tools via MCP
+    would 403 on every un-claimed channel — which is exactly what broke
+    ``tech-beever-atlas`` for the first MCP caller. The strictness the
+    previous test asserted has been moved to multi-tenant mode (see
+    ``test_mcp_principal_denied_in_multitenant_unowned`` below)."""
     # No connection lists ch-x in selected_channels → "no matching" path.
     _patch_channel_access(monkeypatch, connections=[], single_tenant=True)
-    from fastapi import HTTPException
 
     mcp_principal = Principal("mcp:abc123def456ab01", kind="mcp")
-    with pytest.raises(HTTPException) as exc:
-        await assert_channel_access(mcp_principal, "ch-x")
-    assert exc.value.status_code == 403
+    # Should NOT raise — MCP + single-tenant = same fallback as user.
+    await assert_channel_access(mcp_principal, "ch-x")
 
 
 @pytest.mark.asyncio
@@ -138,16 +141,17 @@ async def test_mcp_principal_permitted_on_owned_channel(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_mcp_principal_denied_on_legacy_shared_channel(monkeypatch):
-    """MCP principals never inherit the legacy:shared single-tenant fallback."""
+async def test_mcp_principal_permitted_on_legacy_shared_channel_single_tenant(monkeypatch):
+    """Updated intent: MCP now mirrors user in single-tenant mode. The
+    security boundary is multi-tenant (see the ``..._in_multitenant_...``
+    test below). This matches the dashboard behavior the MCP api-key is
+    expected to reproduce for its single owner."""
     conn = _conn(owner="legacy:shared", selected=["ch-a"])
     _patch_channel_access(monkeypatch, connections=[conn], single_tenant=True)
-    from fastapi import HTTPException
 
     mcp_principal = Principal("mcp:abc123def456ab01", kind="mcp")
-    with pytest.raises(HTTPException) as exc:
-        await assert_channel_access(mcp_principal, "ch-a")
-    assert exc.value.status_code == 403
+    # Should NOT raise — MCP + single-tenant = legacy fallback applies.
+    await assert_channel_access(mcp_principal, "ch-a")
 
 
 @pytest.mark.asyncio
