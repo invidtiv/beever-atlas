@@ -315,11 +315,15 @@ def test_flush_strips_leftover_src_tag():
     assert rw.leftover_stripped_count == 1
 
 
-def test_flush_strips_leftover_external_tag():
-    """_strip_leftovers removes [External: some_url] at flush time."""
+def test_flush_strips_leftover_external_citation_literal():
+    """_strip_leftovers removes only citation-literal [External: src_<10hex> ...] shapes.
+
+    Fix #7: URL-style or user-text ``[External: ...]`` content is preserved.
+    Only the citation-registry's ``src_<10hex>`` id form is still stripped.
+    """
     r, _ = _registry_with("A")
     rw = StreamRewriter(r)
-    rw._buffer = "see [External: https://example.com] for more"  # noqa: SLF001
+    rw._buffer = "see [External: src_ab12cd34ef inline] for more"  # noqa: SLF001
     out = rw.flush()
     assert "[External:" not in out
     assert "see" in out
@@ -327,11 +331,21 @@ def test_flush_strips_leftover_external_tag():
     assert rw.leftover_stripped_count == 1
 
 
-def test_flush_strips_both_leftover_shapes():
-    """_strip_leftovers handles both [src:...] and [External: ...] in one pass."""
+def test_flush_preserves_external_url_in_user_content():
+    """Fix #7 regression: plain ``[External: https://...]`` URLs survive flush."""
     r, _ = _registry_with("A")
     rw = StreamRewriter(r)
-    rw._buffer = "a [src:bad-hex] b [External: https://x.com/page] c"  # noqa: SLF001
+    rw._buffer = "see [External: https://example.com] for more"  # noqa: SLF001
+    out = rw.flush()
+    assert "[External: https://example.com]" in out
+    assert rw.leftover_stripped_count == 0
+
+
+def test_flush_strips_both_leftover_citation_shapes():
+    """_strip_leftovers handles both ``[src:...]`` and ``[External: src_<hex> ...]``."""
+    r, _ = _registry_with("A")
+    rw = StreamRewriter(r)
+    rw._buffer = "a [src:bad-hex] b [External: src_ffee112233 inline] c"  # noqa: SLF001
     out = rw.flush()
     assert "[src:" not in out
     assert "[External:" not in out
