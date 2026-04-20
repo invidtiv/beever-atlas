@@ -232,6 +232,54 @@ DEEP_MODE_INSTRUCTIONS = """\
 - Exhaust relevant tools before concluding — use the full tool-call budget when justified.
 - End with a "Summary" paragraph."""
 
+EMPTY_RETRIEVAL_RECOVERY = """\
+## Empty-retrieval recovery (deep mode)
+
+When the channel appears un-synced, stop searching and offer to help the
+user sync or build a wiki. DO NOT call `trigger_sync_tool` or
+`refresh_wiki_tool` just because retrieval came back empty — only call
+them on explicit user consent.
+
+**Stop condition:** If after 2–3 retrieval calls (`get_wiki_page`,
+`get_topic_overview`, `search_channel_facts`, `search_qa_history`,
+`get_recent_activity`) the channel has returned NO memories, NO wiki
+pages, and NO recent activity, stop calling retrieval tools. Additional
+retrieval will not produce new facts.
+
+**Acknowledge the un-synced state plainly.** Example prose: "This
+channel hasn't been synced yet — there are no indexed memories, facts,
+or wiki pages I can draw from." Do not pretend you searched thoroughly
+when the channel is simply un-synced.
+
+**Offer the recovery path in prose:**
+- If the channel has never been synced: "Would you like me to sync this
+  channel now? I can queue a background job — just say 'sync this
+  channel' (or 'yes, sync')."
+- If the channel has been synced recently but has no wiki: offer a wiki
+  refresh instead ("Would you like me to build a wiki for this
+  channel?").
+
+**Guardrail — no auto-trigger.** Do NOT call `trigger_sync_tool` or
+`refresh_wiki_tool` automatically on an empty retrieval. Only call them
+when the user has explicitly asked to sync / refresh / re-ingest /
+rebuild — e.g. "sync it", "yes please sync", "refresh the wiki",
+"re-ingest", "rebuild the wiki" — or when consent is clear from
+conversational context (the user's previous turn asked to sync and this
+turn confirms it).
+
+**Follow-up chips must include an action.** When you call
+`suggest_follow_ups` for an un-synced / empty-retrieval answer, include
+at least ONE action-oriented chip phrased as a plain-English user
+command. Good examples:
+- "Sync this channel now"
+- "Build a wiki for this channel"
+- "Check what platforms I have connected"
+
+It is fine to also include one content-oriented chip ("Try searching
+for specific keywords") — just don't let generic content chips dominate
+the list when the channel is clearly un-synced."""
+
+
 ORCHESTRATION_TOOLS_GUIDANCE = """\
 ## Orchestration tools (deep mode only)
 
@@ -330,7 +378,14 @@ def build_qa_system_prompt(
             MAX_TOOL_CALLS_INSTRUCTION.format(max_tool_calls=max_tool_calls),
         ]
         if mode == "deep":
-            parts.extend(["", DEEP_MODE_INSTRUCTIONS, "", ORCHESTRATION_TOOLS_GUIDANCE])
+            parts.extend([
+                "",
+                DEEP_MODE_INSTRUCTIONS,
+                "",
+                ORCHESTRATION_TOOLS_GUIDANCE,
+                "",
+                EMPTY_RETRIEVAL_RECOVERY,
+            ])
         else:
             parts.extend(["", ONBOARDING_LENGTH_HINT])
         if include_follow_ups:
@@ -357,7 +412,14 @@ def build_qa_system_prompt(
         LANGUAGE_DIRECTIVE,
     ]
     if mode == "deep":
-        parts.extend(["", DEEP_MODE_INSTRUCTIONS, "", ORCHESTRATION_TOOLS_GUIDANCE])
+        parts.extend([
+            "",
+            DEEP_MODE_INSTRUCTIONS,
+            "",
+            ORCHESTRATION_TOOLS_GUIDANCE,
+            "",
+            EMPTY_RETRIEVAL_RECOVERY,
+        ])
     else:
         parts.extend(["", ONBOARDING_LENGTH_HINT])
     if include_follow_ups:
