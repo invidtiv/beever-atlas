@@ -221,6 +221,83 @@ async def test_bare_string_principal_treated_as_user(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# MCP principal fallback (single-tenant = MCP api-key represents the user)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mcp_principal_admitted_on_legacy_channel_single_tenant(monkeypatch):
+    """Without this, every retrieval / graph / wiki tool from MCP hits 403
+    on legacy-owned channels — the exact `channel_access_denied` the user
+    reported on `tech-beever-atlas` after the list-side fix landed.
+    """
+    mcp = Principal("mcp:abc123", kind="mcp")
+    _install_fake_stores(
+        monkeypatch,
+        [_conn(connection_id="c1", selected=["C1"], owner="legacy:shared")],
+    )
+    _force_settings(monkeypatch, beever_single_tenant=True)
+    await channel_access_mod.assert_channel_access(mcp, "C1")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_mcp_principal_admitted_on_unclaimed_channel_single_tenant(monkeypatch):
+    """Browsing grace applies to MCP as well — a channel the user hasn't
+    added to `selected_channels` is still reachable via MCP when the
+    underlying connection is single-tenant-owned."""
+    mcp = Principal("mcp:abc123", kind="mcp")
+    _install_fake_stores(
+        monkeypatch,
+        [_conn(connection_id="c1", selected=["OTHER"], owner="user:some-owner")],
+    )
+    _force_settings(monkeypatch, beever_single_tenant=True)
+    await channel_access_mod.assert_channel_access(mcp, "C1")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_mcp_principal_rejected_on_legacy_channel_multi_tenant(monkeypatch):
+    """Multi-tenant mode is the real security boundary. MCP keys must
+    explicitly own each connection they read from — no legacy fallback."""
+    from fastapi import HTTPException
+
+    mcp = Principal("mcp:abc123", kind="mcp")
+    _install_fake_stores(
+        monkeypatch,
+        [_conn(connection_id="c1", selected=["C1"], owner="legacy:shared")],
+    )
+    _force_settings(monkeypatch, beever_single_tenant=False)
+    with pytest.raises(HTTPException) as exc:
+        await channel_access_mod.assert_channel_access(mcp, "C1")
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_mcp_principal_with_explicit_ownership_always_allowed(monkeypatch):
+    """The explicit-owner branch is unchanged — MCP principals whose id
+    matches `owner_principal_id` pass in either single- or multi-tenant."""
+    mcp = Principal("mcp:owned-by-me", kind="mcp")
+    _install_fake_stores(
+        monkeypatch,
+        [_conn(connection_id="c1", selected=["C1"], owner="mcp:owned-by-me")],
+    )
+    _force_settings(monkeypatch, beever_single_tenant=False)
+    await channel_access_mod.assert_channel_access(mcp, "C1")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_bare_mcp_string_principal_detected_by_prefix(monkeypatch):
+    """Handlers pass a bare `principal_id` string (not a Principal object)
+    into the capability layer. `_principal_kind` must detect the `mcp:`
+    prefix so the fallback still applies."""
+    _install_fake_stores(
+        monkeypatch,
+        [_conn(connection_id="c1", selected=["C1"], owner="legacy:shared")],
+    )
+    _force_settings(monkeypatch, beever_single_tenant=True)
+    await channel_access_mod.assert_channel_access("mcp:bare-string", "C1")
+
+
+# ---------------------------------------------------------------------------
 # Integration: bridge key on DELETE /api/channels/{id}/data
 # ---------------------------------------------------------------------------
 

@@ -91,8 +91,11 @@ def _principal_id_for_mcp_key(key: str) -> str:
 
     Mirrors :func:`_principal_id_for_key` but emits the ``mcp:`` prefix so
     :func:`~beever_atlas.infra.channel_access._principal_kind` resolves to
-    ``"mcp"`` and the ACL guard applies MCP-strict rules (no single-tenant
-    browsing fallback).
+    ``"mcp"``. In single-tenant mode the MCP principal inherits the
+    legacy/un-owned connection fallback alongside ``user`` principals so
+    list/access calls agree on what's visible. In multi-tenant mode the
+    MCP principal must own each connection explicitly. Bridge principals
+    are always strict.
     """
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     return f"mcp:{digest}"
