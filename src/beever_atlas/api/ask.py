@@ -1880,15 +1880,29 @@ async def get_ask_attachment(
         mime = meta.get("mime_type") or "application/octet-stream"
         filename = stream.filename or "file"
         data = await stream.read()
+        from urllib.parse import quote
+
+        safe_ascii = (
+            filename.encode("ascii", "ignore")
+            .decode()
+            .replace('"', "")
+            .replace("\r", "")
+            .replace("\n", "")
+        ) or "file"
+        encoded = quote(filename, safe="")
         # `inline` lets <img src> render images directly; the frontend
         # decides whether to download or preview based on mime_type.
         return Response(
             content=data,
             media_type=mime,
             headers={
-                "Content-Disposition": f'inline; filename="{filename}"',
+                "Content-Disposition": (
+                    f'inline; filename="{safe_ascii}"; '
+                    f"filename*=UTF-8''{encoded}"
+                ),
                 "Cache-Control": "private, max-age=300",
                 "X-Robots-Tag": "noindex, nofollow",
+                "X-Content-Type-Options": "nosniff",
             },
         )
     finally:

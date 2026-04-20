@@ -206,11 +206,27 @@ async def download_wiki_markdown(
 
     md_content = "\n".join(parts)
     filename = f"{channel_name.replace(' ', '-').lower()}-wiki.md"
+    from urllib.parse import quote
+
+    safe_ascii = (
+        filename.encode("ascii", "ignore")
+        .decode()
+        .replace('"', "")
+        .replace("\r", "")
+        .replace("\n", "")
+    ) or "wiki.md"
+    encoded = quote(filename, safe="")
 
     return PlainTextResponse(
         content=md_content,
         media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{safe_ascii}"; '
+                f"filename*=UTF-8''{encoded}"
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
