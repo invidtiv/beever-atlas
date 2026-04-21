@@ -1,4 +1,4 @@
-# 🦫 Beever Atlas — LLM-first Wiki Knowledge Base
+<h1 align="center">🦫 Beever Atlas</h1>
 
 <div align="center">
   <picture>
