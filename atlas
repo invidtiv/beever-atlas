@@ -180,7 +180,12 @@ fi
 replace_env_value() {
   local key="$1"
   local value="$2"
-  sed -i.bak "s|^${key}=.*|${key}=${value}|" .env
+  # Escape sed replacement-string metacharacters: | (delimiter), & (match
+  # backref), \ (escape). Protects against .env corruption when values
+  # contain these chars (e.g. tokens with pipes or ampersands).
+  local escaped
+  escaped=$(printf '%s' "$value" | sed 's/[|&\\]/\\&/g')
+  sed -i.bak "s|^${key}=.*|${key}=${escaped}|" .env
   rm -f .env.bak
 }
 
