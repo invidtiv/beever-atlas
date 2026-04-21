@@ -129,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reject unpinned FROM / image: references
+      - name: "Reject unpinned FROM / image: references"
         run: |
           set -e
           violations=0
