@@ -3,12 +3,12 @@
   "manifestVersion": "1.16",
   "version": "1.0.1",
   "id": "eefc03cb-3132-46a1-ac50-e200792849b6",
-  "packageName": "com.votee.beever.atlas",
+  "packageName": "ai.beever.atlas",
   "developer": {
-    "name": "Votee",
-    "websiteUrl": "https://votee.com",
-    "privacyUrl": "https://votee.com/privacy",
-    "termsOfUseUrl": "https://votee.com/terms"
+    "name": "Beever AI",
+    "websiteUrl": "https://beever.ai",
+    "privacyUrl": "https://beever.ai/privacy",
+    "termsOfUseUrl": "https://beever.ai/terms"
   },
   "name": {
     "short": "Beever Atlas",

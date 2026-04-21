@@ -2,7 +2,7 @@
 
 Usage:
     MATTERMOST_BASE_URL=https://mattermost.example.com \\
-    MATTERMOST_BOT_TOKEN=REDACTED-ROTATED \\
+    MATTERMOST_BOT_TOKEN=<your-bot-token> \\
     python scripts/check_mattermost_channels.py
 """
 

@@ -2,7 +2,7 @@
 
 - `--x|label|` / `--o|label|` → `-->|label|` (mermaid 11.x rejects pipe
   labels on cross/circle arrow endings).
-- Dots and slashes inside `[label]` are stripped (e.g. `studio.votee.ai`,
+- Dots and slashes inside `[label]` are stripped (e.g. `app.example.com`,
   `CI/CD pipeline`).
 """
 
@@ -28,10 +28,10 @@ def test_circle_arrow_pipe_label_normalized():
 
 
 def test_label_dots_stripped():
-    src = "```mermaid\ngraph TD\nSA[studio.votee.ai] -->|uses| X[X]\n```\n"
+    src = "```mermaid\ngraph TD\nSA[app.example.com] -->|uses| X[X]\n```\n"
     out = _run(src)
-    assert "studio.votee.ai" not in out
-    assert "studio votee ai" in out
+    assert "app.example.com" not in out
+    assert "app example com" in out
 
 
 def test_label_slashes_stripped():

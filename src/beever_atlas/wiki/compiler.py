@@ -2389,7 +2389,7 @@ class WikiCompiler:
             label = match.group(2)
             # Strip characters mermaid rejects inside [...]: parens, quotes,
             # backticks, plus dots and slashes (which the 11.x flowchart parser
-            # rejects in labels like `studio.votee.ai`, `CI/CD pipeline`).
+            # rejects in labels like `app.example.com`, `CI/CD pipeline`).
             label = re.sub(r'[()"\'\`./]', " ", label)
             # Collapse repeated spaces
             label = re.sub(r" {2,}", " ", label).strip()
