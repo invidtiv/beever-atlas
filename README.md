@@ -246,7 +246,10 @@ Live demo — coming in a future release. For now, run `make demo` locally via t
 Conversations from any supported platform flow into a unified ingestion pipeline that produces two complementary memory systems — a **3-tier semantic store** (channel / topic / atomic fact) for fast hybrid search, and a **graph store** that extracts entities and their relationships. Those memories fuel two consumer surfaces: the **LLM Wiki** (distilled, auto-maintained) and **QA Agents** (served through the dashboard directly, or through **MCP** into Claude Code / Cursor).
 
 <p align="center">
-  <img src="assets/architecture.png" alt="Beever Atlas architecture — chat platforms → memory ingestion → 3-tier semantic memory + graph memory → LLM Wiki and QA Agent → Dashboard and MCP clients" width="60%" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.png" />
+    <img src="assets/architecture.png" alt="Beever Atlas architecture — chat platforms → memory ingestion → 3-tier semantic memory + graph memory → LLM Wiki and QA Agent → Dashboard and MCP clients" width="60%" />
+  </picture>
 </p>
 
 <p align="center"><em>From chat platforms to MCP agents — one ingestion path, two memory systems, two delivery surfaces.</em></p>
