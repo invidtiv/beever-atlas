@@ -36,34 +36,34 @@ Six short clips — connect a workspace, sync history, watch memory build, brows
   <tr>
     <td width="33%" align="center" valign="top">
       <strong>Multi-Platform</strong><br><br>
-      <video src="assets/clips/multi-platform.mp4" controls muted loop></video><br>
+      <video src="https://github.com/votee/beever-atlas/releases/download/media-assets-v1/multi-platform.mp4" controls muted loop></video><br>
       Connect Slack, Discord, Teams, Mattermost, or file imports. One bot, every workspace.
     </td>
     <td width="33%" align="center" valign="top">
       <strong>Message Sync</strong><br><br>
-      <video src="assets/clips/sync.mp4" controls muted loop></video><br>
+      <video src="https://github.com/votee/beever-atlas/releases/download/media-assets-v1/sync.mp4" controls muted loop></video><br>
       Pull channel history on demand or on a schedule. Resumable and rate-limit aware.
     </td>
     <td width="33%" align="center" valign="top">
       <strong>Memory Ingestion</strong><br><br>
-      <video src="assets/clips/memory.mp4" controls muted loop></video><br>
+      <video src="https://github.com/votee/beever-atlas/releases/download/media-assets-v1/memory.mp4" controls muted loop></video><br>
       6-stage ADK pipeline distils messages into atomic facts, entities, and relationships.
     </td>
   </tr>
   <tr>
     <td width="33%" align="center" valign="top">
       <strong>LLM Wiki</strong><br><br>
-      <video src="assets/clips/wiki.mp4" controls muted loop></video><br>
+      <video src="https://github.com/votee/beever-atlas/releases/download/media-assets-v1/wiki.mp4" controls muted loop></video><br>
       Auto-maintained wiki per channel — overview, topics, people, decisions, citations.
     </td>
     <td width="33%" align="center" valign="top">
       <strong>QA Agent</strong><br><br>
-      <video src="assets/clips/qa.mp4" controls muted loop></video><br>
+      <video src="https://github.com/votee/beever-atlas/releases/download/media-assets-v1/qa.mp4" controls muted loop></video><br>
       Streams cited answers over SSE. Smart router picks semantic or graph per question.
     </td>
     <td width="33%" align="center" valign="top">
       <strong>MCP Server</strong><br><br>
-      <video src="assets/clips/mcp.mp4" controls muted loop></video><br>
+      <video src="https://github.com/votee/beever-atlas/releases/download/media-assets-v1/mcp.mp4" controls muted loop></video><br>
       Plug Claude Code / Cursor into your knowledge base — 16 tools, per-agent auth.
     </td>
   </tr>
