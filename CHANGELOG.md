@@ -145,4 +145,4 @@ follow-up polish documented below.
 ### Removed
 - Unused `ANTHROPIC_API_KEY` environment variable.
 
-[Unreleased]: https://github.com/votee/beever-atlas/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Beever-AI/beever-atlas/compare/v0.1.1...HEAD
