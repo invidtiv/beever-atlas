@@ -263,43 +263,44 @@ For a detailed comparison with other LLM knowledge tools, see [the comparison pa
 
 ## Features in action
 
-Six short clips that walk through the core flow — connect a workspace, sync history, watch memory build, browse the auto-generated wiki, ask questions, and plug external AI agents in via MCP.
+Six short clips — connect a workspace, sync history, watch memory build, browse the auto-generated wiki, ask questions, plug external AI agents in via MCP.
 
-### 1. Multi-Platform — connect Slack, Discord, Teams, Mattermost, or file imports
-
-One bot handles every platform. Add a workspace through the dashboard; tokens are encrypted at rest and never land in `.env`.
-
-<video src="assets/clips/multi-platform.mp4" controls muted loop width="100%"></video>
-
-### 2. Message Sync — pull channel history on demand or on a schedule
-
-Resumable, rate-limit-aware, thread-aware. The scheduler handles incremental back-fill; the dashboard shows progress per channel.
-
-<video src="assets/clips/sync.mp4" controls muted loop width="100%"></video>
-
-### 3. Memory Ingestion — turn raw messages into structured knowledge
-
-A 6-stage ADK pipeline distils messages into atomic facts, clusters them by topic, extracts entities and relationships, and writes the result to Weaviate + Neo4j with an outbox pattern for atomic cross-store persistence.
-
-<video src="assets/clips/memory.mp4" controls muted loop width="100%"></video>
-
-### 4. LLM Wiki — an auto-maintained wiki per channel
-
-Overview, topic pages, people, decisions, tech stack, FAQ, glossary — all hierarchical, all with inline citations back to source messages, all cached in MongoDB so reads are free.
-
-<video src="assets/clips/wiki.mp4" controls muted loop width="100%"></video>
-
-### 5. QA Agent — ask questions, get cited answers over SSE
-
-Streams reasoning, tool calls, and the final answer with citations. The smart router picks semantic-memory retrieval, graph traversal, or external web search per question.
-
-<video src="assets/clips/qa.mp4" controls muted loop width="100%"></video>
-
-### 6. MCP server — plug Claude Code, Cursor, and other AI agents into your knowledge base
-
-A curated MCP surface at `/mcp` exposes 16 tools (discovery, retrieval, graph traversal, long-running ops). Per-agent bearer tokens + per-channel ACLs. See [docs/mcp-server.md](docs/mcp-server.md) for client configs.
-
-<video src="assets/clips/mcp.mp4" controls muted loop width="100%"></video>
+<table>
+  <tr>
+    <td width="33%" align="center" valign="top">
+      <strong>Multi-Platform</strong><br><br>
+      <video src="assets/clips/multi-platform.mp4" controls muted loop></video><br>
+      Connect Slack, Discord, Teams, Mattermost, or file imports. One bot, every workspace.
+    </td>
+    <td width="33%" align="center" valign="top">
+      <strong>Message Sync</strong><br><br>
+      <video src="assets/clips/sync.mp4" controls muted loop></video><br>
+      Pull channel history on demand or on a schedule. Resumable and rate-limit aware.
+    </td>
+    <td width="33%" align="center" valign="top">
+      <strong>Memory Ingestion</strong><br><br>
+      <video src="assets/clips/memory.mp4" controls muted loop></video><br>
+      6-stage ADK pipeline distils messages into atomic facts, entities, and relationships.
+    </td>
+  </tr>
+  <tr>
+    <td width="33%" align="center" valign="top">
+      <strong>LLM Wiki</strong><br><br>
+      <video src="assets/clips/wiki.mp4" controls muted loop></video><br>
+      Auto-maintained wiki per channel — overview, topics, people, decisions, citations.
+    </td>
+    <td width="33%" align="center" valign="top">
+      <strong>QA Agent</strong><br><br>
+      <video src="assets/clips/qa.mp4" controls muted loop></video><br>
+      Streams cited answers over SSE. Smart router picks semantic or graph per question.
+    </td>
+    <td width="33%" align="center" valign="top">
+      <strong>MCP Server</strong><br><br>
+      <video src="assets/clips/mcp.mp4" controls muted loop></video><br>
+      Plug Claude Code / Cursor into your knowledge base — 16 tools, per-agent auth.
+    </td>
+  </tr>
+</table>
 
 ---
 
