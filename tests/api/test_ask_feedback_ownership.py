@@ -93,9 +93,7 @@ async def owned_session():
 
         fb_client = AsyncIOMotorClient(settings.mongodb_uri)
         try:
-            await fb_client["beever_atlas"].qa_feedback.delete_many(
-                {"session_id": session_id}
-            )
+            await fb_client["beever_atlas"].qa_feedback.delete_many({"session_id": session_id})
         finally:
             fb_client.close()
 
@@ -125,9 +123,7 @@ async def test_unknown_session_returns_404(client: AsyncClient, as_owner):
 
 
 @pytest.mark.anyio
-async def test_owner_happy_path_still_works(
-    client: AsyncClient, as_owner, owned_session: str
-):
+async def test_owner_happy_path_still_works(client: AsyncClient, as_owner, owned_session: str):
     r = await client.post(
         "/api/ask/feedback",
         json={
