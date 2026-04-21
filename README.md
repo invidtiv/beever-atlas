@@ -22,6 +22,12 @@
   <a href="https://google.github.io/adk-docs/"><img src="https://img.shields.io/badge/BUILT_WITH-Google_ADK-FF6F00?style=for-the-badge&labelColor=4A4A4A" alt="Built with Google ADK" /></a>
 </p>
 
+<p align="center">
+  <a href="https://discord.gg/VshBCUUX"><img src="https://img.shields.io/badge/DISCORD-Join_Community-5865F2?style=for-the-badge&labelColor=4A4A4A&logo=discord&logoColor=white" alt="Join our Discord" /></a>
+  <a href="https://x.com/Beever_AI"><img src="https://img.shields.io/badge/X-@Beever__AI-000000?style=for-the-badge&labelColor=4A4A4A&logo=x&logoColor=white" alt="Follow us on X" /></a>
+  <a href="https://beever.ai/"><img src="https://img.shields.io/badge/WEBSITE-beever.ai-15404E?style=for-the-badge&labelColor=4A4A4A" alt="beever.ai" /></a>
+</p>
+
 **Beever Atlas turns the conversations your team already has on Slack, Discord, Microsoft Teams, and Mattermost into a self-maintaining wiki.** Atomic facts get extracted, deduplicated, and clustered into topic pages with citations. A graph store links the people, decisions, and projects mentioned across channels. Ask questions in natural language and get answers cited back to the source messages — through the dashboard, or through MCP into Claude Code and Cursor.
 
 If you want a knowledge base that grows on its own from the chats your team already has, this is it.
@@ -346,6 +352,17 @@ Beever Atlas collects no telemetry. No usage data, error reports, or analytics a
 ## 📐 API Stability
 
 All `/api/*` endpoints are **UNSTABLE** in 0.1.0. v0.2.0 will introduce a `/api/v1/*` prefix; clients pinning current paths will break. See [SECURITY.md](SECURITY.md).
+
+---
+
+## 💬 Community & Contact
+
+- **Discord**: [discord.gg/VshBCUUX](https://discord.gg/VshBCUUX) — get help, share what you're building, talk to the team
+- **X / Twitter**: [@Beever_AI](https://x.com/Beever_AI) — release notes, posts, announcements
+- **Website**: [beever.ai](https://beever.ai/) — about the company and other projects
+- **GitHub Discussions**: [github.com/Beever-AI/beever-atlas/discussions](https://github.com/Beever-AI/beever-atlas/discussions) — longer-form questions and ideas
+
+Commercial support, partnerships, or press: `tech@beever.ai`.
 
 ---
 
