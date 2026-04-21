@@ -92,6 +92,20 @@ Under the hood, three services (backend, bot, frontend) are backed by four data 
 
 Most RAG systems answer questions by retrieving raw message snippets and feeding them straight to an LLM. Beever Atlas takes a different approach: it continuously distils conversations into a structured, auto-maintained wiki — with topic pages, entity graphs, decisions, and citations — before any query is issued. When you ask a question, the retrieval layer works against clean, deduplicated knowledge rather than noisy chat history. This means answers are more consistent, citations are traceable to source messages, and the wiki itself becomes a useful artifact your team can browse independently of the Q&A interface. The dual-memory architecture (semantic + graph) lets the query router pick the right retrieval strategy per question, keeping latency low and context precise.
 
+### The inspiration: LLMs read wikis, not chat logs
+
+The per-channel wiki concept is directly inspired by [Andrej Karpathy's observation](https://x.com/karpathy/status/2039805659525644595) that LLMs are far better at reasoning over curated, encyclopedic content (books, docs, wikis) than over raw conversational transcripts. Chat history is noisy, redundant, temporally scattered, and full of implicit context that only humans resolve. A wiki, by contrast, is the *already-distilled* form of that knowledge — deduplicated, structured, citation-bearing, and organised by topic rather than by timestamp.
+
+Beever Atlas operationalises this insight: every synced channel gets its own **auto-generated, continuously-updated wiki** — sections for topics, entities, decisions, open questions, and timelines — rebuilt incrementally as new messages arrive. The QA agent retrieves against this wiki first, falling back to raw messages only when a fact hasn't been distilled yet.
+
+### What this unlocks in practice
+
+- **Better answers, fewer hallucinations** — retrieval operates on fact-dense prose with explicit entity relationships, not on fragmented turn-by-turn chat.
+- **Traceable citations** — every wiki claim links back to the source messages that produced it, so answers are auditable all the way down to the original Slack/Discord/Teams thread.
+- **A browsable artifact, not just a Q&A box** — the wiki is useful *on its own*. New teammates onboarding to a channel can read the distilled wiki instead of scrolling three months of history.
+- **Cheaper inference at query time** — the expensive distillation work happens once, at ingestion. Queries hit compact, pre-digested context instead of re-summarising raw logs on every request.
+- **Graph-aware reasoning** — the entity graph built alongside the wiki lets the query router answer relational questions ("who worked on X with Y?") that pure vector RAG struggles with.
+
 For a detailed comparison with other LLM knowledge tools, see [the comparison page](https://docs.beever.ai/atlas/comparison) on the documentation site.
 
 ---
