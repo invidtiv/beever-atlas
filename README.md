@@ -90,12 +90,12 @@ Under the hood, three services (backend, bot, frontend) are backed by four data 
 
 ## 💡 Why Wiki-First RAG?
 
+Most RAG systems answer questions by retrieving raw message snippets and feeding them straight to an LLM. Beever Atlas takes a different approach: it continuously distils conversations into a structured, auto-maintained wiki — with topic pages, entity graphs, decisions, and citations — before any query is issued. When you ask a question, the retrieval layer works against clean, deduplicated knowledge rather than noisy chat history. This means answers are more consistent, citations are traceable to source messages, and the wiki itself becomes a useful artifact your team can browse independently of the Q&A interface. The dual-memory architecture (semantic + graph) lets the query router pick the right retrieval strategy per question, keeping latency low and context precise.
+
 <div align="center">
   <img src="assets/wiki-preview.png" alt="Beever Atlas wiki view — auto-generated overview with concept map, topics, FAQ, glossary, and resources, built from Slack messages" width="85%" />
 </div>
 <p align="center"><em>A live auto-generated channel wiki: overview, concept map, topics, FAQ, glossary — distilled from 246 Slack messages, not hand-written.</em></p>
-
-Most RAG systems answer questions by retrieving raw message snippets and feeding them straight to an LLM. Beever Atlas takes a different approach: it continuously distils conversations into a structured, auto-maintained wiki — with topic pages, entity graphs, decisions, and citations — before any query is issued. When you ask a question, the retrieval layer works against clean, deduplicated knowledge rather than noisy chat history. This means answers are more consistent, citations are traceable to source messages, and the wiki itself becomes a useful artifact your team can browse independently of the Q&A interface. The dual-memory architecture (semantic + graph) lets the query router pick the right retrieval strategy per question, keeping latency low and context precise.
 
 ### The inspiration: LLMs read wikis, not chat logs
 
