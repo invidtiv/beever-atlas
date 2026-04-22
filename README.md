@@ -9,7 +9,7 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.png" />
-    <img src="assets/banner.png" alt="Beever Atlas — LLM-first Wiki Knowledge Base" width="65%" />
+    <img src="assets/banner.png" alt="Beever Atlas — LLM-first Wiki Knowledge Base" width="85%" />
   </picture>
 </div>
 
