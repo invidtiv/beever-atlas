@@ -23,9 +23,10 @@ import hmac
 import logging
 from typing import Literal, Optional
 
-from fastapi import Header, HTTPException, Query, status
+from fastapi import Header, HTTPException, Query, Request, status
 
 from beever_atlas.infra.config import get_settings
+from beever_atlas.infra.loader_token import verify_loader_token
 
 logger = logging.getLogger(__name__)
 
@@ -235,21 +236,60 @@ def require_user_optional(
     return None
 
 
+def _try_signed_loader_token(
+    loader_token: Optional[str],
+    *,
+    current_path: str,
+    secret: str,
+) -> Optional[Principal]:
+    """Verify a signed `?loader_token=` and return a Principal on success.
+
+    Returns ``None`` for missing token, missing secret, or any verification
+    failure. The caller then decides whether to fall back to raw-key
+    matching (governed by ``BEEVER_LOADER_RAW_KEY_FALLBACK``).
+
+    Issue #89 — caller is responsible for the multi-secret rotation loop:
+    when rotating ``LOADER_TOKEN_SECRET``, call this helper twice (new
+    secret first, then old) before returning ``None``. Keeping the loop
+    in the caller avoids a breaking-signature change on
+    ``verify_loader_token``.
+    """
+    if not loader_token or not secret:
+        return None
+    user_id = verify_loader_token(loader_token, current_path=current_path, secret=secret)
+    if user_id is None:
+        return None
+    logger.info("auth.loader_token_verified principal=%s", user_id)
+    return Principal(user_id, kind="user")
+
+
 def require_user_loader(
+    request: Request,
     authorization: Optional[str] = Header(default=None),
     access_token: Optional[str] = Query(
         default=None,
         description="Fallback auth for URLs consumed by browser loaders "
-        "(<img src>, <a href>) that cannot carry custom headers.",
+        "(<img src>, <a href>) that cannot carry custom headers. Accepted "
+        "only while BEEVER_LOADER_RAW_KEY_FALLBACK=true (issue #89).",
+    ),
+    loader_token: Optional[str] = Query(
+        default=None,
+        description="HMAC-signed scoped token from POST /api/auth/loader-token. "
+        "Preferred over `access_token` — short-lived, route-bound. Issue #89.",
     ),
 ) -> Principal:
-    """Validate Bearer token; ALSO accept ``?access_token=`` query string.
+    """Validate caller via signed loader token, header, or (legacy) query string.
+
+    Verification order (issue #89):
+
+      1. ``?loader_token=`` — HMAC-signed, route-bound, 5-min TTL. Preferred.
+      2. ``Authorization: Bearer`` header — works on the loader router too.
+      3. ``?access_token=`` — legacy raw user API key, accepted ONLY while
+         ``BEEVER_LOADER_RAW_KEY_FALLBACK=true`` (the migration default).
 
     Use ONLY on endpoints consumed by browser-native loaders (``<img src>``,
     ``<a href>``) that cannot carry custom ``Authorization`` headers. All
     other user-facing routes should use ``require_user`` (header-only).
-    Successful query-string authentications are logged at INFO so operators
-    can audit which loader endpoints are exercised via URL credentials.
     """
     settings = get_settings()
     keys = _parse_keys(settings.api_keys)
@@ -257,52 +297,85 @@ def require_user_loader(
     if not keys and not bridge_key:
         raise _unauthorized("API authentication not configured")
 
-    token = _resolve_token(authorization, access_token, allow_query_string=True)
-    if not token:
-        raise _unauthorized("Missing or malformed Authorization header")
+    # 1. Signed loader token wins outright when present and valid.
+    secret = (settings.loader_token_secret or "").strip()
+    signed = _try_signed_loader_token(loader_token, current_path=request.url.path, secret=secret)
+    if signed is not None:
+        return signed
 
-    principal = _match_user_key(token, keys)
-    if principal is not None:
-        if not authorization and access_token:
-            logger.info(
-                "auth.query_string_user access principal=%s",
-                principal.id,
-            )
-        return principal
+    # 2. Header auth (always allowed; same matching rules as `require_user`).
+    header_token = _extract_bearer(authorization)
+    if header_token:
+        principal = _match_user_key(header_token, keys)
+        if principal is not None:
+            return principal
+        if settings.allow_bridge_as_user:
+            bridge_principal = _match_bridge_key(header_token, bridge_key)
+            if bridge_principal is not None:
+                return bridge_principal
+        raise _unauthorized("Invalid API key")
 
-    if settings.allow_bridge_as_user:
-        bridge_principal = _match_bridge_key(token, bridge_key)
-        if bridge_principal is not None:
-            return bridge_principal
+    # 3. Legacy raw `?access_token=` — only when fallback flag is on.
+    if access_token and settings.loader_raw_key_fallback:
+        raw = (access_token or "").strip()
+        if raw:
+            principal = _match_user_key(raw, keys)
+            if principal is not None:
+                logger.info("auth.loader_fallback_raw_key principal=%s", principal.id)
+                return principal
+            if settings.allow_bridge_as_user:
+                bridge_principal = _match_bridge_key(raw, bridge_key)
+                if bridge_principal is not None:
+                    logger.info(
+                        "auth.loader_fallback_raw_key principal=%s",
+                        bridge_principal.id,
+                    )
+                    return bridge_principal
+        raise _unauthorized("Invalid API key")
 
-    raise _unauthorized("Invalid API key")
+    raise _unauthorized("Missing or malformed loader credential")
 
 
 def require_user_loader_optional(
+    request: Request,
     authorization: Optional[str] = Header(default=None),
     access_token: Optional[str] = Query(default=None),
+    loader_token: Optional[str] = Query(default=None),
 ) -> Optional[Principal]:
     """Like ``require_user_loader`` but returns None instead of 401.
 
-    Accepts ``?access_token=`` for browser-native contexts (shared
-    conversation pages opened via link that may carry a query-string
-    token). The shared-link endpoint relies on this so anonymous visits
-    return None and authenticated visits resolve the calling principal.
+    Accepts the same three credential surfaces (signed token, header, legacy
+    raw key when the fallback flag is on) and returns ``None`` instead of
+    raising for missing or invalid credentials. Used by the public
+    shared-conversation endpoint, where auth is conditional on the share
+    visibility tier.
     """
     settings = get_settings()
     keys = _parse_keys(settings.api_keys)
     bridge_key = (settings.bridge_api_key or "").strip()
 
-    token = _resolve_token(authorization, access_token, allow_query_string=True)
-    if not token:
+    secret = (settings.loader_token_secret or "").strip()
+    signed = _try_signed_loader_token(loader_token, current_path=request.url.path, secret=secret)
+    if signed is not None:
+        return signed
+
+    header_token = _extract_bearer(authorization)
+    if header_token:
+        principal = _match_user_key(header_token, keys)
+        if principal is not None:
+            return principal
+        if settings.allow_bridge_as_user:
+            return _match_bridge_key(header_token, bridge_key)
         return None
 
-    principal = _match_user_key(token, keys)
-    if principal is not None:
-        return principal
-
-    if settings.allow_bridge_as_user:
-        return _match_bridge_key(token, bridge_key)
+    if access_token and settings.loader_raw_key_fallback:
+        raw = (access_token or "").strip()
+        if raw:
+            principal = _match_user_key(raw, keys)
+            if principal is not None:
+                return principal
+            if settings.allow_bridge_as_user:
+                return _match_bridge_key(raw, bridge_key)
     return None
 
 

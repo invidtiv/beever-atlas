@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { emojify } from "node-emoji";
 import type { SyncState } from "@/hooks/useSync";
 import { buildLoaderUrl } from "@/lib/api";
+import { ProxiedImage } from "@/components/common/ProxiedImage";
 
 const PAGE_SIZE = 50;
 const POLL_INTERVAL_MS = 30_000;
@@ -225,7 +226,19 @@ function DateSeparator({ label }: { label: string }) {
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
-function ImageAttachment({ url, name }: { url: string; name: string }) {
+function ImageAttachment({
+  unproxiedUrl,
+  mediaPath,
+  name,
+}: {
+  unproxiedUrl: string;
+  mediaPath: string;
+  name: string;
+}) {
+  // Issue #89 — render via ProxiedImage so the proxy URL is signed-token
+  // backed (with bounded onError retry). Local `failed` state captures
+  // the case where ProxiedImage exhausts its 2 attempts and falls back —
+  // we then render the clickable text link.
   const [failed, setFailed] = useState(false);
   const [lightbox, setLightbox] = useState(false);
 
@@ -238,7 +251,7 @@ function ImageAttachment({ url, name }: { url: string; name: string }) {
 
   if (failed) {
     return (
-      <a href={url} target="_blank" rel="noopener noreferrer"
+      <a href={unproxiedUrl} target="_blank" rel="noopener noreferrer"
          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-muted/40 border border-border text-sm text-foreground hover:bg-muted transition-colors">
         <ImageIcon size={14} className="text-muted-foreground shrink-0" />
         <span className="truncate">{name}</span>
@@ -248,8 +261,9 @@ function ImageAttachment({ url, name }: { url: string; name: string }) {
 
   return (
     <>
-      <img
-        src={url}
+      <ProxiedImage
+        unproxiedUrl={unproxiedUrl}
+        mediaPath={mediaPath}
         alt={name}
         className="max-w-sm max-h-64 rounded-lg border border-border object-contain cursor-pointer hover:opacity-90 transition-opacity"
         onClick={() => setLightbox(true)}
@@ -260,8 +274,9 @@ function ImageAttachment({ url, name }: { url: string; name: string }) {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
           onClick={() => setLightbox(false)}
         >
-          <img
-            src={url}
+          <ProxiedImage
+            unproxiedUrl={unproxiedUrl}
+            mediaPath={mediaPath}
             alt={name}
             className="max-w-[90vw] max-h-[90vh] rounded-lg object-contain"
             onClick={(e) => e.stopPropagation()}
@@ -887,10 +902,24 @@ function MessageRow({ msg, isReply = false, onToggleReplies, isExpanded }: { msg
             {msg.attachments.map((att, i) => {
               const isImage = att.type === "image" || /\.(png|jpe?g|gif|webp|svg)$/i.test(att.name || "");
               const isVideo = att.type === "video" || /\.(mp4|mov|webm|avi)$/i.test(att.name || "");
-              const proxyUrl = att.url ? buildLoaderUrl(`/api/files/proxy?url=${encodeURIComponent(att.url)}`) : undefined;
+              // Issue #89 — `<img>` cases go through ProxiedImage (signed
+              // tokens). `<a href>` cases (video, files) keep using
+              // `buildLoaderUrl` synchronously; that anchor migration is a
+              // follow-up to this PR.
+              const mediaPath = att.url
+                ? `/api/files/proxy?url=${encodeURIComponent(att.url)}`
+                : undefined;
+              const proxyUrl = mediaPath ? buildLoaderUrl(mediaPath) : undefined;
 
-              if (isImage && proxyUrl) {
-                return <ImageAttachment key={proxyUrl} url={proxyUrl} name={att.name || "Image"} />;
+              if (isImage && att.url && mediaPath) {
+                return (
+                  <ImageAttachment
+                    key={att.url}
+                    unproxiedUrl={att.url}
+                    mediaPath={mediaPath}
+                    name={att.name || "Image"}
+                  />
+                );
               }
 
               if (isVideo && proxyUrl) {

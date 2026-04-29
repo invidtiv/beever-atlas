@@ -146,10 +146,12 @@ export { ApiError };
 /**
  * Build a URL for browser-native loaders (<img src>, <a href>) that cannot
  * carry custom Authorization headers. Appends `?access_token=<key>` so
- * `require_user` can validate the request via query string.
+ * `require_user_loader` can validate the request via query string.
  *
- * Use for /api/files/proxy and other endpoints consumed by <img>/<a>.
- * DO NOT use for programmatic fetch() calls — use authFetch / api.get there.
+ * Issue #89 — this is now the FALLBACK. Prefer `mintLoaderUrl` (async,
+ * signed, scoped) for new code. `buildLoaderUrl` is kept for the
+ * migration-window fallback inside `mintLoaderUrl` and will be removed
+ * in the follow-up PR that flips `BEEVER_LOADER_RAW_KEY_FALLBACK=false`.
  */
 export function buildLoaderUrl(path: string): string {
   const base = path.startsWith("http") ? path : `${API_BASE}${path}`;
@@ -157,4 +159,101 @@ export function buildLoaderUrl(path: string): string {
   if (!apiKey) return base;
   const sep = base.includes("?") ? "&" : "?";
   return `${base}${sep}access_token=${encodeURIComponent(apiKey)}`;
+}
+
+// ── Issue #89: HMAC-signed scoped loader tokens ─────────────────────────
+
+/**
+ * Strip query string + hash to extract the route path portion of a URL or
+ * URI fragment. The mint endpoint binds tokens to route prefixes (e.g.
+ * `/api/files/proxy`) — keying the cache by route path lets multiple
+ * `<img>` URLs share a single token within the TTL window.
+ */
+function routePathOnly(pathOrUrl: string): string {
+  const noHash = pathOrUrl.split("#", 1)[0] ?? pathOrUrl;
+  const noQuery = noHash.split("?", 1)[0] ?? noHash;
+  // If a full URL slipped in, strip the origin too.
+  try {
+    const u = new URL(noQuery, "http://placeholder.invalid");
+    return u.pathname;
+  } catch {
+    return noQuery;
+  }
+}
+
+interface CachedLoaderToken {
+  token: string;
+  expiresAt: number; // unix epoch seconds
+}
+
+const _loaderTokenCache = new Map<string, CachedLoaderToken>();
+
+// 30s buffer before expiry — re-mint just before the token would refuse
+// at the verifier so in-flight image loads aren't caught at the boundary.
+const _CACHE_REFRESH_BUFFER_SECONDS = 30;
+
+/** Test-only — clear the in-memory cache so vitest tests are isolated. */
+export function _resetLoaderTokenCache(): void {
+  _loaderTokenCache.clear();
+}
+
+/**
+ * Mint (or look up cached) a signed loader token for the route portion of
+ * `path`, then return `path` with `&loader_token=<token>` appended.
+ *
+ * Caching: tokens are cached per route path (e.g. `/api/files/proxy`).
+ * Multiple `<img>` URLs targeting the same route share one token within
+ * the TTL minus a 30-second buffer.
+ *
+ * Fallback: any error from the mint endpoint (404, 5xx, network failure)
+ * falls through to the legacy `buildLoaderUrl` (raw API key) so image
+ * rendering survives during the migration window. `<ProxiedImage>`'s
+ * `onError` retry is bounded at 2 attempts to prevent loops.
+ */
+export async function mintLoaderUrl(
+  path: string,
+  opts?: { forceRefresh?: boolean },
+): Promise<string> {
+  const fullPath = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const routePath = routePathOnly(path);
+  const now = Math.floor(Date.now() / 1000);
+
+  if (!opts?.forceRefresh) {
+    const cached = _loaderTokenCache.get(routePath);
+    if (cached && cached.expiresAt > now + _CACHE_REFRESH_BUFFER_SECONDS) {
+      return _appendLoaderToken(fullPath, cached.token);
+    }
+  }
+
+  try {
+    const resp = await authFetch(`${API_BASE}/api/auth/loader-token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: routePath }),
+    });
+    if (!resp.ok) {
+      throw new Error(`mintLoaderUrl: server returned ${resp.status}`);
+    }
+    const body = (await resp.json()) as { token: string; expires_at: number };
+    if (!body.token || typeof body.expires_at !== "number") {
+      throw new Error("mintLoaderUrl: malformed response");
+    }
+    _loaderTokenCache.set(routePath, {
+      token: body.token,
+      expiresAt: body.expires_at,
+    });
+    return _appendLoaderToken(fullPath, body.token);
+  } catch (err) {
+    // Migration-window fallback: the server might not have the new
+    // endpoint, the secret might be unset, or the network might be flaky.
+    // Falling back to `buildLoaderUrl` keeps images rendering as long as
+    // `BEEVER_LOADER_RAW_KEY_FALLBACK=true` on the backend.
+    console.warn("mintLoaderUrl: falling back to raw key", err);
+    return buildLoaderUrl(path);
+  }
+}
+
+function _appendLoaderToken(fullPath: string, token: string): string {
+  const sep = fullPath.includes("?") ? "&" : "?";
+  return `${fullPath}${sep}loader_token=${encodeURIComponent(token)}`;
 }

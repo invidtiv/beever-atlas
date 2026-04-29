@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, ExternalLink, ImageIcon, FileText, Film, Arr
 import type { MemoryTier2 } from "@/lib/types";
 import { MediaModal } from "@/components/graph/MediaModal";
 import { buildLoaderUrl } from "@/lib/api";
+import { ProxiedImage } from "@/components/common/ProxiedImage";
 
 interface FactCardProps {
   fact: MemoryTier2;
@@ -138,13 +139,18 @@ export function FactCard({ fact }: FactCardProps) {
           {(fact.source_media_urls?.length > 0 || fact.source_media_url) && (
             <div className="flex flex-wrap gap-2">
               {(fact.source_media_urls?.length > 0 ? fact.source_media_urls : [fact.source_media_url].filter(Boolean)).map((url, i) => {
-                const proxyUrl = buildLoaderUrl(`/api/files/proxy?url=${encodeURIComponent(url)}`);
+                // Issue #89 — `<img>` thumbnails go through ProxiedImage
+                // (signed tokens). `<a href>` cases below keep the
+                // synchronous `buildLoaderUrl` for now.
+                const mediaPath = `/api/files/proxy?url=${encodeURIComponent(url)}`;
+                const proxyUrl = buildLoaderUrl(mediaPath);
                 const isImage = fact.source_media_type === "image" || url.match(/\.(png|jpg|jpeg|gif|webp)(\?|$)/i);
                 if (isImage) {
                   return (
-                    <img
+                    <ProxiedImage
                       key={url}
-                      src={proxyUrl}
+                      unproxiedUrl={url}
+                      mediaPath={mediaPath}
                       alt="Source media"
                       className="w-20 h-20 rounded-lg border border-border object-cover cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all"
                       onClick={() => setLightbox({ url, name: "Image" })}

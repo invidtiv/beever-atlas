@@ -55,18 +55,37 @@ const PROXY_HOSTS = [
  * a host we can't load directly from the browser. `<img>` tags cannot
  * carry a custom `Authorization` header, so we go through `buildLoaderUrl`
  * which appends `?access_token=` for request-time auth. Leaves unrelated
- * URLs unchanged. */
+ * URLs unchanged.
+ *
+ * Issue #89 — this remains the synchronous fallback (raw API key). For
+ * new `<img>` rendering, prefer `<ProxiedImage unproxiedUrl mediaPath />`
+ * with `mediaProxyPathFor(url)` so the URL carries a signed token. This
+ * function is still used by `<a href>` cases that cannot await an async
+ * mint. */
 export function proxiedMediaUrl(url: string | undefined): string | undefined {
   if (!url) return url;
+  const proxyPath = mediaProxyPathFor(url);
+  if (!proxyPath) return url;
+  return buildLoaderUrl(proxyPath);
+}
+
+/** Returns the route path needed to mint a signed loader token via
+ * `/api/media/proxy` for this URL, or `undefined` if the URL does not
+ * need proxying (public / unrecognized host). The path includes the
+ * `?url=` query so `<ProxiedImage>`'s mintLoaderUrl call constructs the
+ * right URL — token binding strips the query at the verifier so any
+ * caller of `/api/media/proxy?url=*` shares one token within the TTL. */
+export function mediaProxyPathFor(url: string | undefined): string | undefined {
+  if (!url) return undefined;
   try {
     const parsed = new URL(url);
     const host = parsed.host.toLowerCase();
     const needsProxy = PROXY_HOSTS.some(
       (h) => host === h || host.endsWith(`.${h}`),
     );
-    if (!needsProxy) return url;
-    return buildLoaderUrl(`/api/media/proxy?url=${encodeURIComponent(url)}`);
+    if (!needsProxy) return undefined;
+    return `/api/media/proxy?url=${encodeURIComponent(url)}`;
   } catch {
-    return url;
+    return undefined;
   }
 }

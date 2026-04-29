@@ -41,6 +41,7 @@ from beever_atlas.api.config import router as config_router
 from beever_atlas.api.policies import router as policies_router
 from beever_atlas.api.models import router as models_router
 from beever_atlas.api.dev import router as dev_router
+from beever_atlas.api.loader_token import router as loader_token_router
 from beever_atlas.api.loaders import router as loader_router
 from beever_atlas.api.admin import router as admin_router
 from beever_atlas.infra.config import get_settings
@@ -257,6 +258,12 @@ app.include_router(config_router, dependencies=_auth)
 # (/api/files/proxy, /api/media/proxy). Mounted with `_loader_auth` so
 # these are the ONLY non-public endpoints that accept `?access_token=`.
 app.include_router(loader_router, dependencies=_loader_auth)
+# Issue #89 — loader_token_router exposes POST /api/auth/loader-token for
+# browsers to mint short-lived signed tokens. Auth is enforced inline by
+# the endpoint's `Depends(require_user)` (header-only — minting a loader
+# token via the legacy `?access_token=` query param would be a bootstrap
+# loop). Mounted without `_auth` to avoid running require_user twice.
+app.include_router(loader_token_router)
 
 # Secure MCP mount (openspec change atlas-mcp-server). The ASGI app was
 # built at module-load time above so its lifespan could be chained into
