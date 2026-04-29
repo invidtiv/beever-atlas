@@ -209,7 +209,7 @@ export interface BatchResultEntry {
 export interface ChannelInfo {
   channel_id: string;
   name: string;
-  platform: "slack" | "teams" | "discord";
+  platform: "slack" | "teams" | "discord" | "telegram" | "mattermost" | "file";
   is_private: boolean;
   last_synced_at: string | null;
   message_count: number;
@@ -340,6 +340,7 @@ export interface PlatformConnection {
   error_message: string | null;
   selected_channels: string[];
   source: "ui" | "env";
+  ingestion_mode?: "polling" | "webhook" | null;
   created_at: string;
   updated_at: string;
 }
@@ -348,6 +349,7 @@ export interface PlatformCredentials {
   platform: "slack" | "discord" | "teams" | "telegram" | "mattermost";
   credentials: Record<string, string>;
   display_name?: string;
+  ingestion_mode?: "polling" | "webhook" | null;
 }
 
 // --- File Import ---
@@ -368,7 +370,7 @@ export interface ImportPreviewResponse {
   file_id: string;
   filename: string;
   encoding: string;
-  format: "csv" | "tsv" | "jsonl";
+  format: "csv" | "tsv" | "jsonl" | "json";
   row_count_estimate: number;
   headers: string[];
   sample_messages: Array<{

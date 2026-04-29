@@ -44,6 +44,17 @@ See [`.env.example`](../.env.example) for the canonical list and descriptions. K
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API adapter |
 | `MATTERMOST_BASE_URL`, `MATTERMOST_BOT_TOKEN` | Mattermost outgoing-webhook adapter |
 
+## Telegram Notes
+
+Telegram supports two live update transports:
+
+- **Bot API polling**: the backend calls `getUpdates` on a schedule. This works for local and self-hosted installs without a registered domain or public webhook URL.
+- **Webhooks**: Telegram sends updates to the bot bridge when Atlas has a stable public HTTPS endpoint.
+
+Only one transport can be active for a Telegram bot token at a time. If polling is selected and Telegram reports an existing webhook, remove it with `deleteWebhook` before polling. Webhook requests received by the bot bridge are forwarded to the backend's internal Telegram update endpoint so they are stored in the same durable source-message collection as polled updates.
+
+Telegram bot ingestion starts from messages delivered after bot setup. Telegram keeps pending bot updates for a limited window; it is not a long-term history source. Use Telegram Desktop JSON export import for historical ingestion. For group chats, privacy/admin settings affect which messages the bot can see.
+
 ## Further Reading
 
 - [Root README](../README.md) — architecture overview, quick-start, Docker setup

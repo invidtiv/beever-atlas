@@ -7,6 +7,7 @@ import { useConnectionChannels, useUpdateChannels } from "@/hooks/useConnections
 import type { PlatformConnection } from "@/lib/types";
 
 type Platform = "slack" | "discord" | "teams" | "telegram" | "mattermost";
+type TelegramIngestionMode = "polling" | "webhook";
 
 interface ConnectionWizardProps {
   platform: Platform;
@@ -101,6 +102,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
   const [step, setStep] = useState<Step>(1);
   const [displayName, setDisplayName] = useState("");
   const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [telegramMode, setTelegramMode] = useState<TelegramIngestionMode>("polling");
   const [connection, setConnection] = useState<PlatformConnection | null>(null);
   const [selectedChannels, setSelectedChannels] = useState<string[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -119,9 +121,8 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
   const instructions = INSTRUCTIONS_MAP[platform];
   const fields = CREDENTIAL_FIELDS[platform];
 
-  // Telegram and Teams bots are event-driven — they receive messages via webhook,
-  // so the bridge has no channel listing API for them.
-  const isWebhookOnly = platform === "telegram" || platform === "teams";
+  // Teams bots are event-driven via webhook. Telegram supports polling or webhook.
+  const isWebhookOnly = platform === "teams";
 
   function handleCredentialChange(key: string, value: string) {
     setCredentials((prev) => ({ ...prev, [key]: value }));
@@ -135,6 +136,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
         platform,
         credentials,
         display_name: displayName.trim(),
+        ingestion_mode: platform === "telegram" ? telegramMode : undefined,
       });
       setConnection(conn);
       setSelectedChannels(conn.selected_channels);
@@ -197,16 +199,21 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
           )}
           {step === 2 && (
             <StepCredentials
+              platform={platform}
               fields={fields}
               values={credentials}
               onChange={handleCredentialChange}
+              telegramMode={telegramMode}
+              onTelegramModeChange={setTelegramMode}
             />
           )}
           {step === 3 && (
             <StepValidating />
           )}
           {step === 4 && (
-            isWebhookOnly ? (
+            platform === "telegram" ? (
+              <StepTelegramMode mode={connection?.ingestion_mode ?? telegramMode} />
+            ) : isWebhookOnly ? (
               <StepWebhookMode platform={platform} />
             ) : (
               <StepChannels
@@ -423,10 +430,11 @@ function StepInstructions({
         ))}
       </div>
       <div>
-        <label className="block text-xs font-medium text-foreground mb-1.5">
+        <label htmlFor="connection-display-name" className="block text-xs font-medium text-foreground mb-1.5">
           Display name
         </label>
         <input
+          id="connection-display-name"
           type="text"
           value={displayName}
           onChange={(e) => onDisplayNameChange(e.target.value)}
@@ -439,13 +447,19 @@ function StepInstructions({
 }
 
 function StepCredentials({
+  platform,
   fields,
   values,
   onChange,
+  telegramMode,
+  onTelegramModeChange,
 }: {
+  platform: Platform;
   fields: { key: string; label: string; placeholder: string; type?: string }[];
   values: Record<string, string>;
   onChange: (key: string, value: string) => void;
+  telegramMode: TelegramIngestionMode;
+  onTelegramModeChange: (mode: TelegramIngestionMode) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -453,10 +467,51 @@ function StepCredentials({
         <h3 className="text-sm font-semibold text-foreground mb-1">Enter your credentials</h3>
         <p className="text-xs text-muted-foreground">These are stored securely and never shared.</p>
       </div>
+      {platform === "telegram" && (
+        <div>
+          <label className="block text-xs font-medium text-foreground mb-1.5">
+            Live ingestion mode
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => onTelegramModeChange("polling")}
+              className={cn(
+                "rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                telegramMode === "polling"
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border hover:bg-muted",
+              )}
+            >
+              <span className="block font-medium">Polling</span>
+              <span className="block text-xs text-muted-foreground">No public domain required</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onTelegramModeChange("webhook")}
+              className={cn(
+                "rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                telegramMode === "webhook"
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border hover:bg-muted",
+              )}
+            >
+              <span className="block font-medium">Webhook</span>
+              <span className="block text-xs text-muted-foreground">Uses a public HTTPS URL</span>
+            </button>
+          </div>
+        </div>
+      )}
       {fields.map((field) => (
         <div key={field.key}>
-          <label className="block text-xs font-medium text-foreground mb-1.5">{field.label}</label>
+          <label
+            htmlFor={`credential-${field.key}`}
+            className="block text-xs font-medium text-foreground mb-1.5"
+          >
+            {field.label}
+          </label>
           <input
+            id={`credential-${field.key}`}
             type={field.type ?? "text"}
             value={values[field.key] ?? ""}
             onChange={(e) => onChange(field.key, e.target.value)}
@@ -551,6 +606,32 @@ function StepWebhookMode({ platform }: { platform: Platform }) {
   );
 }
 
+function StepTelegramMode({ mode }: { mode: TelegramIngestionMode }) {
+  const isPolling = mode === "polling";
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground mb-1">
+          {isPolling ? "Polling enabled" : "Webhook ingestion selected"}
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          {isPolling
+            ? "Atlas will call Telegram Bot API getUpdates on a schedule, so this works without a public domain."
+            : "Configure Telegram setWebhook with this deployment's public HTTPS bridge URL and the secret token you entered."}
+        </p>
+      </div>
+      <div className="flex items-start gap-2 rounded-lg bg-primary/5 border border-primary/20 px-3 py-2.5">
+        <Zap className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+        <p className="text-xs text-muted-foreground">
+          {isPolling
+            ? "If this bot already has a Telegram webhook set, delete the webhook before polling starts. New chats appear after the bot receives messages."
+            : "Webhook mode requires a stable HTTPS endpoint. Polling remains available for local installs and private networks."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function StepConfirmation({
   connection,
   selectedChannels,
@@ -576,6 +657,12 @@ function StepConfirmation({
           <span className="text-muted-foreground">Platform</span>
           <span className="font-medium text-foreground capitalize">{connection.platform}</span>
         </div>
+        {connection.platform === "telegram" && connection.ingestion_mode && (
+          <div className="px-4 py-3 flex justify-between text-sm">
+            <span className="text-muted-foreground">Live mode</span>
+            <span className="font-medium text-foreground capitalize">{connection.ingestion_mode}</span>
+          </div>
+        )}
         {connection.display_name && (
           <div className="px-4 py-3 flex justify-between text-sm">
             <span className="text-muted-foreground">Name</span>

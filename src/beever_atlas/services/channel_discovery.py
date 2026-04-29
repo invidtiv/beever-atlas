@@ -94,6 +94,42 @@ async def fetch_file_connection_channels(
     ]
 
 
+async def fetch_telegram_connection_channels(
+    conn_id: str,
+    selected: list[str],
+) -> list[ChannelInfo]:
+    """Return Telegram chats observed through polling/webhook source messages."""
+    stores = get_stores()
+    try:
+        from beever_atlas.services.source_messages import SourceMessageStore
+
+        channels = await SourceMessageStore(stores.mongodb.db["source_messages"]).list_channels(
+            conn_id
+        )
+    except Exception:
+        logger.debug("telegram source-message channel discovery failed", exc_info=True)
+        channels = []
+
+    by_id = {ch.channel_id: ch for ch in channels}
+    if selected:
+        out: list[ChannelInfo] = []
+        for cid in selected:
+            out.append(
+                by_id.get(
+                    cid,
+                    ChannelInfo(
+                        channel_id=cid,
+                        name=cid,
+                        platform="telegram",
+                        is_member=True,
+                        connection_id=conn_id,
+                    ),
+                )
+            )
+        return out
+    return channels
+
+
 async def fetch_connection_channels(
     conn_id: str,
     selected: list[str],
@@ -120,6 +156,8 @@ async def fetch_connection_channels(
     """
     if platform == "file":
         return await fetch_file_connection_channels(conn_id, selected)
+    if platform == "telegram":
+        return await fetch_telegram_connection_channels(conn_id, selected)
 
     cached = _channel_cache.get(conn_id)
     if cached:
@@ -188,6 +226,7 @@ async def fetch_connection_channels_safe(
 __all__ = [
     "make_bridge_adapter",
     "fetch_file_connection_channels",
+    "fetch_telegram_connection_channels",
     "fetch_connection_channels",
     "fetch_connection_channels_safe",
 ]

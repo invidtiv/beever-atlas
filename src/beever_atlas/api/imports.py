@@ -262,6 +262,28 @@ async def _ensure_file_connection(
     return conn.id
 
 
+async def _ensure_telegram_import_connection(
+    display_name: str,
+    owner_principal_id: str | None = None,
+) -> str:
+    """Return a Telegram import connection, creating one when needed."""
+    stores = get_stores()
+    existing = await stores.platform.list_connections()
+    for conn in existing:
+        if conn.platform == "telegram" and conn.display_name == display_name:
+            return conn.id
+    conn = await stores.platform.create_connection(
+        platform="telegram",
+        display_name=display_name,
+        credentials={"import_only": "true"},
+        status="connected",
+        source="ui",
+        owner_principal_id=owner_principal_id,
+    )
+    logger.info("imports: created platform=telegram import connection id=%s", conn.id)
+    return conn.id
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -447,7 +469,9 @@ async def commit_import(
     if errors:
         raise HTTPException(status_code=422, detail={"mapping_errors": errors})
 
-    channel_id = body.channel_id or f"file-{uuid.uuid4()}"
+    # Telegram Desktop JSON embeds a stable chat id; let the parser derive the
+    # channel id unless the user explicitly supplied one.
+    default_channel_id = body.channel_id or ("" if meta.get("format") == "json" else f"file-{uuid.uuid4()}")
     channel_name = body.channel_name or Path(meta["filename"]).stem
 
     settings = get_settings()
@@ -458,7 +482,7 @@ async def commit_import(
         skip_deleted=body.skip_deleted,
         dayfirst=body.dayfirst,
         default_platform="file",
-        default_channel_id=channel_id,
+        default_channel_id=default_channel_id,
         default_channel_name=channel_name,
         max_rows=max_rows,
     )
@@ -475,9 +499,19 @@ async def commit_import(
         )
 
     stores = get_stores()
-    connection_id = await _ensure_file_connection(
-        "File Imports",
-        owner_principal_id=caller_pid,
+    is_telegram_export = messages[0].platform == "telegram"
+    channel_id = body.channel_id or messages[0].channel_id
+    channel_name = body.channel_name or messages[0].channel_name
+    connection_id = (
+        await _ensure_telegram_import_connection(
+            "Telegram Imports",
+            owner_principal_id=caller_pid,
+        )
+        if is_telegram_export
+        else await _ensure_file_connection(
+            "File Imports",
+            owner_principal_id=caller_pid,
+        )
     )
 
     # RES-177 H1 + M6 (review fix): check access BEFORE mutating the file
@@ -488,8 +522,8 @@ async def commit_import(
     # caller that had just written themselves into selected_channels.
     await assert_channel_access(principal, channel_id)
 
-    # Tie this channel to the file connection so the sidebar groups it under
-    # "File Imports" instead of treating it as orphaned.
+    # Tie this channel to its connection so the sidebar groups it under the
+    # right platform instead of treating it as orphaned.
     file_conn = await stores.platform.get_connection(connection_id)
     if file_conn is not None and channel_id not in file_conn.selected_channels:
         await stores.platform.update_connection(
@@ -497,34 +531,40 @@ async def commit_import(
             selected_channels=list(file_conn.selected_channels) + [channel_id],
         )
 
-    # Persist raw messages so the Messages tab can render them. Platform
-    # channels re-fetch from the bridge, but file channels have no upstream —
-    # we keep a copy in the imported_messages collection keyed by channel_id.
-    docs = [
-        {
-            "channel_id": channel_id,
-            "message_id": m.message_id,
-            "content": m.content,
-            "author": m.author,
-            "author_name": m.author_name,
-            "author_image": m.author_image,
-            "platform": "file",
-            "channel_name": channel_name,
-            "timestamp": m.timestamp,
-            "timestamp_iso": m.timestamp.isoformat(),
-            "thread_id": m.thread_id,
-            "attachments": m.attachments,
-            "reactions": m.reactions,
-            "reply_count": m.reply_count,
-        }
-        for m in messages
-    ]
-    await stores.mongodb.db["imported_messages"].delete_many({"channel_id": channel_id})
-    if docs:
-        await stores.mongodb.db["imported_messages"].insert_many(docs)
-    await stores.mongodb.db["imported_messages"].create_index(
-        [("channel_id", 1), ("timestamp", -1)]
-    )
+    if is_telegram_export:
+        from beever_atlas.services.source_messages import SourceMessageStore
+
+        source_store = SourceMessageStore(stores.mongodb.db["source_messages"])
+        await source_store.upsert_messages(connection_id, messages, source="telegram_export")
+    else:
+        # Persist raw messages so the Messages tab can render them. Platform
+        # channels re-fetch from the bridge, but file channels have no upstream —
+        # we keep a copy in the imported_messages collection keyed by channel_id.
+        docs = [
+            {
+                "channel_id": channel_id,
+                "message_id": m.message_id,
+                "content": m.content,
+                "author": m.author,
+                "author_name": m.author_name,
+                "author_image": m.author_image,
+                "platform": "file",
+                "channel_name": channel_name,
+                "timestamp": m.timestamp,
+                "timestamp_iso": m.timestamp.isoformat(),
+                "thread_id": m.thread_id,
+                "attachments": m.attachments,
+                "reactions": m.reactions,
+                "reply_count": m.reply_count,
+            }
+            for m in messages
+        ]
+        await stores.mongodb.db["imported_messages"].delete_many({"channel_id": channel_id})
+        if docs:
+            await stores.mongodb.db["imported_messages"].insert_many(docs)
+        await stores.mongodb.db["imported_messages"].create_index(
+            [("channel_id", 1), ("timestamp", -1)]
+        )
 
     # Log the channel's display name up front so get_channel_display_name
     # resolves correctly even before ingestion finishes.
@@ -536,7 +576,7 @@ async def commit_import(
             "connection_id": connection_id,
             "file_id": body.file_id,
             "total_messages": len(messages),
-            "source": "file_import",
+            "source": "telegram_export" if is_telegram_export else "file_import",
         },
     )
 

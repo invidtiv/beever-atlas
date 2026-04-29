@@ -92,9 +92,9 @@ export function FileImportWizard({ onClose, onComplete }: FileImportWizardProps)
   function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     const f = files[0];
-    const okExt = /\.(csv|tsv|jsonl|ndjson)$/i.test(f.name);
+    const okExt = /\.(csv|tsv|jsonl|ndjson|json)$/i.test(f.name);
     if (!okExt) {
-      setErrorMsg("Unsupported file type. Use .csv, .tsv, or .jsonl.");
+      setErrorMsg("Unsupported file type. Use .csv, .tsv, .jsonl, .ndjson, or .json.");
       return;
     }
     void runPreview(f);
@@ -123,7 +123,9 @@ export function FileImportWizard({ onClose, onComplete }: FileImportWizardProps)
     if (!previewResp) return null;
     const label =
       previewResp.preset
-        ? `Preset: ${previewResp.preset}`
+        ? previewResp.detected_source === "telegram_export"
+          ? "Telegram JSON export"
+          : `Preset: ${previewResp.preset}`
         : previewResp.mapping_source === "llm"
           ? "AI-inferred"
           : previewResp.mapping_source === "fuzzy"
@@ -154,7 +156,7 @@ export function FileImportWizard({ onClose, onComplete }: FileImportWizardProps)
             <div>
               <h2 className="text-base font-semibold text-foreground">Import from file</h2>
               <p className="text-xs text-muted-foreground">
-                Upload a CSV / TSV / JSONL export and ingest it as a channel.
+                Upload a CSV, TSV, JSONL, or Telegram JSON export and ingest it as a channel.
               </p>
             </div>
           </div>
@@ -196,12 +198,12 @@ export function FileImportWizard({ onClose, onComplete }: FileImportWizardProps)
                   Drag a file here, or click to browse
                 </p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  .csv, .tsv, .jsonl — up to ~100k rows
+                  .csv, .tsv, .jsonl, .json — up to ~100k rows
                 </p>
                 <input
                   ref={inputRef}
                   type="file"
-                  accept=".csv,.tsv,.jsonl,.ndjson,text/csv,text/tab-separated-values"
+                  accept=".csv,.tsv,.jsonl,.ndjson,.json,text/csv,text/tab-separated-values,application/json"
                   className="hidden"
                   onChange={(e) => handleFiles(e.target.files)}
                 />

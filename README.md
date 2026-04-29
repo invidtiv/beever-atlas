@@ -14,7 +14,7 @@
 </div>
 
 <h3 align="center">
-  Turn your team's Slack, Discord, Teams &amp; Mattermost chats<br>
+  Turn your team's Slack, Discord, Teams, Telegram &amp; Mattermost chats<br>
   into a self-maintaining wiki — automatically.
 </h3>
 
@@ -33,7 +33,7 @@
 
 ---
 
-Beever Atlas pulls the conversations your team already has on Slack, Discord, Microsoft Teams, and Mattermost, extracts atomic facts, deduplicates them, and clusters them into topic pages with citations. A graph store links the people, decisions, and projects mentioned across channels. Ask questions in natural language and get answers cited back to the source messages — through the dashboard, or through MCP into Claude Code and Cursor.
+Beever Atlas pulls the conversations your team already has on Slack, Discord, Microsoft Teams, Telegram, and Mattermost, extracts atomic facts, deduplicates them, and clusters them into topic pages with citations. A graph store links the people, decisions, and projects mentioned across channels. Ask questions in natural language and get answers cited back to the source messages — through the dashboard, or through MCP into Claude Code and Cursor.
 
 If you want a knowledge base that grows on its own from the chats your team already has, this is it.
 
@@ -48,7 +48,7 @@ Six short clips — connect a workspace, sync history, watch memory build, brows
     <td width="33%" align="center" valign="top">
       <strong>Multi-Platform</strong><br><br>
       <img src="assets/clips/multi-platform.gif" alt="Multi-platform connections demo" width="100%"><br>
-      Connect Slack, Discord, Teams, Mattermost, or file imports. One bot, every workspace.
+      Connect Slack, Discord, Teams, Telegram, Mattermost, or file imports. One bot, every workspace.
     </td>
     <td width="33%" align="center" valign="top">
       <strong>Message Sync</strong><br><br>

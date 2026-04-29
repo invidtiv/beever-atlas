@@ -32,6 +32,7 @@ class CreateConnectionRequest(BaseModel):
     platform: str
     display_name: str = ""
     credentials: dict[str, str]
+    ingestion_mode: str | None = None
 
 
 class UpdateChannelsRequest(BaseModel):
@@ -48,6 +49,7 @@ class ConnectionResponse(BaseModel):
     status: str
     error_message: str | None
     source: str
+    ingestion_mode: str | None = None
     created_at: str
     updated_at: str
 
@@ -74,6 +76,7 @@ def _to_response(conn) -> ConnectionResponse:
         status=conn.status,
         error_message=conn.error_message,
         source=conn.source,
+        ingestion_mode=getattr(conn, "ingestion_mode", None),
         created_at=conn.created_at.isoformat(),
         updated_at=conn.updated_at.isoformat(),
     )
@@ -344,6 +347,7 @@ async def create_connection(
         source="ui",
         connection_id=connection_id,
         owner_principal_id=owner_id,
+        ingestion_mode=body.ingestion_mode,
     )
 
     logger.info("Created platform connection id=%s platform=%s", conn.id, conn.platform)
@@ -478,3 +482,20 @@ async def _trigger_sync_for_channels(
             logger.debug("Sync already running for channel %s, skipping", channel_id)
         except Exception as e:
             logger.warning("Failed to trigger sync for channel %s: %s", channel_id, e)
+
+
+@internal_router.post("/api/internal/telegram/{connection_id}/updates")
+async def ingest_telegram_update(connection_id: str, update: dict[str, Any]) -> dict[str, Any]:
+    """Internal bridge endpoint that persists Telegram webhook updates."""
+    stores = get_stores()
+    conn = await stores.platform.get_connection(connection_id)
+    if conn is None or conn.platform != "telegram":
+        raise HTTPException(status_code=404, detail=f"Telegram connection {connection_id!r} not found")
+
+    from beever_atlas.services.source_messages import SourceMessageStore
+    from beever_atlas.services.telegram_ingestion import TelegramUpdateIngestor
+
+    source_store = SourceMessageStore(stores.mongodb.db["source_messages"])
+    ingestor = TelegramUpdateIngestor(source_store=source_store, platform_store=stores.platform)
+    messages = await ingestor.ingest_update(connection_id, update, source="telegram_webhook")
+    return {"stored_updates": len(messages)}

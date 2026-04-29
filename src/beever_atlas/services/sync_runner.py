@@ -19,6 +19,7 @@ from beever_atlas.adapters import get_adapter
 from beever_atlas.adapters.bridge import ChatBridgeAdapter
 from beever_atlas.infra.config import get_settings
 from beever_atlas.services.batch_processor import BatchProcessor
+from beever_atlas.services.source_messages import SourceMessageStore
 from beever_atlas.stores import get_stores
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,15 @@ class SyncRunner:
             resolved_conn = await stores.platform.get_connection(resolved_connection_id)
             if resolved_conn is not None and resolved_conn.platform == "file":
                 return await self._start_file_sync(
+                    channel_id=channel_id,
+                    connection_id=resolved_connection_id,
+                    since=since,
+                    use_batch_api=use_batch_api,
+                    resolved_type=resolved_type,
+                    owner_principal_id=owner_principal_id,
+                )
+            if resolved_conn is not None and resolved_conn.platform == "telegram":
+                return await self._start_source_message_sync(
                     channel_id=channel_id,
                     connection_id=resolved_connection_id,
                     since=since,
@@ -578,6 +588,62 @@ class SyncRunner:
         )
         self._active_tasks[channel_id] = task
         _ = connection_id  # kept for symmetry with platform path
+        return job.id
+
+    async def _start_source_message_sync(
+        self,
+        channel_id: str,
+        connection_id: str,
+        since: datetime | str | None,
+        use_batch_api: bool,
+        resolved_type: str,
+        owner_principal_id: str | None = None,
+    ) -> str:
+        """Start a sync from the canonical local source-message collection."""
+        stores = get_stores()
+        settings = get_settings()
+        since_dt = _coerce_since_timestamp(since) if since else None
+
+        source_store = SourceMessageStore(stores.mongodb.db["source_messages"])
+        messages = await source_store.list_messages(
+            connection_id,
+            channel_id,
+            since=since_dt,
+            limit=settings.sync_max_messages,
+        )
+        parent_count = len(messages)
+        channel_name = messages[0].channel_name if messages else channel_id
+
+        logger.info(
+            "SyncRunner: source-message sync channel=%s connection=%s type=%s messages=%d",
+            channel_id,
+            connection_id,
+            resolved_type,
+            parent_count,
+        )
+
+        job = await stores.mongodb.create_sync_job(
+            channel_id=channel_id,
+            sync_type=resolved_type,
+            total_messages=len(messages),
+            parent_messages=parent_count,
+            batch_size=settings.sync_batch_size,
+            owner_principal_id=owner_principal_id,
+            kind="sync",
+        )
+
+        task = asyncio.create_task(
+            self._run_sync(
+                job_id=job.id,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                messages=messages,
+                parent_count=parent_count,
+                sync_type=resolved_type,
+                use_batch_api=use_batch_api,
+            )
+        )
+        self._active_tasks[channel_id] = task
         return job.id
 
     async def _run_sync(

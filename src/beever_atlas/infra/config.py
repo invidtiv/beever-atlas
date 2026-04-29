@@ -109,6 +109,10 @@ class Settings(BaseSettings):
     file_import_staging_ttl_seconds: int = Field(default=3600)
     file_import_max_rows: int = Field(default=100000)
 
+    # Telegram live ingestion
+    telegram_polling_enabled: bool = Field(default=True, alias="TELEGRAM_POLLING_ENABLED")
+    telegram_poll_interval_seconds: int = Field(default=30, alias="TELEGRAM_POLL_INTERVAL_SECONDS")
+
     # Coreference resolution
     coref_enabled: bool = Field(default=True)
     coref_history_limit: int = Field(default=20)

@@ -79,6 +79,38 @@ def test_preview_unknown_headers_needs_review(client: TestClient) -> None:
     assert body["needs_review"] is True
 
 
+def test_preview_telegram_json_export_detects_source(client: TestClient) -> None:
+    export = {
+        "name": "Atlas Test",
+        "type": "private_group",
+        "id": 1001,
+        "messages": [
+            {
+                "id": 1,
+                "type": "message",
+                "date_unixtime": "1777466400",
+                "from": "Ada",
+                "from_id": "user7",
+                "text": "hello telegram",
+            }
+        ],
+    }
+
+    resp = client.post(
+        "/api/imports/preview",
+        files={"file": ("result.json", __import__("json").dumps(export).encode("utf-8"), "application/json")},
+        data={"use_llm": "false"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["format"] == "json"
+    assert body["preset"] == "telegram_desktop_json"
+    assert body["detected_source"] == "telegram_export"
+    assert body["needs_review"] is False
+    assert body["sample_messages"][0]["content"] == "hello telegram"
+
+
 def test_preview_undecodable_file_returns_400(client: TestClient) -> None:
     bad_bytes = b"\x81\x00\x82\x00\x83\x00" * 200
     resp = client.post(

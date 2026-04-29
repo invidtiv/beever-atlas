@@ -6,6 +6,7 @@ import warnings
 warnings.filterwarnings("ignore", category=ResourceWarning, module=r"neo4j\..*")
 warnings.filterwarnings("ignore", category=ResourceWarning, module=r"aiohttp\..*")
 from contextlib import asynccontextmanager
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -156,6 +157,11 @@ async def lifespan(app: FastAPI):
     init_llm_provider(settings)
     await _migrate_env_connection(stores, settings)
 
+    from beever_atlas.services.source_messages import SourceMessageStore
+
+    source_store = SourceMessageStore(stores.mongodb.db["source_messages"])
+    await source_store.startup()
+
     # Start the sync scheduler
     from beever_atlas.services.scheduler import SyncScheduler, init_scheduler
 
@@ -174,6 +180,28 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logging.getLogger(__name__).warning("MCP registry init failed (non-fatal): %s", exc)
 
+    telegram_poll_task: asyncio.Task | None = None
+    if settings.telegram_polling_enabled:
+        from beever_atlas.services.telegram_ingestion import TelegramPollingService
+
+        async def _telegram_poll_loop() -> None:
+            poller = TelegramPollingService(
+                platform_store=stores.platform,
+                source_store=source_store,
+                state_collection=stores.mongodb.db["telegram_update_state"],
+            )
+            while True:
+                try:
+                    await poller.poll_once()
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Telegram polling pass failed: %s",
+                        exc,
+                    )
+                await asyncio.sleep(settings.telegram_poll_interval_seconds)
+
+        telegram_poll_task = asyncio.create_task(_telegram_poll_loop())
+
     try:
         # Chain FastMCP's lifespan so its StreamableHTTPSessionManager task
         # group starts before any request hits the mount. Without this chain,
@@ -188,6 +216,12 @@ async def lifespan(app: FastAPI):
             await scheduler.shutdown()
         except Exception as exc:
             logging.getLogger(__name__).debug("Scheduler shutdown failed: %s", exc, exc_info=False)
+        if telegram_poll_task is not None:
+            telegram_poll_task.cancel()
+            try:
+                await telegram_poll_task
+            except asyncio.CancelledError:
+                pass
         await shutdown_sync_runner()
         await close_adapter()
         await stores.shutdown()

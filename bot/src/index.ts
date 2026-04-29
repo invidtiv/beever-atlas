@@ -95,6 +95,10 @@ function backendApiKey(): string {
   return raw.split(",").map((k) => k.trim()).find(Boolean) || "";
 }
 
+function bridgeApiKey(): string {
+  return process.env.BRIDGE_API_KEY || "";
+}
+
 async function askBackend(channelId: string, question: string): Promise<AskResult> {
   const url = `${BACKEND_URL}/api/channels/${channelId}/ask`;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -548,7 +552,7 @@ async function handleConnectionWebhook(
       if (webRes.status < 400) {
         const platform = compositeKey.split(":", 1)[0];
         if (platform === "telegram") {
-          recordTelegramChatFromUpdate(body, connectionId);
+          await recordTelegramChatFromUpdate(body, connectionId);
         } else if (platform === "teams") {
           recordTeamsConversationFromActivity(body, connectionId);
         }
@@ -629,7 +633,7 @@ async function handlePlatformWebhook(
         if (webRes.status < 400) {
           console.log(`Legacy ${platform} webhook handled by connection ${connectionId}`);
           if (platform === "telegram") {
-            recordTelegramChatFromUpdate(body, connectionId);
+            await recordTelegramChatFromUpdate(body, connectionId);
           } else if (platform === "teams") {
             recordTeamsConversationFromActivity(body, connectionId);
           }
@@ -671,7 +675,7 @@ async function handlePlatformWebhook(
  * ("no native way to discover channels or groups the bot inhabits"), so this is
  * the only way a group becomes visible in the UI's channel list.
  */
-function recordTelegramChatFromUpdate(body: string, connectionId: string): void {
+async function recordTelegramChatFromUpdate(body: string, connectionId: string): Promise<void> {
   try {
     const update = JSON.parse(body);
     const candidates = [
@@ -687,8 +691,29 @@ function recordTelegramChatFromUpdate(body: string, connectionId: string): void 
     for (const evt of candidates) {
       if (evt?.chat) recordTelegramChat(connectionId, evt.chat);
     }
+    await forwardTelegramUpdateToBackend(connectionId, update);
   } catch {
     // malformed body — ignore; the SDK's handler will surface its own error
+  }
+}
+
+async function forwardTelegramUpdateToBackend(connectionId: string, update: unknown): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const apiKey = bridgeApiKey();
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/internal/telegram/${connectionId}/updates`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(update),
+    });
+    if (!response.ok) {
+      console.warn(
+        `Telegram webhook persistence failed for ${connectionId}: ${response.status} ${await response.text()}`,
+      );
+    }
+  } catch (err) {
+    console.warn(`Telegram webhook persistence failed for ${connectionId}:`, err);
   }
 }
 

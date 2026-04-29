@@ -14,6 +14,20 @@ Document import lets you add external knowledge to your Beever Atlas instance. I
 | **TXT** | Plain text | 20 MB |
 | **MD** | Markdown | 20 MB |
 | **DOCX** | Microsoft Word | 20 MB |
+| **Telegram JSON** | Telegram Desktop `result.json` chat export | 200 MB |
+
+## Telegram Desktop JSON Exports
+
+Telegram historical ingestion uses Telegram Desktop exports, not the Bot API. A Telegram bot can receive new updates after it is added to a chat, but it cannot request arbitrary old chat history. Telegram also keeps pending bot updates only for a limited window.
+
+To import old Telegram messages:
+
+1. In Telegram Desktop, export the chat history as machine-readable JSON.
+2. Upload the generated `result.json` in the file import wizard.
+3. Atlas detects the Telegram export shape, skips manual column mapping when confidence is high, and stores the messages with `platform="telegram"`.
+4. Sync the imported Telegram channel from the dashboard when ready.
+
+Local media paths from the export are stored as metadata only. Uploading the exported media directory is a separate workflow and is not required for text ingestion.
 
 <Steps>
 ### Step 1: Prepare your documents

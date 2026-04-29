@@ -29,7 +29,6 @@ from beever_atlas.services.file_importer import (
     fuzzy_match,
     overall_fuzzy_confidence,
     preview_file,
-    read_headers_and_samples,
     validate_mapping,
 )
 
@@ -139,6 +138,8 @@ async def infer_mapping(
             confidence=preview.confidence,
             overall_confidence=preview.overall_confidence,
             needs_review=False,
+            notes=preview.notes,
+            detected_source=preview.detected_source,
         )
 
     fuzzy_map = preview.mapping
@@ -209,7 +210,8 @@ def _llm_overall(conf: dict[str, float]) -> float:
 # Convenience sync entry point used by CLI scripts that don't want async.
 def infer_mapping_deterministic(path: Path) -> MappingResult:
     """Preset + fuzzy only, no LLM. Always safe to call from sync code."""
-    headers, _samples, _fmt = read_headers_and_samples(path)
+    preview = preview_file(path)
+    headers = preview.headers
     preset = detect_preset(headers)
     if preset is not None:
         return MappingResult(
@@ -219,6 +221,8 @@ def infer_mapping_deterministic(path: Path) -> MappingResult:
             confidence={"content": 1.0, "author_name": 1.0, "timestamp": 1.0},
             overall_confidence=1.0,
             needs_review=False,
+            notes=preview.notes,
+            detected_source=preview.detected_source,
         )
     mapping, conf = fuzzy_match(headers)
     overall = overall_fuzzy_confidence(conf)

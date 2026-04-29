@@ -89,6 +89,7 @@ class PlatformStore:
         source: str = "ui",
         connection_id: str | None = None,
         owner_principal_id: str | None = None,
+        ingestion_mode: str | None = None,
     ) -> PlatformConnection:
         """Encrypt credentials and persist a new PlatformConnection.
 
@@ -107,6 +108,7 @@ class PlatformStore:
             status=status,  # type: ignore[arg-type]
             source=source,  # type: ignore[arg-type]
             owner_principal_id=owner_principal_id,
+            ingestion_mode=ingestion_mode,  # type: ignore[arg-type]
         )
         if connection_id:
             kwargs["id"] = connection_id
@@ -143,6 +145,7 @@ class PlatformStore:
         error_message: str | None = None,
         selected_channels: list[str] | None = None,
         credentials: dict | None = None,
+        ingestion_mode: str | None = None,
     ) -> PlatformConnection | None:
         """Partially update a connection. Returns the updated doc or None."""
         updates: dict[str, Any] = {"updated_at": datetime.now(tz=UTC)}
@@ -158,6 +161,8 @@ class PlatformStore:
             updates["encrypted_credentials"] = ciphertext
             updates["credential_iv"] = iv
             updates["credential_tag"] = tag
+        if ingestion_mode is not None:
+            updates["ingestion_mode"] = ingestion_mode
 
         result = await self._col.find_one_and_update(
             {"id": connection_id},

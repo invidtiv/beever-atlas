@@ -9,6 +9,8 @@ import pytest
 
 from beever_atlas.services import sync_runner as sync_runner_module
 from beever_atlas.services.batch_processor import BatchResult
+from beever_atlas.adapters.base import NormalizedMessage
+from beever_atlas.models.platform_connection import PlatformConnection
 
 
 @dataclass
@@ -297,3 +299,123 @@ def test_has_active_sync_returns_false_for_done_task() -> None:
         assert runner.has_active_sync("C123") is False
 
     asyncio.run(_run())
+
+
+@pytest.mark.asyncio
+async def test_start_sync_reads_telegram_messages_from_source_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+    telegram_conn = PlatformConnection(
+        id="conn-telegram",
+        platform="telegram",
+        display_name="Telegram",
+        encrypted_credentials=b"ciphertext",
+        credential_iv=b"iv_12_bytes_",
+        credential_tag=b"tag_16_bytes____",
+        selected_channels=["-1001"],
+    )
+    source_messages = [
+        NormalizedMessage(
+            content="hello telegram",
+            author="7",
+            author_name="Ada",
+            platform="telegram",
+            channel_id="-1001",
+            channel_name="Atlas Test",
+            message_id="42",
+            timestamp=datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+        )
+    ]
+
+    class _Mongo:
+        class _EmptyCollection:
+            def find(self, *args, **kwargs):
+                return self
+
+            async def to_list(self, length=None):
+                return []
+
+        db = {"source_messages": object(), "sync_jobs": _EmptyCollection()}
+
+        async def get_sync_status(self, channel_id: str):
+            return None
+
+        async def get_channel_sync_state(self, channel_id: str):
+            return None
+
+        async def create_sync_job(
+            self,
+            channel_id: str,
+            sync_type: str,
+            total_messages: int,
+            batch_size: int,
+            parent_messages: int = 0,
+            **kwargs,
+        ):
+            calls["create_sync_job"] = {
+                "channel_id": channel_id,
+                "sync_type": sync_type,
+                "total_messages": total_messages,
+                "parent_messages": parent_messages,
+                "batch_size": batch_size,
+                **kwargs,
+            }
+            return SimpleNamespace(id="job-telegram")
+
+    class _Platform:
+        async def get_connection(self, connection_id: str):
+            assert connection_id == "conn-telegram"
+            return telegram_conn
+
+    class _FakeSourceStore:
+        def __init__(self, collection):
+            calls["collection"] = collection
+
+        async def list_messages(self, connection_id: str, channel_id: str, since=None, limit=None):
+            calls["list_messages"] = {
+                "connection_id": connection_id,
+                "channel_id": channel_id,
+                "since": since,
+                "limit": limit,
+            }
+            return source_messages
+
+    stores = SimpleNamespace(mongodb=_Mongo(), platform=_Platform())
+    monkeypatch.setattr(sync_runner_module, "get_stores", lambda: stores)
+    monkeypatch.setattr(sync_runner_module, "SourceMessageStore", _FakeSourceStore, raising=False)
+    monkeypatch.setattr(
+        sync_runner_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sync_max_messages=100, sync_batch_size=50, stale_job_threshold_hours=2
+        ),
+    )
+
+    import beever_atlas.services.policy_resolver as _policy_mod
+
+    async def _fake_policy(channel_id):
+        return SimpleNamespace(sync=SimpleNamespace(max_messages=100), ingestion=SimpleNamespace())
+
+    monkeypatch.setattr(_policy_mod, "resolve_effective_policy", _fake_policy)
+
+    runner = sync_runner_module.SyncRunner()
+
+    async def _fake_run_sync(**kwargs):
+        calls["run_sync"] = kwargs
+
+    runner._run_sync = _fake_run_sync
+
+    job_id = await runner.start_sync("-1001", connection_id="conn-telegram")
+
+    assert job_id == "job-telegram"
+    assert calls["list_messages"] == {
+        "connection_id": "conn-telegram",
+        "channel_id": "-1001",
+        "since": None,
+        "limit": 100,
+    }
+    assert calls["create_sync_job"]["total_messages"] == 1
+    await runner._active_tasks["-1001"]
+    assert calls["run_sync"]["messages"] == source_messages
+    assert calls["run_sync"]["channel_name"] == "Atlas Test"

@@ -87,6 +87,11 @@ def test_detect_format_jsonl(tmp_path: Path) -> None:
     assert detect_format(p) == "jsonl"
 
 
+def test_detect_format_json(tmp_path: Path) -> None:
+    p = _write(tmp_path, "result.json", '{\n  "name": "Atlas Test",\n  "messages": []\n}\n')
+    assert detect_format(p) == "json"
+
+
 # ---------------------------------------------------------------------------
 # Fuzzy matching and presets
 # ---------------------------------------------------------------------------
@@ -189,6 +194,67 @@ def test_parse_jsonl(tmp_path: Path) -> None:
     messages = parse_file(p, mapping, ParseOptions())
     assert len(messages) == 2
     assert messages[0].content == "hi"
+
+
+def test_preview_and_parse_telegram_desktop_json_export(tmp_path: Path) -> None:
+    export = {
+        "name": "Atlas Test",
+        "type": "private_group",
+        "id": 1001,
+        "messages": [
+            {
+                "id": 1,
+                "type": "message",
+                "date": "2026-04-29T10:00:00",
+                "date_unixtime": "1777466400",
+                "from": "Ada",
+                "from_id": "user7",
+                "text": ["Hello ", {"type": "bold", "text": "world"}],
+            },
+            {
+                "id": 2,
+                "type": "service",
+                "date": "2026-04-29T10:01:00",
+                "actor": "Ada",
+                "action": "invite_members",
+                "text": "",
+            },
+            {
+                "id": 3,
+                "type": "message",
+                "date": "2026-04-29T10:02:00",
+                "from": "Grace",
+                "text": "",
+                "photo": "photos/photo_1.jpg",
+                "media_type": "photo",
+            },
+        ],
+    }
+    p = _write(tmp_path, "result.json", json.dumps(export))
+
+    preview = preview_file(p)
+    assert preview.preset == "telegram_desktop_json"
+    assert preview.detected_source == "telegram_export"
+    assert preview.needs_review is False
+
+    messages = parse_file(
+        p,
+        preview.mapping,
+        ParseOptions(
+            default_platform="telegram",
+            default_channel_id="telegram-export-1001",
+            default_channel_name="Atlas Test",
+        ),
+    )
+
+    assert [m.message_id for m in messages] == ["1001-1", "1001-3"]
+    assert messages[0].content == "Hello world"
+    assert messages[0].author == "user7"
+    assert messages[0].author_name == "Ada"
+    assert messages[0].timestamp == datetime.fromtimestamp(1777466400, tz=timezone.utc)
+    assert messages[1].attachments == [
+        {"type": "photo", "path": "photos/photo_1.jpg", "media_type": "photo"}
+    ]
 
 
 def test_parse_tsv(tmp_path: Path) -> None:

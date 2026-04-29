@@ -13,7 +13,17 @@ Beever Atlas is an enterprise knowledge base that ingests messages from **multip
 | **Discord** | DiscordBridge | Production |
 | **Telegram** | TelegramBridge | Production |
 
-All platforms connect through a unified **Chat SDK bridge** (TypeScript bot service) that normalizes messages into a platform-agnostic `NormalizedMessage` format before they enter the Python ingestion pipeline.
+Most platforms connect through a unified **Chat SDK bridge** (TypeScript bot service) that normalizes messages into a platform-agnostic `NormalizedMessage` format before they enter the Python ingestion pipeline. Telegram live updates can arrive through either backend Bot API polling or bridge webhooks; both paths persist raw updates into MongoDB first, then sync from that local source-message store.
+
+### Telegram Ingestion Modes
+
+Telegram has three ingestion paths:
+
+- **Bot API polling**: Atlas calls Telegram `getUpdates` on a schedule. This is the default for local/self-hosted installs and works without a registered domain or webhook URL.
+- **Webhooks**: Telegram sends HTTPS POST updates to the bot bridge when Atlas is deployed at a stable public HTTPS endpoint. The bridge forwards those updates to the backend for durable storage.
+- **Desktop JSON export**: historical messages are imported from Telegram Desktop `result.json` exports.
+
+Telegram Bot API does not fetch arbitrary historical chat history for bots. Bot ingestion starts from messages delivered after setup, and Telegram keeps pending bot updates only for a limited window. For group chats, privacy/admin settings affect which messages the bot can see. Polling and webhooks are mutually exclusive for one bot token; if a webhook is configured, `getUpdates` will not work until the webhook is removed.
 
 ## System Architecture
 

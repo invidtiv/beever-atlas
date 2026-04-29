@@ -125,11 +125,24 @@ def detect_encoding(path: Path, sample_bytes: int = 65536) -> str:
     )
 
 
+TELEGRAM_EXPORT_HEADERS = [
+    "_telegram_content",
+    "_telegram_author",
+    "_telegram_author_name",
+    "_telegram_timestamp",
+    "_telegram_message_id",
+    "_telegram_thread_id",
+    "_telegram_attachments",
+]
+
+
 def detect_format(path: Path) -> str:
-    """Return ``csv`` | ``tsv`` | ``jsonl`` based on extension + first-line sniff."""
+    """Return ``csv`` | ``tsv`` | ``jsonl`` | ``json`` based on extension + sniffing."""
     suffix = path.suffix.lower().lstrip(".")
     if suffix in ("jsonl", "ndjson"):
         return "jsonl"
+    if suffix == "json":
+        return "json"
     if suffix == "tsv":
         return "tsv"
     if suffix == "csv":
@@ -146,6 +159,8 @@ def detect_format(path: Path) -> str:
     first_line = next((ln for ln in text.splitlines() if ln.strip()), "")
     if first_line.startswith("{") and first_line.rstrip().endswith("}"):
         return "jsonl"
+    if first_line.startswith("{") or first_line.startswith("["):
+        return "json"
     if first_line.count("\t") > first_line.count(","):
         return "tsv"
     return "csv"
@@ -187,6 +202,13 @@ def read_headers_and_samples(
         headers = list(dict.fromkeys(k for s in samples for k in s.keys()))
         return headers, samples, fmt
 
+    if fmt == "json":
+        obj = _load_json(path, enc)
+        if _is_telegram_export(obj):
+            samples = _telegram_sample_rows(obj, sample_rows)
+            return TELEGRAM_EXPORT_HEADERS.copy(), samples, fmt
+        return [], [], fmt
+
     delimiter = "\t" if fmt == "tsv" else ","
     with path.open(encoding=enc, newline="") as f:
         reader = csv.DictReader(f, delimiter=delimiter)
@@ -221,6 +243,19 @@ class Preset:
 
 
 PRESETS: list[Preset] = [
+    Preset(
+        name="telegram_desktop_json",
+        headers=frozenset(TELEGRAM_EXPORT_HEADERS),
+        mapping=ColumnMapping(
+            content="_telegram_content",
+            author="_telegram_author",
+            author_name="_telegram_author_name",
+            timestamp="_telegram_timestamp",
+            message_id="_telegram_message_id",
+            thread_id="_telegram_thread_id",
+            attachments="_telegram_attachments",
+        ),
+    ),
     Preset(
         name="discord_chat_exporter",
         headers=frozenset({"AuthorID", "Author", "Date", "Content", "Attachments", "Reactions"}),
@@ -499,6 +534,140 @@ def _parse_reactions(raw: str) -> list[dict[str, Any]]:
     return out
 
 
+def _load_json(path: Path, encoding: str) -> Any:
+    with path.open(encoding=encoding) as f:
+        return json.load(f)
+
+
+def _is_telegram_export(obj: Any) -> bool:
+    return (
+        isinstance(obj, dict)
+        and isinstance(obj.get("messages"), list)
+        and ("name" in obj or "id" in obj)
+    )
+
+
+def _telegram_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or ""))
+        return "".join(parts)
+    return str(value)
+
+
+def _telegram_chat_id(obj: dict[str, Any]) -> str:
+    raw = obj.get("id")
+    return str(raw) if raw is not None else "unknown"
+
+
+def _telegram_attachments(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    media_type = msg.get("media_type")
+    if msg.get("photo"):
+        attachments.append(
+            {
+                "type": "photo",
+                "path": msg["photo"],
+                "media_type": media_type or "photo",
+            }
+        )
+    if msg.get("file"):
+        attachments.append(
+            {
+                "type": "file",
+                "path": msg["file"],
+                "media_type": media_type or "file",
+            }
+        )
+    return attachments
+
+
+def _telegram_sample_rows(obj: dict[str, Any], sample_rows: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for msg in obj.get("messages", []):
+        if len(rows) >= sample_rows:
+            break
+        if not isinstance(msg, dict) or msg.get("type") != "message":
+            continue
+        rows.append(
+            {
+                "_telegram_content": _telegram_text(msg.get("text") or msg.get("caption")),
+                "_telegram_author": str(msg.get("from_id") or msg.get("from") or ""),
+                "_telegram_author_name": str(msg.get("from") or msg.get("from_id") or ""),
+                "_telegram_timestamp": str(msg.get("date_unixtime") or msg.get("date") or ""),
+                "_telegram_message_id": str(msg.get("id") or ""),
+                "_telegram_thread_id": str(msg.get("reply_to_message_id") or ""),
+                "_telegram_attachments": json.dumps(_telegram_attachments(msg), ensure_ascii=False),
+            }
+        )
+    return rows
+
+
+def _parse_telegram_export(
+    path: Path,
+    obj: dict[str, Any],
+    options: ParseOptions,
+) -> list[NormalizedMessage]:
+    chat_id = _telegram_chat_id(obj)
+    channel_id = options.default_channel_id or f"telegram-export-{chat_id}"
+    channel_name = options.default_channel_name or str(obj.get("name") or path.stem)
+
+    messages: list[NormalizedMessage] = []
+    for idx, msg in enumerate(obj.get("messages", [])):
+        if options.max_rows and len(messages) >= options.max_rows:
+            break
+        if not isinstance(msg, dict):
+            continue
+        if options.skip_system and msg.get("type") != "message":
+            continue
+
+        content = _telegram_text(msg.get("text") or msg.get("caption")).strip()
+        attachments = _telegram_attachments(msg)
+        if options.skip_empty and not content and not attachments:
+            continue
+        if _should_skip(content, options) and not attachments:
+            continue
+
+        author_name = str(msg.get("from") or msg.get("actor") or msg.get("from_id") or "unknown")
+        author = str(msg.get("from_id") or author_name or "unknown")
+        timestamp = _parse_timestamp(str(msg.get("date_unixtime") or msg.get("date") or ""))
+        message_id = f"{chat_id}-{msg.get('id')}" if msg.get("id") is not None else str(uuid.uuid4())
+        thread_id = msg.get("reply_to_message_id")
+
+        messages.append(
+            NormalizedMessage(
+                content=content,
+                author=author,
+                platform=options.default_platform,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                message_id=message_id,
+                timestamp=timestamp,
+                thread_id=str(thread_id) if thread_id is not None else None,
+                attachments=attachments,
+                reactions=[],
+                reply_count=0,
+                raw_metadata={
+                    "source": "telegram_export",
+                    "row_index": idx,
+                    "telegram_export_id": chat_id,
+                    "raw": msg,
+                },
+                author_name=author_name,
+                author_image="",
+            )
+        )
+    return messages
+
+
 def _should_skip(content: str, options: ParseOptions) -> bool:
     if options.skip_empty and not content:
         return True
@@ -548,6 +717,13 @@ def parse_file(
     fmt = detect_format(path)
     channel_id = opts.default_channel_id or path.stem
     channel_name = opts.default_channel_name or channel_id
+
+    if fmt == "json":
+        obj = _load_json(path, enc)
+        if _is_telegram_export(obj):
+            if opts.default_platform == "file":
+                opts.default_platform = "telegram"
+            return _parse_telegram_export(path, obj, opts)
 
     messages: list[NormalizedMessage] = []
     for idx, row in enumerate(_iter_rows(path, fmt, enc)):
@@ -636,6 +812,8 @@ class PreviewResult:
     confidence: dict[str, float]
     overall_confidence: float
     needs_review: bool
+    detected_source: str | None = None
+    notes: str = ""
 
 
 def preview_file(path: Path) -> PreviewResult:
@@ -644,6 +822,7 @@ def preview_file(path: Path) -> PreviewResult:
     headers, samples, fmt = read_headers_and_samples(path, encoding=enc)
     preset = detect_preset(headers)
     if preset is not None:
+        is_telegram = preset.name == "telegram_desktop_json"
         return PreviewResult(
             encoding=enc,
             format=fmt,
@@ -654,6 +833,13 @@ def preview_file(path: Path) -> PreviewResult:
             confidence={k: 1.0 for k in ("content", "author_name", "timestamp")},
             overall_confidence=1.0,
             needs_review=False,
+            detected_source="telegram_export" if is_telegram else None,
+            notes=(
+                "Detected Telegram Desktop JSON export; service messages are skipped by default "
+                "and local media paths are stored as metadata only."
+                if is_telegram
+                else ""
+            ),
         )
 
     mapping, conf = fuzzy_match(headers)

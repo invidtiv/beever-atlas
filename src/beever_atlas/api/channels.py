@@ -236,6 +236,51 @@ async def _fetch_file_messages(
     return MessagesListResponse(messages=messages, total_count=total)
 
 
+async def _fetch_source_messages(
+    connection_id: str,
+    channel_id: str,
+    limit: int,
+    since: str | None = None,
+    order: str = "desc",
+) -> "MessagesListResponse":
+    """Read persisted messages from the canonical source-message collection."""
+    from beever_atlas.services.source_messages import SourceMessageStore
+
+    stores = get_stores()
+    since_dt = datetime.fromisoformat(since.replace("Z", "+00:00")) if since else None
+    messages = await SourceMessageStore(stores.mongodb.db["source_messages"]).list_messages(
+        connection_id,
+        channel_id,
+        since=since_dt,
+        limit=limit,
+    )
+    if order == "desc":
+        messages = list(reversed(messages))
+    return MessagesListResponse(
+        messages=[
+            MessageResponse(
+                content=m.content,
+                author=m.author,
+                author_name=m.author_name,
+                author_image=m.author_image or None,
+                platform=m.platform,
+                channel_id=m.channel_id,
+                channel_name=m.channel_name,
+                message_id=m.message_id,
+                timestamp=m.timestamp.isoformat(),
+                thread_id=m.thread_id,
+                attachments=m.attachments,
+                reactions=m.reactions,
+                reply_count=m.reply_count,
+                is_bot=m.raw_metadata.get("is_bot", False),
+                links=m.raw_metadata.get("links", []),
+            )
+            for m in messages
+        ],
+        total_count=None,
+    )
+
+
 @router.get("/api/channels", response_model=list[ChannelResponse])
 async def list_channels() -> list[ChannelResponse]:
     """List channels from all connected platform connections.
@@ -422,6 +467,28 @@ async def get_channel_messages(
     )
     if is_file_channel:
         return await _fetch_file_messages(channel_id, limit=limit, since=since, order=order)
+
+    telegram_conn = next(
+        (
+            c
+            for c in connections
+            if c.platform == "telegram"
+            and c.status == "connected"
+            and (
+                channel_id in c.selected_channels
+                or (connection_id is not None and connection_id == c.id)
+            )
+        ),
+        None,
+    )
+    if telegram_conn is not None:
+        return await _fetch_source_messages(
+            telegram_conn.id,
+            channel_id,
+            limit=limit,
+            since=since,
+            order=order,
+        )
 
     # CSV-imported channels have no live bridge connection — detect by ID format.
     # Real platform channels always have a recognisable ID (e.g. Slack C…, Discord snowflake).

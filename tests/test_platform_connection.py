@@ -95,6 +95,16 @@ class TestDefaultValues:
 
         assert conn2.selected_channels == []
 
+    def test_telegram_ingestion_mode_defaults_to_polling(self):
+        conn = _minimal_conn(platform="telegram")
+
+        assert conn.ingestion_mode == "polling"
+
+    def test_non_telegram_ingestion_mode_defaults_to_none(self):
+        conn = _minimal_conn(platform="slack")
+
+        assert conn.ingestion_mode is None
+
 
 class TestPlatformValidation:
     def test_slack_is_valid_platform(self):
@@ -116,6 +126,15 @@ class TestPlatformValidation:
         conn = _minimal_conn(platform="telegram")
 
         assert conn.platform == "telegram"
+
+    def test_telegram_webhook_ingestion_mode_is_valid(self):
+        conn = _minimal_conn(platform="telegram", ingestion_mode="webhook")
+
+        assert conn.ingestion_mode == "webhook"
+
+    def test_invalid_ingestion_mode_raises_validation_error(self):
+        with pytest.raises(ValidationError):
+            _minimal_conn(platform="telegram", ingestion_mode="websocket")
 
     def test_invalid_platform_raises_validation_error(self):
         with pytest.raises(ValidationError):
