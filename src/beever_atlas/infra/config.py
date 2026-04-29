@@ -384,6 +384,25 @@ class Settings(BaseSettings):
     # boot with True logs a loud warning so operators notice.
     allow_bridge_as_user: bool = Field(default=False, alias="BEEVER_ALLOW_BRIDGE_AS_USER")
 
+    # Issue #89 — HMAC-signed scoped tokens for browser-loader URLs.
+    # `LOADER_TOKEN_SECRET` is signed-token material distinct from the user
+    # API keys and the bridge key, so a leak of one credential type does
+    # not compromise the others. Empty in production WARNS (not fails)
+    # because raw-key fallback is still active during the migration window.
+    loader_token_secret: str = Field(default="", alias="LOADER_TOKEN_SECRET")
+    # Token TTL in seconds. 5 minutes is a conservative default chosen to
+    # keep the leak window short while still tolerating slow page loads.
+    loader_token_ttl: int = Field(default=300, alias="LOADER_TOKEN_TTL")
+    # During the migration window, `require_user_loader` falls back to
+    # legacy raw `?access_token=` matching when (a) no `?loader_token=` is
+    # present, or (b) the signed token verifies false. Flip to False in a
+    # follow-up PR after monitoring confirms zero `auth.loader_fallback_raw_key`
+    # log lines for the soak window.
+    loader_raw_key_fallback: bool = Field(
+        default=True,
+        alias="BEEVER_LOADER_RAW_KEY_FALLBACK",
+    )
+
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared
@@ -438,6 +457,20 @@ class Settings(BaseSettings):
             problems.append("BEEVER_API_KEYS is empty")
         if not (self.admin_token or "").strip():
             problems.append("BEEVER_ADMIN_TOKEN is empty")
+
+        # Issue #89 — `LOADER_TOKEN_SECRET` empty in production WARNS but
+        # does not fail. While `BEEVER_LOADER_RAW_KEY_FALLBACK=true` (the
+        # migration default), raw-key matching still authenticates loader
+        # requests, so an unset secret degrades signed-token issuance to
+        # a no-op rather than breaking image rendering. The follow-up PR
+        # that flips fallback to False will also harden this to fail.
+        if self.beever_env == "production" and not (self.loader_token_secret or "").strip():
+            logger.warning(
+                "config: LOADER_TOKEN_SECRET is empty in production — "
+                "signed-token issuance is disabled; loader endpoints will "
+                "rely on `?access_token=` raw-key fallback. Provision a "
+                "32+ byte secret to enable HMAC-signed loader tokens."
+            )
 
         if self.beever_env == "production" and problems:
             raise ValueError("Production config invalid: " + "; ".join(problems))

@@ -7,13 +7,24 @@ import { ChartBlock } from "./ChartBlock";
 import { CalloutBox } from "./CalloutBox";
 import { CitationLink } from "./CitationLink";
 import { buildLoaderUrl } from "@/lib/api";
+import { ProxiedImage } from "@/components/common/ProxiedImage";
 import type { WikiCitation } from "@/lib/types";
 
-function proxyUrl(url: string): string {
+/** Returns the route path needed to mint a signed loader token, or null
+ * if the URL is public (no proxy needed). */
+function proxyPathFor(url: string): string | null {
   if (url.includes("files.slack.com")) {
-    return buildLoaderUrl(`/api/files/proxy?url=${encodeURIComponent(url)}`);
+    return `/api/files/proxy?url=${encodeURIComponent(url)}`;
   }
-  return url;
+  return null;
+}
+
+/** Synchronous fallback (raw key) for `<a href>` / `<iframe src>` cases
+ * that cannot await an async mint. Issue #89 migration follow-up tracked
+ * separately. */
+function proxyUrl(url: string): string {
+  const p = proxyPathFor(url);
+  return p ? buildLoaderUrl(p) : url;
 }
 
 function detectMediaType(url: string, alt?: string): "image" | "pdf" | "video" | "link" {
@@ -154,9 +165,10 @@ function extractText(children: ReactNode): string {
   return "";
 }
 
-function WikiImage({ src, alt }: { src: string; alt: string }) {
+function WikiImage({ rawUrl, alt }: { rawUrl: string; alt: string }) {
   const [expanded, setExpanded] = useState(false);
   const [failed, setFailed] = useState(false);
+  const proxyPath = proxyPathFor(rawUrl);
 
   if (failed) {
     return (
@@ -167,15 +179,40 @@ function WikiImage({ src, alt }: { src: string; alt: string }) {
     );
   }
 
+  // Issue #89 — proxied (Slack file) images go through ProxiedImage for
+  // signed-token resolution; public images render directly.
+  const thumbnail = proxyPath ? (
+    <ProxiedImage
+      unproxiedUrl={rawUrl}
+      mediaPath={proxyPath}
+      alt={alt}
+      className="rounded-lg border border-border max-h-80 object-contain bg-muted/20"
+      onError={() => setFailed(true)}
+    />
+  ) : (
+    <img
+      src={rawUrl}
+      alt={alt}
+      className="rounded-lg border border-border max-h-80 object-contain bg-muted/20"
+      onError={() => setFailed(true)}
+    />
+  );
+
+  const expandedView = proxyPath ? (
+    <ProxiedImage
+      unproxiedUrl={rawUrl}
+      mediaPath={proxyPath}
+      alt={alt}
+      className="max-w-full max-h-[70vh] object-contain rounded-lg shadow-2xl"
+    />
+  ) : (
+    <img src={rawUrl} alt={alt} className="max-w-full max-h-[70vh] object-contain rounded-lg shadow-2xl" />
+  );
+
   return (
     <>
       <span className="block my-4 group cursor-pointer" onClick={() => setExpanded(true)}>
-        <img
-          src={src}
-          alt={alt}
-          className="rounded-lg border border-border max-h-80 object-contain bg-muted/20"
-          onError={() => setFailed(true)}
-        />
+        {thumbnail}
         <span className="flex items-center gap-1.5 mt-1.5 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
           <Maximize2 className="h-3 w-3" /> Click to enlarge
         </span>
@@ -186,7 +223,7 @@ function WikiImage({ src, alt }: { src: string; alt: string }) {
             <button onClick={() => setExpanded(false)} className="absolute -top-10 right-0 p-1.5 rounded-md text-muted-foreground hover:text-foreground transition-colors">
               <X className="h-4 w-4" />
             </button>
-            <img src={src} alt={alt} className="max-w-full max-h-[70vh] object-contain rounded-lg shadow-2xl" />
+            {expandedView}
             {alt && alt !== "Image" && (
               <span className="mt-3 text-xs text-muted-foreground text-center max-w-lg">{alt}</span>
             )}
@@ -318,8 +355,9 @@ export function WikiMarkdown({ content, citations = [], onNavigate: _onNavigate 
         },
         img({ src, alt }) {
           if (!src) return <span className="text-muted-foreground text-sm italic">[Image: {alt}]</span>;
-          const proxied = proxyUrl(src);
-          return <WikiImage src={proxied} alt={alt || "Image"} />;
+          // Pass the raw src; WikiImage decides whether to proxy via
+          // ProxiedImage (Slack files) or render directly.
+          return <WikiImage rawUrl={src} alt={alt || "Image"} />;
         },
         a({ href, children }) {
           if (!href) return <span>{children}</span>;

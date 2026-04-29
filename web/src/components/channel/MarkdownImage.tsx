@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { FileText, Image as ImageIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { isAuthGatedMediaUrl, mediaHostLabel, proxiedMediaUrl } from "@/lib/mediaUrl";
+import { isAuthGatedMediaUrl, mediaHostLabel, mediaProxyPathFor, proxiedMediaUrl } from "@/lib/mediaUrl";
+import { ProxiedImage } from "@/components/common/ProxiedImage";
 
 interface MarkdownImageProps {
   src?: string;
@@ -80,19 +81,32 @@ function ImageEmbed({ url, alt }: { url: string; alt?: string }) {
     );
   }
 
-  const imgSrc = proxiedMediaUrl(url) ?? url;
+  // Issue #89 — proxied images go through `<ProxiedImage>` (signed
+  // tokens with bounded onError retry). Public images render directly.
+  const proxyPath = mediaProxyPathFor(url);
+  const imgClassName = cn(
+    "max-h-80 rounded-md border border-border object-contain",
+    "hover:ring-2 hover:ring-primary/40 transition-all",
+  );
   return (
     <span className="block my-3">
       <a href={url} target="_blank" rel="noopener noreferrer">
-        <img
-          src={imgSrc}
-          alt={alt ?? ""}
-          onError={() => setErrored(true)}
-          className={cn(
-            "max-h-80 rounded-md border border-border object-contain",
-            "hover:ring-2 hover:ring-primary/40 transition-all",
-          )}
-        />
+        {proxyPath ? (
+          <ProxiedImage
+            unproxiedUrl={url}
+            mediaPath={proxyPath}
+            alt={alt ?? ""}
+            onError={() => setErrored(true)}
+            className={imgClassName}
+          />
+        ) : (
+          <img
+            src={url}
+            alt={alt ?? ""}
+            onError={() => setErrored(true)}
+            className={imgClassName}
+          />
+        )}
       </a>
       {alt ? (
         <span className="mt-1 block text-[11px] text-muted-foreground/70">

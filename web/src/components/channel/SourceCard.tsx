@@ -21,7 +21,8 @@ import type {
   SourceKind,
 } from "@/types/askTypes";
 import { DerivedFrom } from "./DerivedFrom";
-import { isAuthGatedMediaUrl, proxiedMediaUrl } from "@/lib/mediaUrl";
+import { isAuthGatedMediaUrl, mediaProxyPathFor } from "@/lib/mediaUrl";
+import { ProxiedImage } from "@/components/common/ProxiedImage";
 
 interface SourceCardProps {
   source: Source;
@@ -338,12 +339,30 @@ function ImageChip({ attachment }: { attachment: MediaAttachment }) {
       className="inline-block h-10 w-10 overflow-hidden rounded border border-border hover:border-primary/40 transition-colors"
       title={attachment.alt_text ?? attachment.title ?? "image"}
     >
-      <img
-        src={proxiedMediaUrl(attachment.thumbnail_url ?? attachment.url) ?? attachment.url}
-        alt={attachment.alt_text ?? "attachment"}
-        onError={() => setErrored(true)}
-        className="h-full w-full object-cover"
-      />
+      {(() => {
+        const candidate = attachment.thumbnail_url ?? attachment.url;
+        const proxyPath = mediaProxyPathFor(candidate);
+        const className = "h-full w-full object-cover";
+        const alt = attachment.alt_text ?? "attachment";
+        // Issue #89 — proxied (Slack file) attachments go through
+        // ProxiedImage; public images render directly.
+        return proxyPath ? (
+          <ProxiedImage
+            unproxiedUrl={candidate}
+            mediaPath={proxyPath}
+            alt={alt}
+            onError={() => setErrored(true)}
+            className={className}
+          />
+        ) : (
+          <img
+            src={candidate}
+            alt={alt}
+            onError={() => setErrored(true)}
+            className={className}
+          />
+        );
+      })()}
     </a>
   );
 }

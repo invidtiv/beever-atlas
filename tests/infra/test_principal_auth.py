@@ -174,9 +174,11 @@ def test_require_user_rejects_bridge_key_when_flag_off(monkeypatch):
 
 
 def test_query_string_user_auth_emits_audit_log(monkeypatch):
-    """Issue #88 — `require_user` no longer accepts query-string auth, so
-    the existing audit log lives on `require_user_loader` (the dep used by
-    the 3 surviving browser-loader endpoints)."""
+    """Issue #89 — when raw `?access_token=` falls through `require_user_loader`
+    (the migration-window fallback path), the audit log line is
+    `auth.loader_fallback_raw_key`. The old `auth.query_string_user` log
+    rotated to this name in #89 because the semantic shifted from
+    "query-string user auth" to "raw-key fallback exercised"."""
     _patch_settings(monkeypatch)
     calls: list[tuple[str, tuple]] = []
 
@@ -187,8 +189,11 @@ def test_query_string_user_auth_emits_audit_log(monkeypatch):
     client = TestClient(_build_loader_app())
     r = client.get("/loader-principal?access_token=user-key-aaaaaaaa")
     assert r.status_code == 200
-    audit_calls = [(m, a) for (m, a) in calls if "query_string_user" in m]
-    assert audit_calls, "expected audit log when user key sent via query string"
+    audit_calls = [(m, a) for (m, a) in calls if "loader_fallback_raw_key" in m]
+    assert audit_calls, (
+        f"expected `auth.loader_fallback_raw_key` audit log when raw "
+        f"?access_token= falls through; got {calls}"
+    )
     # The log must NOT carry the raw key material.
     for msg, args in audit_calls:
         rendered = msg % args if args else msg

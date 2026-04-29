@@ -1,5 +1,6 @@
 import { X, ExternalLink, FileText, Image as ImageIcon, Film, Link2 } from "lucide-react";
 import { buildLoaderUrl } from "@/lib/api";
+import { ProxiedImage } from "@/components/common/ProxiedImage";
 
 interface MediaModalProps {
   name: string;
@@ -9,9 +10,14 @@ interface MediaModalProps {
 }
 
 export function MediaModal({ name, url, mediaType, onClose }: MediaModalProps) {
-  const proxyUrl = buildLoaderUrl(`/api/files/proxy?url=${encodeURIComponent(url)}`);
+  // Issue #89 — `<img>` rendering goes through `ProxiedImage` (async,
+  // signed tokens). `<a href>` open-in-new-tab cases still use the
+  // synchronous `buildLoaderUrl` (raw key) because anchor URLs cannot
+  // await an async mint without click-time resolution; that migration
+  // is tracked as a follow-up.
   const isSlackFile = url.includes("files.slack.com");
-  const displayUrl = isSlackFile ? proxyUrl : url;
+  const proxyPath = `/api/files/proxy?url=${encodeURIComponent(url)}`;
+  const anchorHref = isSlackFile ? buildLoaderUrl(proxyPath) : url;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
@@ -44,16 +50,30 @@ export function MediaModal({ name, url, mediaType, onClose }: MediaModalProps) {
         <div className="p-5">
           {mediaType === "image" && (
             <div className="flex flex-col items-center gap-4">
-              <img
-                src={displayUrl}
-                alt={name}
-                className="max-h-96 w-full object-contain rounded-lg border border-border bg-muted/20"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = "none";
-                  const fallback = document.getElementById("media-modal-fallback");
-                  if (fallback) fallback.style.display = "block";
-                }}
-              />
+              {isSlackFile ? (
+                <ProxiedImage
+                  unproxiedUrl={url}
+                  mediaPath={proxyPath}
+                  alt={name}
+                  className="max-h-96 w-full object-contain rounded-lg border border-border bg-muted/20"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = "none";
+                    const fallback = document.getElementById("media-modal-fallback");
+                    if (fallback) fallback.style.display = "block";
+                  }}
+                />
+              ) : (
+                <img
+                  src={url}
+                  alt={name}
+                  className="max-h-96 w-full object-contain rounded-lg border border-border bg-muted/20"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = "none";
+                    const fallback = document.getElementById("media-modal-fallback");
+                    if (fallback) fallback.style.display = "block";
+                  }}
+                />
+              )}
               <p id="media-modal-fallback" className="text-sm text-muted-foreground hidden">
                 Failed to load image preview.
               </p>
@@ -67,7 +87,7 @@ export function MediaModal({ name, url, mediaType, onClose }: MediaModalProps) {
                 PDF document attached to this conversation.
               </p>
               <a
-                href={displayUrl}
+                href={anchorHref}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
@@ -103,7 +123,7 @@ export function MediaModal({ name, url, mediaType, onClose }: MediaModalProps) {
                 Video file attached to this conversation.
               </p>
               <a
-                href={displayUrl}
+                href={anchorHref}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
@@ -118,7 +138,7 @@ export function MediaModal({ name, url, mediaType, onClose }: MediaModalProps) {
             <div className="flex flex-col items-center gap-4 py-6">
               <FileText size={48} className="text-muted-foreground/40" />
               <a
-                href={displayUrl}
+                href={anchorHref}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"

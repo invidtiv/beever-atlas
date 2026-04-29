@@ -1703,10 +1703,14 @@ async def get_shared_conversation(
         if not doc or doc.get("revoked_at") is not None:
             return JSONResponse(status_code=404, content={"error": "Not found"})
 
-        # Resolve optional caller identity (no 401 on missing).
+        # Resolve optional caller identity (no 401 on missing). Issue #89 —
+        # the dep now also accepts `?loader_token=` (signed) which short-
+        # circuits before the legacy raw-key path.
         caller_principal = require_user_loader_optional(
+            request=request,
             authorization=request.headers.get("authorization"),
             access_token=request.query_params.get("access_token"),
+            loader_token=request.query_params.get("loader_token"),
         )
         caller_user_id = caller_principal.id if caller_principal is not None else None
 

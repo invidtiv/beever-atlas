@@ -2,7 +2,8 @@ import { useState } from "react";
 import { FileText, Film, Globe, Image as ImageIcon, Music } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { MediaAttachment, Source } from "@/types/askTypes";
-import { isAuthGatedMediaUrl, mediaHostLabel, proxiedMediaUrl } from "@/lib/mediaUrl";
+import { isAuthGatedMediaUrl, mediaHostLabel, mediaProxyPathFor } from "@/lib/mediaUrl";
+import { ProxiedImage } from "@/components/common/ProxiedImage";
 import { looksUnavailable } from "@/lib/citations";
 
 function safeLabel(raw: unknown, fallback: string): string {
@@ -175,19 +176,32 @@ function InlineImage({
     );
   }
 
-  const imgSrc = proxiedMediaUrl(attachment.url) ?? attachment.url;
+  // Issue #89 — proxied media goes through ProxiedImage; public URLs render directly.
+  const proxyPath = mediaProxyPathFor(attachment.url);
+  const imgClassName = cn(
+    "max-h-80 rounded-md border border-border object-contain",
+    "hover:ring-2 hover:ring-primary/40 transition-all",
+  );
+  const imgAlt = attachment.alt_text ?? source.title ?? "Source image";
   return (
     <span className="block my-3" onClick={onJumpToFooter}>
       <a href={openHref} target="_blank" rel="noopener noreferrer">
-        <img
-          src={imgSrc}
-          alt={attachment.alt_text ?? source.title ?? "Source image"}
-          onError={() => setErrored(true)}
-          className={cn(
-            "max-h-80 rounded-md border border-border object-contain",
-            "hover:ring-2 hover:ring-primary/40 transition-all",
-          )}
-        />
+        {proxyPath ? (
+          <ProxiedImage
+            unproxiedUrl={attachment.url}
+            mediaPath={proxyPath}
+            alt={imgAlt}
+            onError={() => setErrored(true)}
+            className={imgClassName}
+          />
+        ) : (
+          <img
+            src={attachment.url}
+            alt={imgAlt}
+            onError={() => setErrored(true)}
+            className={imgClassName}
+          />
+        )}
       </a>
       <span
         data-role="caption"
