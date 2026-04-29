@@ -151,8 +151,10 @@ def require_user(
     authorization: Optional[str] = Header(default=None),
     access_token: Optional[str] = Query(
         default=None,
-        description="Fallback auth for URLs consumed by browser loaders "
+        description="DEPRECATED on this dependency. Header-only — use "
+        "`require_user_loader` for endpoints consumed by browser loaders "
         "(<img src>, <a href>) that cannot carry custom headers.",
+        include_in_schema=False,
     ),
 ) -> Principal:
     """Validate Bearer token against configured user API keys.
@@ -162,10 +164,92 @@ def require_user(
     ``BEEVER_ALLOW_BRIDGE_AS_USER=true`` is set (security finding H4) —
     that flag also triggers a boot-time warning in `config.py`.
 
-    May be provided via ``Authorization: Bearer <token>`` (preferred) OR
-    ``?access_token=<token>`` for `<img src>` / `<a href>` URLs that
-    cannot set headers. Query-string hits are logged at INFO so operators
-    can audit.
+    Header-only: ``Authorization: Bearer <token>``. The legacy
+    ``?access_token=<token>`` query-string path is REJECTED here (issue
+    #88 — narrows the credential-leak surface). Endpoints consumed by
+    browser-native loaders (``<img src>``, ``<a href>``) MUST use
+    ``require_user_loader`` instead.
+    """
+    settings = get_settings()
+    keys = _parse_keys(settings.api_keys)
+    bridge_key = (settings.bridge_api_key or "").strip()
+    if not keys and not bridge_key:
+        raise _unauthorized("API authentication not configured")
+
+    # Surface misconfigured callers: if a request is RELYING on the
+    # query-string token (no header sent), log so operators can spot it.
+    # Dual-auth callers (header + query string) don't trip this — they're
+    # already presenting the header path.
+    if access_token and not authorization:
+        logger.info(
+            "auth.query_string_rejected path=require_user — "
+            "caller sent ?access_token= on a header-only endpoint"
+        )
+
+    token = _resolve_token(authorization, access_token, allow_query_string=False)
+    if not token:
+        raise _unauthorized("Missing or malformed Authorization header")
+
+    principal = _match_user_key(token, keys)
+    if principal is not None:
+        return principal
+
+    if settings.allow_bridge_as_user:
+        bridge_principal = _match_bridge_key(token, bridge_key)
+        if bridge_principal is not None:
+            return bridge_principal
+
+    raise _unauthorized("Invalid API key")
+
+
+def require_user_optional(
+    authorization: Optional[str] = Header(default=None),
+    access_token: Optional[str] = Query(default=None, include_in_schema=False),
+) -> Optional[Principal]:
+    """Like `require_user` but returns None instead of 401.
+
+    Header-only after issue #88. Endpoints whose auth is conditional AND
+    that need to support browser-native loaders (e.g. shared-link visits)
+    MUST use ``require_user_loader_optional`` instead.
+    """
+    settings = get_settings()
+    keys = _parse_keys(settings.api_keys)
+    bridge_key = (settings.bridge_api_key or "").strip()
+
+    if access_token and not authorization:
+        logger.info(
+            "auth.query_string_rejected path=require_user_optional — "
+            "caller sent ?access_token= on a header-only endpoint"
+        )
+
+    token = _resolve_token(authorization, access_token, allow_query_string=False)
+    if not token:
+        return None
+
+    principal = _match_user_key(token, keys)
+    if principal is not None:
+        return principal
+
+    if settings.allow_bridge_as_user:
+        return _match_bridge_key(token, bridge_key)
+    return None
+
+
+def require_user_loader(
+    authorization: Optional[str] = Header(default=None),
+    access_token: Optional[str] = Query(
+        default=None,
+        description="Fallback auth for URLs consumed by browser loaders "
+        "(<img src>, <a href>) that cannot carry custom headers.",
+    ),
+) -> Principal:
+    """Validate Bearer token; ALSO accept ``?access_token=`` query string.
+
+    Use ONLY on endpoints consumed by browser-native loaders (``<img src>``,
+    ``<a href>``) that cannot carry custom ``Authorization`` headers. All
+    other user-facing routes should use ``require_user`` (header-only).
+    Successful query-string authentications are logged at INFO so operators
+    can audit which loader endpoints are exercised via URL credentials.
     """
     settings = get_settings()
     keys = _parse_keys(settings.api_keys)
@@ -194,15 +278,16 @@ def require_user(
     raise _unauthorized("Invalid API key")
 
 
-def require_user_optional(
+def require_user_loader_optional(
     authorization: Optional[str] = Header(default=None),
     access_token: Optional[str] = Query(default=None),
 ) -> Optional[Principal]:
-    """Like `require_user` but returns None instead of 401.
+    """Like ``require_user_loader`` but returns None instead of 401.
 
-    Used by `/api/ask/shared/{token}` where auth is conditional on the
-    share's visibility tier. Subject to the same
-    ``BEEVER_ALLOW_BRIDGE_AS_USER`` gate as ``require_user``.
+    Accepts ``?access_token=`` for browser-native contexts (shared
+    conversation pages opened via link that may carry a query-string
+    token). The shared-link endpoint relies on this so anonymous visits
+    return None and authenticated visits resolve the calling principal.
     """
     settings = get_settings()
     keys = _parse_keys(settings.api_keys)

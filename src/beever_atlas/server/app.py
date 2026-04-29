@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from beever_atlas.infra.auth import require_bridge, require_user
+from beever_atlas.infra.auth import require_bridge, require_user, require_user_loader
 from beever_atlas.infra.loader_url_headers import LoaderUrlSecurityHeadersMiddleware
 
 from beever_atlas.adapters import close_adapter
@@ -42,7 +42,7 @@ from beever_atlas.api.config import router as config_router
 from beever_atlas.api.policies import router as policies_router
 from beever_atlas.api.models import router as models_router
 from beever_atlas.api.dev import router as dev_router
-from beever_atlas.api.media import router as media_router
+from beever_atlas.api.loaders import router as loader_router
 from beever_atlas.api.admin import router as admin_router
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
@@ -230,6 +230,11 @@ app.add_middleware(LoaderUrlSecurityHeadersMiddleware)
 
 # All routers require Bearer auth except /api/health (declared below) and MCP mount.
 _auth = [Depends(require_user)]
+# Issue #88 — dedicated auth dep for browser-native loader endpoints
+# (<img src>, <a href>) that cannot carry custom Authorization headers.
+# `require_user_loader` accepts ?access_token= AND header; `require_user`
+# is header-only. Only `loader_router` uses `_loader_auth`.
+_loader_auth = [Depends(require_user_loader)]
 app.include_router(ask_router, dependencies=_auth)
 # Public shared-conversation GET — auth handled inside the endpoint based on
 # the share's visibility tier (owner/auth/public). Must NOT inherit `_auth`.
@@ -255,7 +260,10 @@ if _settings.beever_env == "development":
 app.include_router(admin_router)
 app.include_router(wiki_router, dependencies=_auth)
 app.include_router(config_router, dependencies=_auth)
-app.include_router(media_router, dependencies=_auth)
+# Issue #88 — loader_router holds the 2 browser-native proxy endpoints
+# (/api/files/proxy, /api/media/proxy). Mounted with `_loader_auth` so
+# these are the ONLY non-public endpoints that accept `?access_token=`.
+app.include_router(loader_router, dependencies=_loader_auth)
 
 # Secure MCP mount (openspec change atlas-mcp-server). The ASGI app was
 # built at module-load time above so its lifespan could be chained into

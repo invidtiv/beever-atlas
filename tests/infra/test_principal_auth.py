@@ -8,12 +8,20 @@ flipped to False.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from beever_atlas.infra import auth as auth_mod
-from beever_atlas.infra.auth import Principal, require_bridge, require_user
+from beever_atlas.infra.auth import (
+    Principal,
+    require_bridge,
+    require_user,
+    require_user_loader,
+    require_user_loader_optional,
+)
 from beever_atlas.infra.config import Settings
 
 
@@ -46,6 +54,35 @@ def _build_app() -> FastAPI:
     @app.get("/user-principal")
     def user_principal(p: Principal = Depends(require_user)):
         return {"kind": p.kind, "id": p.id}
+
+    return app
+
+
+def _build_loader_app() -> FastAPI:
+    """A test app that mounts an endpoint with `require_user_loader`
+    (header OR ?access_token=)."""
+    app = FastAPI()
+
+    @app.get("/loader", dependencies=[Depends(require_user_loader)])
+    def loader_route():
+        return {"ok": True}
+
+    @app.get("/loader-principal")
+    def loader_principal(p: Principal = Depends(require_user_loader)):
+        return {"kind": p.kind, "id": p.id}
+
+    return app
+
+
+def _build_loader_optional_app() -> FastAPI:
+    """A test app whose endpoint uses `require_user_loader_optional` —
+    same auth surface as `require_user_loader` but returns None instead
+    of 401 when auth is missing or invalid."""
+    app = FastAPI()
+
+    @app.get("/loader-optional")
+    def loader_optional(p: Optional[Principal] = Depends(require_user_loader_optional)):
+        return {"principal": None if p is None else {"kind": p.kind, "id": p.id}}
 
     return app
 
@@ -137,6 +174,9 @@ def test_require_user_rejects_bridge_key_when_flag_off(monkeypatch):
 
 
 def test_query_string_user_auth_emits_audit_log(monkeypatch):
+    """Issue #88 — `require_user` no longer accepts query-string auth, so
+    the existing audit log lives on `require_user_loader` (the dep used by
+    the 3 surviving browser-loader endpoints)."""
     _patch_settings(monkeypatch)
     calls: list[tuple[str, tuple]] = []
 
@@ -144,8 +184,8 @@ def test_query_string_user_auth_emits_audit_log(monkeypatch):
         calls.append((msg, args))
 
     monkeypatch.setattr(auth_mod.logger, "info", fake_info)
-    client = TestClient(_build_app())
-    r = client.get("/user-principal?access_token=user-key-aaaaaaaa")
+    client = TestClient(_build_loader_app())
+    r = client.get("/loader-principal?access_token=user-key-aaaaaaaa")
     assert r.status_code == 200
     audit_calls = [(m, a) for (m, a) in calls if "query_string_user" in m]
     assert audit_calls, "expected audit log when user key sent via query string"
@@ -153,6 +193,132 @@ def test_query_string_user_auth_emits_audit_log(monkeypatch):
     for msg, args in audit_calls:
         rendered = msg % args if args else msg
         assert "user-key-aaaaaaaa" not in rendered
+
+
+# ── Issue #88: narrow ?access_token= surface to loader endpoints only ──
+
+
+def test_require_user_rejects_query_string_only(monkeypatch):
+    """`require_user` is header-only after #88. A request with only
+    `?access_token=` must be rejected even when the key is otherwise valid."""
+    _patch_settings(monkeypatch)
+    client = TestClient(_build_app())
+    r = client.get("/user?access_token=user-key-aaaaaaaa")
+    assert r.status_code == 401
+
+
+def test_require_user_still_accepts_header_auth(monkeypatch):
+    """Header auth is unchanged — only the query-string fallback was removed."""
+    _patch_settings(monkeypatch)
+    client = TestClient(_build_app())
+    r = client.get("/user", headers={"Authorization": "Bearer user-key-aaaaaaaa"})
+    assert r.status_code == 200
+
+
+def test_require_user_logs_rejected_query_string(monkeypatch):
+    """When `?access_token=` is the SOLE auth, log so operators see the
+    misconfigured caller."""
+    _patch_settings(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(auth_mod.logger, "info", lambda msg, *a, **kw: calls.append(msg))
+    client = TestClient(_build_app())
+    client.get("/user?access_token=user-key-aaaaaaaa")  # 401, but log fires
+    assert any("query_string_rejected" in c for c in calls), (
+        f"expected auth.query_string_rejected log; got {calls}"
+    )
+
+
+def test_require_user_does_not_log_when_dual_auth(monkeypatch):
+    """Caller presenting BOTH header AND query string is not relying on the
+    query string — don't spam the rejection log."""
+    _patch_settings(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(auth_mod.logger, "info", lambda msg, *a, **kw: calls.append(msg))
+    client = TestClient(_build_app())
+    client.get(
+        "/user?access_token=user-key-aaaaaaaa",
+        headers={"Authorization": "Bearer user-key-aaaaaaaa"},
+    )
+    assert not any("query_string_rejected" in c for c in calls)
+
+
+def test_require_user_loader_accepts_query_string(monkeypatch):
+    """The new loader dep accepts `?access_token=` for browser-native loaders."""
+    _patch_settings(monkeypatch)
+    client = TestClient(_build_loader_app())
+    r = client.get("/loader?access_token=user-key-aaaaaaaa")
+    assert r.status_code == 200
+
+
+def test_require_user_loader_accepts_header_auth(monkeypatch):
+    """The new loader dep also still accepts header auth (it's header OR query)."""
+    _patch_settings(monkeypatch)
+    client = TestClient(_build_loader_app())
+    r = client.get("/loader", headers={"Authorization": "Bearer user-key-aaaaaaaa"})
+    assert r.status_code == 200
+
+
+def test_require_user_loader_optional_returns_none_on_missing_auth(monkeypatch):
+    """`require_user_loader_optional` must return None (200, principal=None)
+    when the request has neither header nor query-string auth — that's the
+    contract the public shared-link endpoint relies on."""
+    _patch_settings(monkeypatch)
+    client = TestClient(_build_loader_optional_app())
+    r = client.get("/loader-optional")
+    assert r.status_code == 200
+    assert r.json() == {"principal": None}
+
+
+def test_require_user_loader_optional_resolves_query_string(monkeypatch):
+    """Conversely, a valid `?access_token=` resolves to a Principal."""
+    _patch_settings(monkeypatch)
+    client = TestClient(_build_loader_optional_app())
+    r = client.get("/loader-optional?access_token=user-key-aaaaaaaa")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["principal"] is not None
+    assert body["principal"]["kind"] == "user"
+
+
+def test_loader_endpoint_audit_guard():
+    """AST-walk audit guard: only the documented loader-dep call sites
+    should exist in `src/beever_atlas/api/`. A naive `text.count()` would
+    over-trigger on comments/docstrings; we walk the AST and inspect the
+    actual `Depends(...)` Call nodes plus direct invocations."""
+    import ast
+    import pathlib
+
+    targets = {"require_user_loader", "require_user_loader_optional"}
+    api_dir = pathlib.Path(__file__).resolve().parents[2] / "src" / "beever_atlas" / "api"
+    assert api_dir.is_dir(), f"unexpected layout: {api_dir} not a directory"
+
+    call_sites: list[str] = []
+    for f in sorted(api_dir.glob("*.py")):
+        tree = ast.parse(f.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # Direct call: require_user_loader_optional(...)
+            if isinstance(node.func, ast.Name) and node.func.id in targets:
+                call_sites.append(f"{f.name}:{node.lineno}:direct:{node.func.id}")
+                continue
+            # Wrapped call: Depends(require_user_loader)
+            if isinstance(node.func, ast.Name) and node.func.id == "Depends":
+                for arg in node.args:
+                    if isinstance(arg, ast.Name) and arg.id in targets:
+                        call_sites.append(f"{f.name}:{node.lineno}:Depends:{arg.id}")
+
+    # Expected sites:
+    #   loaders.py: NO inline Depends — it's mounted via app.py's _loader_auth.
+    #   ask.py:    1 direct call to `require_user_loader_optional(...)` in
+    #              the public shared-link endpoint.
+    # If a developer adds a new loader endpoint, this fails LOUDLY with the
+    # full list so the contributor must update the allow-list deliberately.
+    assert len(call_sites) <= 1, (
+        f"Audit guard: found {len(call_sites)} loader-dep call sites: {call_sites}. "
+        "Issue #88: every new use of require_user_loader[_optional] expands the "
+        "?access_token= surface. Update this allow-list deliberately if intended."
+    )
 
 
 def test_principal_equals_string_of_id(monkeypatch):
