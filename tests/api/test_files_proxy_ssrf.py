@@ -20,15 +20,19 @@ from beever_atlas.infra import http_safe
 def _make_client(monkeypatch):
     """Build a TestClient that bypasses the 'mock adapter' 501 branch and
     stubs the outbound httpx call so validation is the only real logic
-    exercised."""
-    from beever_atlas.api import channels as channels_mod
+    exercised.
+
+    Issue #88 — `proxy_file` moved from `api.channels` to `api.loaders`
+    (a dedicated browser-loader router using `require_user_loader`).
+    """
+    from beever_atlas.api import loaders as loaders_mod
     from beever_atlas.server.app import app
 
     # Force the adapter to look non-mock so `proxy_file` reaches the
     # validation path.
     fake_adapter = MagicMock()
     fake_adapter._client = MagicMock()
-    monkeypatch.setattr(channels_mod, "get_adapter", lambda *a, **kw: fake_adapter)
+    monkeypatch.setattr(loaders_mod, "get_adapter", lambda *a, **kw: fake_adapter)
 
     # Avoid real network: record whichever URL httpx would be asked to GET.
     recorded: dict[str, str] = {}
@@ -52,7 +56,7 @@ def _make_client(monkeypatch):
             recorded["url"] = url
             return _FakeResp()
 
-    monkeypatch.setattr(channels_mod._httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setattr(loaders_mod.httpx, "AsyncClient", _FakeClient)
 
     return TestClient(app), recorded
 
@@ -104,7 +108,7 @@ def test_legitimate_slack_url_is_forwarded_encoded(monkeypatch, auth_headers):
         return quote(url, safe="")
 
     monkeypatch.setattr(
-        "beever_atlas.api.channels.validate_proxy_url",
+        "beever_atlas.api.loaders.validate_proxy_url",
         fake_validate,
         raising=False,
     )

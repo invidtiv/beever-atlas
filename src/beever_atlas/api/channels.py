@@ -8,10 +8,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-import httpx as _httpx
-
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from beever_atlas.adapters import ChannelInfo, get_adapter
@@ -563,45 +560,6 @@ async def clear_channel_data(
     return results
 
 
-@router.get("/api/files/proxy")
-async def proxy_file(
-    url: str = Query(..., description="File URL to proxy"),
-    connection_id: str | None = Query(
-        None, description="Connection ID for multi-workspace routing"
-    ),
-):
-    adapter = get_adapter()
-    if not hasattr(adapter, "_client"):
-        raise HTTPException(status_code=501, detail="File proxy not available in mock mode")
-
-    from beever_atlas.infra.config import get_settings
-    from beever_atlas.infra.http_safe import validate_proxy_url
-    from urllib.parse import quote, urlparse
-
-    try:
-        encoded_url = validate_proxy_url(url)
-    except (PermissionError, ValueError) as exc:
-        # Surface a generic message; never echo the attacker-controlled URL.
-        # Log the host only so operators can see legitimate misses.
-        host = urlparse(url).hostname if url else None
-        logger.warning("file_proxy rejected url: host=%s reason=%s", host, type(exc).__name__)
-        raise HTTPException(status_code=400, detail="Invalid file URL") from None
-
-    _settings = get_settings()
-    bridge_url = f"{_settings.bridge_url}/bridge/files?url={encoded_url}"
-    if connection_id:
-        bridge_url += f"&connection_id={quote(connection_id, safe='')}"
-    headers = {}
-    if _settings.bridge_api_key:
-        headers["Authorization"] = f"Bearer {_settings.bridge_api_key}"
-
-    async with _httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(bridge_url, headers=headers)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail="Failed to fetch file")
-
-        return StreamingResponse(
-            iter([resp.content]),
-            media_type=resp.headers.get("content-type", "application/octet-stream"),
-            headers={"Cache-Control": "public, max-age=3600"},
-        )
+# `proxy_file` was relocated to `beever_atlas.api.loaders` (issue #88) so it
+# can be mounted with `require_user_loader` (accepts ?access_token=) while
+# the rest of this router stays header-only via `require_user`.

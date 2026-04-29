@@ -1688,7 +1688,12 @@ async def get_shared_conversation(
     """
     # Phase 3 of #31 — shared singleton.
     from fastapi.responses import JSONResponse
-    from beever_atlas.infra.auth import require_user_optional
+
+    # Issue #88 — shared-link visits arrive via `<a href>`-style navigation
+    # which may carry `?access_token=`. Use the loader-optional dep so
+    # query-string auth still resolves caller identity here, while the
+    # default `require_user_optional` (header-only) protects everything else.
+    from beever_atlas.infra.auth import require_user_loader_optional
     from beever_atlas.stores import get_stores
 
     store = get_stores().share_store
@@ -1699,7 +1704,7 @@ async def get_shared_conversation(
             return JSONResponse(status_code=404, content={"error": "Not found"})
 
         # Resolve optional caller identity (no 401 on missing).
-        caller_principal = require_user_optional(
+        caller_principal = require_user_loader_optional(
             authorization=request.headers.get("authorization"),
             access_token=request.query_params.get("access_token"),
         )
