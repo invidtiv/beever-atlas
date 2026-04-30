@@ -15,6 +15,10 @@ from beever_atlas.models import (
     SyncJob,
     WriteIntent,
 )
+from beever_atlas.models.persistence import (
+    EXTRACTION_STATUS_TRANSITIONS,
+    ChannelMessage,
+)
 from beever_atlas.models.sync_policy import (
     ChannelPolicy,
     GlobalPolicyDefaults,
@@ -36,6 +40,10 @@ class MongoDBStore:
         self._channel_policies = self._db["channel_policies"]
         self._global_policy_defaults = self._db["global_policy_defaults"]
         self._pipeline_checkpoints = self._db["pipeline_checkpoints"]
+        # PR-A (oss-pipeline-and-wiki-redesign): durable Message Store. Replaces
+        # the prior in-memory ``list[NormalizedMessage]`` flow during sync and
+        # serves as the queue substrate for the future ExtractionWorker (PR-B).
+        self._channel_messages = self._db["channel_messages"]
 
     @property
     def db(self):
@@ -53,6 +61,28 @@ class MongoDBStore:
         await self._activity_events.create_index([("timestamp", -1)])
         await self._channel_policies.create_index("channel_id", unique=True)
         await self._pipeline_checkpoints.create_index("batch_key", unique=True)
+        # PR-A: ``channel_messages`` indexes.
+        # 1) Compound unique key for idempotent upsert.
+        await self._channel_messages.create_index(
+            [("source_id", 1), ("channel_id", 1), ("message_id", 1)],
+            unique=True,
+            name="channel_messages_source_channel_message_unique",
+        )
+        # 2) Secondary index for UI list reads (timestamp DESC for newest-first).
+        await self._channel_messages.create_index(
+            [("channel_id", 1), ("timestamp", -1)],
+            name="channel_messages_channel_timestamp",
+        )
+        # 3) Sparse index for the future ExtractionWorker queue scan (PR-B).
+        # ``extraction_status`` is always set on insert, but the sparse condition
+        # keeps the index cheap by excluding ``done`` rows from the workload.
+        await self._channel_messages.create_index(
+            [("extraction_status", 1), ("next_attempt_at", 1)],
+            name="channel_messages_status_next_attempt",
+            partialFilterExpression={
+                "extraction_status": {"$in": ["pending", "extracting", "failed"]}
+            },
+        )
         # Seed global policy defaults from Settings if not present
         existing = await self._global_policy_defaults.find_one({"id": "global"})
         if existing is None:
@@ -670,3 +700,205 @@ class MongoDBStore:
             {"$set": {"models": models, "updated_at": datetime.now(tz=UTC).isoformat()}},
             upsert=True,
         )
+
+    # ------------------------------------------------------------------
+    # Message Store (PR-A of oss-pipeline-and-wiki-redesign)
+    # ------------------------------------------------------------------
+
+    async def upsert_channel_messages(
+        self, messages: list[ChannelMessage]
+    ) -> dict[str, int]:
+        """Bulk-upsert messages into ``channel_messages``.
+
+        Idempotency contract: calling twice with the same ``(source_id,
+        channel_id, message_id)`` yields exactly one document. ``$setOnInsert``
+        guards ``extraction_status``, ``attempt_count``, ``next_attempt_at`` so
+        re-syncs do NOT reset rows that the worker has already moved past
+        ``pending`` (a re-sync should fetch new messages, not re-extract done
+        ones).
+
+        Returns a count summary ``{"inserted": int, "modified": int,
+        "matched": int, "upserted_ids": int}`` for observability.
+        """
+        if not messages:
+            return {"inserted": 0, "modified": 0, "matched": 0, "upserted_ids": 0}
+
+        from pymongo import UpdateOne
+
+        now = datetime.now(tz=UTC)
+        ops: list[UpdateOne] = []
+        for msg in messages:
+            doc = msg.model_dump(mode="json")
+            # Mutable fields ($set) — content can be edited at the source.
+            mutable = {
+                k: doc[k]
+                for k in (
+                    "timestamp",
+                    "author",
+                    "author_name",
+                    "author_image",
+                    "content",
+                    "thread_id",
+                    "attachments",
+                    "reactions",
+                    "reply_count",
+                    "is_bot",
+                    "links",
+                    "raw_metadata",
+                )
+                if k in doc
+            }
+            mutable["updated_at"] = now.isoformat()
+            # Immutable-on-existing-row fields ($setOnInsert) — extraction state
+            # is owned by the worker, not the sync runner.
+            on_insert = {
+                "source_id": doc["source_id"],
+                "channel_id": doc["channel_id"],
+                "message_id": doc["message_id"],
+                "extraction_status": doc.get("extraction_status", "pending"),
+                "attempt_count": doc.get("attempt_count", 0),
+                "next_attempt_at": doc.get("next_attempt_at", now.isoformat()),
+                "last_error": doc.get("last_error"),
+                "created_at": doc.get("created_at", now.isoformat()),
+            }
+            ops.append(
+                UpdateOne(
+                    {
+                        "source_id": doc["source_id"],
+                        "channel_id": doc["channel_id"],
+                        "message_id": doc["message_id"],
+                    },
+                    {"$set": mutable, "$setOnInsert": on_insert},
+                    upsert=True,
+                )
+            )
+        result = await self._channel_messages.bulk_write(ops, ordered=False)
+        return {
+            "inserted": result.inserted_count,
+            "modified": result.modified_count,
+            "matched": result.matched_count,
+            "upserted_ids": len(result.upserted_ids or {}),
+        }
+
+    async def get_channel_messages(
+        self,
+        channel_id: str,
+        limit: int = 50,
+        since: datetime | None = None,
+        before: str | None = None,
+        order: str = "desc",
+        source_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read messages for a channel from the durable Message Store.
+
+        ``before`` filters by ``message_id`` strictly less than the cursor (used
+        by the existing API contract for keyset pagination). ``order=asc``
+        flips the sort. ``source_id`` narrows to one ingestion source — useful
+        for distinguishing OpenClaw / Hermes pushes from Slack pulls.
+        """
+        query: dict[str, Any] = {"channel_id": channel_id}
+        if source_id is not None:
+            query["source_id"] = source_id
+        if since is not None:
+            query["timestamp"] = {"$gte": since}
+        if before is not None:
+            query["message_id"] = {"$lt": before}
+        sort_dir = -1 if order == "desc" else 1
+        cursor = self._channel_messages.find(query).sort("timestamp", sort_dir).limit(limit)
+        rows: list[dict[str, Any]] = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            rows.append(doc)
+        return rows
+
+    async def count_channel_messages_by_status(
+        self, channel_id: str
+    ) -> dict[str, int]:
+        """Aggregate counts by ``extraction_status`` for one channel.
+
+        Backs the future ``GET /api/channels/{id}/extraction-status`` endpoint
+        in PR-B. Returns a dict with keys ``pending``, ``extracting``, ``done``,
+        ``failed`` (zero-filled for missing statuses).
+        """
+        pipeline: list[dict[str, Any]] = [
+            {"$match": {"channel_id": channel_id}},
+            {"$group": {"_id": "$extraction_status", "n": {"$sum": 1}}},
+        ]
+        counts: dict[str, int] = {"pending": 0, "extracting": 0, "done": 0, "failed": 0}
+        async for row in self._channel_messages.aggregate(pipeline):
+            status = row.get("_id")
+            if isinstance(status, str) and status in counts:
+                counts[status] = int(row.get("n", 0))
+        return counts
+
+    async def find_channel_message_by_message_id(
+        self,
+        channel_id: str,
+        message_id: str,
+        source_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch a single message by its identity.
+
+        Used by the preprocessor (thread-parent lookup) and the coreference
+        resolver (adjacent-message context) to replace the prior phantom
+        ``raw_messages`` reads.
+        """
+        query: dict[str, Any] = {"channel_id": channel_id, "message_id": message_id}
+        if source_id is not None:
+            query["source_id"] = source_id
+        doc = await self._channel_messages.find_one(query)
+        if doc is None:
+            return None
+        doc.pop("_id", None)
+        return doc
+
+    async def update_channel_message_status(
+        self,
+        source_id: str,
+        channel_id: str,
+        message_id: str,
+        new_status: str,
+        last_error: str | None = None,
+        next_attempt_at: datetime | None = None,
+    ) -> bool:
+        """Transition one message's ``extraction_status``.
+
+        Validates the transition against ``EXTRACTION_STATUS_TRANSITIONS`` and
+        returns False without mutating the document if the transition is
+        illegal. The ExtractionWorker (PR-B) is the primary caller; the sync
+        runner does not write status (initial ``pending`` lands via
+        ``$setOnInsert`` in :meth:`upsert_channel_messages`).
+        """
+        existing = await self._channel_messages.find_one(
+            {"source_id": source_id, "channel_id": channel_id, "message_id": message_id},
+            projection={"extraction_status": 1, "attempt_count": 1},
+        )
+        if existing is None:
+            return False
+        from_status = existing.get("extraction_status", "pending")
+        allowed = EXTRACTION_STATUS_TRANSITIONS.get(from_status, set())
+        if new_status not in allowed and new_status != from_status:
+            logger.warning(
+                "channel_messages: rejected illegal transition %s -> %s for %s/%s/%s",
+                from_status,
+                new_status,
+                source_id,
+                channel_id,
+                message_id,
+            )
+            return False
+        update: dict[str, Any] = {
+            "extraction_status": new_status,
+            "updated_at": datetime.now(tz=UTC),
+        }
+        if last_error is not None:
+            update["last_error"] = last_error
+        if next_attempt_at is not None:
+            update["next_attempt_at"] = next_attempt_at
+        if new_status == "failed":
+            update["attempt_count"] = int(existing.get("attempt_count", 0)) + 1
+        await self._channel_messages.update_one(
+            {"source_id": source_id, "channel_id": channel_id, "message_id": message_id},
+            {"$set": update},
+        )
+        return True

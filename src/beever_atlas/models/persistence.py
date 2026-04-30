@@ -89,3 +89,64 @@ class ActivityEvent(BaseModel):
     channel_id: str
     details: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+
+
+# ---------------------------------------------------------------------------
+# Message Store (PR-A of oss-pipeline-and-wiki-redesign)
+# ---------------------------------------------------------------------------
+
+
+class ChannelMessage(BaseModel):
+    """Durable message representation in the ``channel_messages`` collection.
+
+    Replaces the prior in-memory ``list[NormalizedMessage]`` flow during sync
+    with an idempotent persistent store keyed by ``(source_id, channel_id,
+    message_id)``. ``extraction_status`` drives the per-message state machine
+    consumed by the background ExtractionWorker (PR-B).
+
+    See ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``.
+    """
+
+    # ---- identity (compound unique key) ------------------------------------
+    source_id: str
+    """Stable source identifier — adapter `source_kind` for pull sources
+    (e.g. "slack", "discord", "teams"), or registered push-source id for push
+    receivers (e.g. "openclaw-prod"). file imports use ``"file"``."""
+
+    channel_id: str
+    message_id: str
+
+    # ---- content -----------------------------------------------------------
+    timestamp: datetime
+    author: str = ""
+    author_name: str = ""
+    author_image: str = ""
+    content: str = ""
+    thread_id: str | None = None
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    reactions: list[dict[str, Any]] = Field(default_factory=list)
+    reply_count: int = 0
+    is_bot: bool = False
+    links: list[dict[str, Any]] = Field(default_factory=list)
+    raw_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    # ---- extraction state machine -----------------------------------------
+    extraction_status: str = "pending"  # pending | extracting | done | failed
+    attempt_count: int = 0
+    next_attempt_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    last_error: str | None = None
+
+    # ---- audit -------------------------------------------------------------
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+
+
+# Allowed transitions for ChannelMessage.extraction_status. Validation lives in
+# the store-layer upsert helpers; tests assert illegal transitions are rejected.
+EXTRACTION_STATUS_TRANSITIONS: dict[str, set[str]] = {
+    "pending": {"extracting"},
+    "extracting": {"done", "failed"},
+    "done": set(),
+    # ``failed → pending`` is the retry path (worker auto-retry, PR-C).
+    "failed": {"pending"},
+}
