@@ -175,7 +175,7 @@ async def test_unknown_source_returns_401(client: AsyncClient, configured_source
     ts = int(time.time())
     sig = _sign(SECRET, ts, body_bytes)
     resp = await client.post(
-        f"/api/sources/unknown-source/events",
+        "/api/sources/unknown-source/events",
         content=body_bytes,
         headers={"X-Beever-Signature": sig, "Content-Type": "application/json"},
     )

@@ -21,7 +21,7 @@ Spec: ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/push-source-ingest
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status

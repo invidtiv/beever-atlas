@@ -12,7 +12,7 @@ Spec: ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/llm-circuit-breake
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 

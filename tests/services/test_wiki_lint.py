@@ -18,7 +18,6 @@ import pytest
 
 from beever_atlas.models.persistence import WikiPage, WikiPageSection
 from beever_atlas.services.wiki_lint import (
-    LintFinding,
     LintReport,
     coherence_check_page,
     find_duplicate_sections,

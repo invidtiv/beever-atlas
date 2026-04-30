@@ -9,7 +9,6 @@ Spec: ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/wiki-page-store/``
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from beever_atlas.models.persistence import (

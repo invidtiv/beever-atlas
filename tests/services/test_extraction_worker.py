@@ -337,7 +337,7 @@ async def test_one_channel_crash_does_not_cancel_sibling_channels(
 
     bp.process_messages = AsyncMock(side_effect=_process_messages)
     worker = ExtractionWorker(batch_processor=bp)
-    counters = await worker.tick()  # must not raise
+    await worker.tick()  # must not raise — that's the whole point
 
     # The healthy channel was NOT cancelled: process_messages was called
     # for both channels (the OLD return_exceptions=False would have
