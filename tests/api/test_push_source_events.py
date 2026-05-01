@@ -338,19 +338,46 @@ async def test_malformed_body_does_not_leak_exception_class(client: AsyncClient)
 
 
 @pytest.mark.asyncio
-async def test_oversize_content_length_header_returns_413(
-    client: AsyncClient, configured_source
-) -> None:
-    """A claimed Content-Length above 10 MB must be rejected before the
-    body is read — guards against memory-exhaustion DoS even when the
-    attacker holds a valid HMAC key."""
+async def test_oversize_body_returns_413(client: AsyncClient, configured_source) -> None:
+    """A request body above 10 MB must be rejected before being fully
+    accumulated. Code-review HIGH (second pass): the cap is enforced
+    on the actual stream bytes, not just the Content-Length header,
+    so chunked-transfer-encoding clients without a Content-Length
+    cannot bypass the guard."""
+    huge_body = b"x" * 11_000_000  # 11 MB — over the 10 MB cap
     resp = await client.post(
         f"/api/sources/{SOURCE_ID}/events",
-        content=b"",
+        content=huge_body,
         headers={
             "X-Beever-Signature": "t=1,v1=abc",
             "Content-Type": "application/json",
-            "Content-Length": "20000000",  # 20 MB
+        },
+    )
+    assert resp.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_chunked_transfer_oversize_body_still_rejected(
+    client: AsyncClient, configured_source
+) -> None:
+    """Chunked-transfer-encoding clients have NO Content-Length header,
+    so the previous header-only guard let them stream unbounded bytes
+    into memory. The streaming cap catches them.
+
+    Note: httpx automatically uses chunked when content is an iterator
+    that doesn't expose a length. We simulate by passing a generator.
+    """
+
+    async def _chunks():
+        for _ in range(110):  # 110 × 100KB = 11 MB
+            yield b"x" * 100_000
+
+    resp = await client.post(
+        f"/api/sources/{SOURCE_ID}/events",
+        content=_chunks(),
+        headers={
+            "X-Beever-Signature": "t=1,v1=abc",
+            "Content-Type": "application/json",
         },
     )
     assert resp.status_code == 413

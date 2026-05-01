@@ -122,16 +122,32 @@ async def post_source_events(
          strongly encouraged for retries).
     """
     stores = get_stores()
-    # Code-review M1: pre-flight content-length check rejects oversize
-    # payloads before reading them into memory. The Pydantic model also
-    # enforces per-field caps, but bailing early avoids the allocation.
-    content_length = request.headers.get("content-length")
-    if content_length and content_length.isdigit() and int(content_length) > 10_000_000:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail="Payload too large",
-        )
-    body = await request.body()
+    # Code-review M1 + HIGH (second pass): hard memory cap on the
+    # request body. Reads chunks via ``request.stream()`` and bails
+    # the moment the accumulated body exceeds 10 MB. Catches both:
+    #   * Honest clients with Content-Length > 10MB (we'd reject the
+    #     header but Starlette has already started buffering when the
+    #     dependency runs).
+    #   * Chunked-transfer-encoding clients with no Content-Length
+    #     (the previous header-only check missed these entirely).
+    #   * Lying clients that send Content-Length=5MB then 50MB body.
+    # Per-field max_length caps on PushEvent are still enforced by
+    # Pydantic — this is the outer guard.
+    MAX_BODY_BYTES = 10_000_000
+    body_buf = bytearray()
+    async for chunk in request.stream():
+        body_buf.extend(chunk)
+        if len(body_buf) > MAX_BODY_BYTES:
+            logger.warning(
+                "push_body_too_large source_id=%s bytes_seen=%d",
+                source_id,
+                len(body_buf),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Payload too large",
+            )
+    body = bytes(body_buf)
 
     # Look up the source's HMAC secret. ``ExternalSource.secret`` is
     # the plaintext signing key (HMAC verification mathematically needs

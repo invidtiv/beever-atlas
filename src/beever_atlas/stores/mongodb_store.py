@@ -1103,10 +1103,20 @@ class MongoDBStore:
         don't have to. Sets ``rotated_at`` on every update so any
         in-flight signatures with a previous secret fail validation
         immediately on the next request.
+
+        Code-review CRITICAL (second pass): ``ExternalSource.secret``
+        carries ``Field(exclude=True)`` so it does NOT appear in
+        ``model_dump()``. The persistence path explicitly re-adds the
+        secret AFTER the dump so it lands in MongoDB (HMAC verification
+        needs the plaintext) — defense in depth: the model-level
+        exclude protects API serialization, the explicit re-add here
+        protects the storage path. Removing either is a regression.
         """
         from beever_atlas.services.push_hmac import hash_secret
 
         doc = source.model_dump(mode="json")
+        # Re-add the secret after dump (Field(exclude=True) stripped it).
+        doc["secret"] = source.secret
         doc["secret_fingerprint"] = hash_secret(source.secret)
         existing = await self._external_sources.find_one({"source_id": source.source_id})
         if existing is not None:

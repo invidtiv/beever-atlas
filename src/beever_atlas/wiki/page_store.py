@@ -118,23 +118,28 @@ class WikiPageStore:
         page_id)`` cannot both write the same version. The maintainer
         runs single-threaded per channel today, but this keeps the
         invariant intact when ``POST /wiki/edit`` lands.
+
+        Code-review MEDIUM (second pass): ``created_at`` is ALWAYS
+        moved to ``$setOnInsert`` so the original creation timestamp
+        is preserved across rewrites. The maintainer typically
+        re-builds the page from a fresh ``WikiPage`` on each refresh,
+        and Pydantic's ``default_factory`` would set a new
+        ``datetime.now()`` every time — putting it in ``$set`` would
+        overwrite the genuine first-creation timestamp on every save.
         """
         if self._collection is None:
             raise RuntimeError("WikiPageStore not bound to a database")
-        # Build the $set document WITHOUT version — $inc handles that.
+        # Build the $set document WITHOUT version OR created_at.
+        # $inc handles version; $setOnInsert handles created_at.
         doc = page.model_dump(mode="json")
         doc.pop("version", None)
+        created_at = doc.pop("created_at", None) or datetime.now(tz=UTC).isoformat()
         doc["updated_at"] = datetime.now(tz=UTC).isoformat()
-        on_insert: dict[str, Any] = {}
-        if "created_at" not in doc or doc["created_at"] is None:
-            on_insert["created_at"] = doc["updated_at"]
-            doc.pop("created_at", None)
         update: dict[str, Any] = {
             "$set": doc,
             "$inc": {"version": 1},
+            "$setOnInsert": {"created_at": created_at},
         }
-        if on_insert:
-            update["$setOnInsert"] = on_insert
         await self._collection.update_one(
             {
                 "channel_id": page.channel_id,

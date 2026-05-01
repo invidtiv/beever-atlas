@@ -215,6 +215,33 @@ async def test_save_page_bumps_version_on_each_save() -> None:
     assert fetched.version == 3
 
 
+async def test_save_page_preserves_created_at_across_saves() -> None:
+    """Code-review MEDIUM (second pass): ``created_at`` must NOT be
+    overwritten on subsequent saves.
+
+    The maintainer (PR-F) typically re-builds a fresh ``WikiPage``
+    instance on each refresh; Pydantic's ``default_factory`` for
+    ``created_at`` would set a new ``datetime.now()`` every time. If
+    save_page put ``created_at`` in ``$set``, the original creation
+    timestamp would drift forward on every save and audit queries
+    ('how old is this page?') would lie.
+    """
+    store, fake = _make_store()
+    await store.save_page(_make_page())
+    first = await store.get_page("C1", "topic:auth")
+    assert first is not None
+    original_created_at = first.created_at
+
+    # Second save with a freshly-instantiated WikiPage — its
+    # default_factory will populate a NEW created_at.
+    await store.save_page(_make_page())
+    second = await store.get_page("C1", "topic:auth")
+    assert second is not None
+    assert second.created_at == original_created_at, (
+        "created_at must be preserved across saves — $setOnInsert regression"
+    )
+
+
 async def test_save_page_uses_atomic_inc_for_version() -> None:
     """Code-review HIGH regression: ``save_page`` must use ``$inc`` for the
     version bump rather than a read-then-write pattern. We verify by
