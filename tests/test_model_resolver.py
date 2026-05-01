@@ -81,6 +81,13 @@ class TestLLMProviderResolve:
         result = provider.resolve_model("fact_extractor")
         assert result == "gemini-2.5-flash"
 
+    def test_resolve_wiki_maintainer_slot(self):
+        # wiki_maintainer is registered for the per-page LLM rewrite path
+        # used by WikiMaintainer.apply_update; default model is Flash.
+        provider = self._make_provider()
+        result = provider.resolve_model("wiki_maintainer")
+        assert result == "gemini-2.5-flash"
+
     def test_resolve_lite_agent_from_default(self):
         # An agent not in DEFAULT_AGENT_MODELS falls back to llm_fast_model.
         provider = self._make_provider(llm_fast_model="gemini-2.5-flash-lite")

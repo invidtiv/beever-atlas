@@ -127,16 +127,26 @@ class ConsolidationService:
             logger.error("Consolidation error for %s: %s", channel_id, exc, exc_info=True)
             result.errors.append(str(exc))
 
-        # Mark wiki as stale after consolidation
+        # Notify the WikiMaintainer that consolidation finished. Replaces the
+        # legacy ``cache.mark_all_stale(channel_id)`` hammer. Empty
+        # ``fact_ids`` is intentional today — the ExtractionWorker's
+        # ``on_extraction_done`` subscription already fires per-batch with
+        # the precise touched fact ids during the same pipeline pass, so
+        # the consolidation hook is currently a structural no-op preserving
+        # the future seam (downstream callers MAY pass touched fact ids
+        # once ``ConsolidationResult`` tracks them).
         try:
-            from beever_atlas.infra.config import get_settings
-            from beever_atlas.wiki.cache import WikiCache
+            from beever_atlas.services.wiki_maintainer import get_wiki_maintainer
 
-            settings = get_settings()
-            cache = WikiCache(settings.mongodb_uri)
-            await cache.mark_all_stale(channel_id)
-        except Exception:
-            logger.warning("Failed to mark wiki stale for channel %s", channel_id)
+            maintainer = get_wiki_maintainer()
+            if maintainer is not None:
+                await maintainer.on_consolidation_complete(channel_id, fact_ids=[])
+        except Exception as exc:  # noqa: BLE001 — never block consolidation on the maintainer
+            logger.warning(
+                "wiki maintainer on_consolidation_complete failed for channel=%s: %s",
+                channel_id,
+                exc,
+            )
 
         return result
 

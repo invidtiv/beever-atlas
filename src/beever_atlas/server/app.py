@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
 
 from beever_atlas.infra.auth import require_bridge, require_user, require_user_loader
 from beever_atlas.infra.loader_url_headers import LoaderUrlSecurityHeadersMiddleware
@@ -193,15 +194,62 @@ async def lifespan(app: FastAPI):
 
         worker = get_extraction_worker()
         if worker is not None:
-            _maintenance_mode = settings.wiki_maintenance_mode
+            _env_default_mode = settings.wiki_maintenance_mode
+
+            async def _resolve_and_run(channel_id: str, fact_ids: list[str]) -> None:
+                # Per-channel mode resolution happens AT FIRE TIME (not at
+                # lifespan init) so an operator's UI toggle takes effect on
+                # the very next extraction batch without a server restart.
+                # The resolution falls through: channel.wiki.maintenance_mode
+                # → env (``WIKI_MAINTENANCE_MODE``) → ``"manual"``.
+                mode = _env_default_mode
+                try:
+                    from beever_atlas.services.policy_resolver import (
+                        resolve_effective_policy,
+                    )
+
+                    effective = await resolve_effective_policy(channel_id)
+                    channel_mode = effective.wiki.maintenance_mode
+                    if channel_mode in ("auto", "manual"):
+                        mode = channel_mode
+                except Exception as exc:  # noqa: BLE001 — never block the maintainer
+                    logging.getLogger(__name__).debug(
+                        "wiki_maintainer mode resolution failed for channel=%s err=%s "
+                        "(falling back to env default %s)",
+                        channel_id,
+                        exc,
+                        _env_default_mode,
+                    )
+                await maintainer.on_extraction_done(channel_id, fact_ids, mode=mode)
+
+            def _on_done_log_exc(task: _asyncio.Task) -> None:
+                """Surface any unhandled exception from the fire-and-forget task.
+
+                Without this callback, a top-level error inside
+                ``_resolve_and_run`` (e.g. an ``ImportError`` raised
+                BEFORE its own try/except) would go to asyncio's default
+                exception handler and be easy to miss. Routing it through
+                our structured logger keeps it visible.
+                """
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is None:
+                    return
+                logging.getLogger(__name__).warning(
+                    "wiki_maintainer fan-out task raised: %s",
+                    exc,
+                    exc_info=exc,
+                )
 
             def _on_extraction_done(channel_id: str, fact_ids: list[str]):
                 # Fire-and-forget so the worker's batch loop is never
                 # blocked by maintainer LLM calls. Per-page exceptions are
-                # already swallowed inside ``on_extraction_done``.
-                _asyncio.create_task(
-                    maintainer.on_extraction_done(channel_id, fact_ids, mode=_maintenance_mode)
-                )
+                # already swallowed inside ``on_extraction_done``;
+                # ``_on_done_log_exc`` covers the rare top-level failure
+                # path (import errors, etc.).
+                task = _asyncio.create_task(_resolve_and_run(channel_id, fact_ids))
+                task.add_done_callback(_on_done_log_exc)
 
             worker.subscribe_extraction_done(_on_extraction_done)
     except Exception as exc:
@@ -244,7 +292,40 @@ app = FastAPI(
 # Per-IP rate limit. Limiter instance lives in infra.rate_limit so route
 # modules can share it; here we wire it into the FastAPI app.
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def _push_source_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Custom 429 response for ``/api/sources/{source_id}/events``.
+
+    Other rate-limited routes use slowapi's default handler (plain text
+    body); the push endpoint surfaces the documented JSON shape so
+    OpenClaw / Hermes clients can react programmatically.
+    """
+    if request.url.path.startswith("/api/sources/") and request.url.path.endswith("/events"):
+        # Best-effort retry hint derived from the limit window. ``per`` is
+        # in seconds (slowapi's parsed limit). Default to 60 if unknown.
+        retry_after = 60
+        try:
+            limit = getattr(exc, "limit", None)
+            per = getattr(getattr(limit, "limit", None), "per", None) or getattr(limit, "per", None)
+            if per:
+                retry_after = int(per)
+        except Exception:  # noqa: BLE001
+            pass
+        source_id = request.path_params.get("source_id", "unknown")
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "rate_limited",
+                "source_id": source_id,
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+    return _rate_limit_exceeded_handler(request, exc)
+
+
+app.add_exception_handler(RateLimitExceeded, _push_source_rate_limit_handler)
 
 # CORS for React dev server and production
 _settings = get_settings()

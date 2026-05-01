@@ -222,7 +222,14 @@ async def test_on_extraction_done_auto_applies_rewrites() -> None:
     async def _stub_load(*args, **kwargs):
         return [{"id": "f1", "cluster_id": "auth", "entity_tags": []}]
 
+    async def _stub_llm(prompt: str) -> str:
+        return (
+            '{"affected_sections": [{"id": "overview", "title": "Overview", '
+            '"content_md": "Auth fact integrated [f1]."}]}'
+        )
+
     maintainer._load_facts = _stub_load  # type: ignore[method-assign]
+    maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
     counters = await maintainer.on_extraction_done("C1", ["f1"], mode="auto")
     assert counters["rewritten"] >= 1
     page_store.save_page.assert_awaited()
@@ -260,7 +267,14 @@ async def test_on_extraction_done_auto_isolates_per_page_failures() -> None:
             }
         ]
 
+    async def _stub_llm(prompt: str) -> str:
+        return (
+            '{"affected_sections": [{"id": "overview", "title": "Overview", '
+            '"content_md": "Fact integrated [f1]."}]}'
+        )
+
     maintainer._load_facts = _stub_load  # type: ignore[method-assign]
+    maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
     counters = await maintainer.on_extraction_done("C1", ["f1"], mode="auto")
     # At least one page rewrote successfully; the other was logged.
     assert counters["affected_pages"] == 2  # topic + entity
@@ -297,6 +311,18 @@ async def test_apply_update_preserves_title_and_slug() -> None:
 
     page_store.save_page = AsyncMock(side_effect=_capture_save)
     maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _stub_load(channel_id, fact_ids):
+        return [{"id": "f1", "memory_text": "x", "cluster_id": "auth"}]
+
+    async def _stub_llm(prompt: str) -> str:
+        return (
+            '{"affected_sections": [{"id": "overview", "title": "Overview", '
+            '"content_md": "# A\\nUpdated [f1]."}]}'
+        )
+
+    maintainer._load_facts = _stub_load  # type: ignore[method-assign]
+    maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
     await maintainer.apply_update("C1", "topic:auth", ["f1"])
     assert len(saved_pages) == 1
     saved = saved_pages[0]
@@ -320,6 +346,15 @@ async def test_apply_update_clears_is_dirty() -> None:
     )
     page_store.save_page = AsyncMock(side_effect=lambda p: saved_pages.append(p))
     maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _stub_load(channel_id, fact_ids):
+        return [{"id": "f1", "memory_text": "x", "cluster_id": "auth"}]
+
+    async def _stub_llm(prompt: str) -> str:
+        return '{"affected_sections": [{"id": "overview", "title": "Overview", "content_md": "x [f1]"}]}'
+
+    maintainer._load_facts = _stub_load  # type: ignore[method-assign]
+    maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
     await maintainer.apply_update("C1", "topic:auth", ["f1"])
     assert saved_pages[0].is_dirty is False
 
@@ -339,6 +374,15 @@ async def test_apply_update_records_new_fact_ids_in_last_facts_seen() -> None:
     )
     page_store.save_page = AsyncMock(side_effect=lambda p: saved_pages.append(p))
     maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _stub_load(channel_id, fact_ids):
+        return [{"id": fid, "memory_text": fid, "cluster_id": "auth"} for fid in fact_ids]
+
+    async def _stub_llm(prompt: str) -> str:
+        return '{"affected_sections": [{"id": "overview", "title": "Overview", "content_md": "x"}]}'
+
+    maintainer._load_facts = _stub_load  # type: ignore[method-assign]
+    maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
     await maintainer.apply_update("C1", "topic:auth", ["f-new-1", "f-new-2"])
     assert "existing-1" in saved_pages[0].last_facts_seen
     assert "f-new-1" in saved_pages[0].last_facts_seen
@@ -393,3 +437,626 @@ def test_hash_fact_ids_order_invariant() -> None:
 
 def test_hash_fact_ids_different_for_different_sets() -> None:
     assert _hash_fact_ids(["a", "b"]) != _hash_fact_ids(["a", "c"])
+
+
+# ---------------------------------------------------------------------------
+# _load_facts wiring — production path uses Weaviate
+# ---------------------------------------------------------------------------
+
+
+class _FakeAtomicFact:
+    """Tiny duck-typed AtomicFact stand-in for the routing dict converter."""
+
+    def __init__(
+        self,
+        fact_id: str,
+        cluster_id: str | None = None,
+        entity_tags: list[str] | None = None,
+        fact_type: str = "observation",
+    ) -> None:
+        self.id = fact_id
+        self.cluster_id = cluster_id
+        self.entity_tags = entity_tags or []
+        self.fact_type = fact_type
+
+
+class _FakePaginatedFacts:
+    def __init__(self, memories: list[_FakeAtomicFact], page: int, pages: int) -> None:
+        self.memories = memories
+        self.page = page
+        self.pages = pages
+        self.total = len(memories) * pages
+
+
+class _FakeWeaviate:
+    def __init__(
+        self,
+        ids_to_facts: dict[str, _FakeAtomicFact] | None = None,
+        channel_facts: list[_FakeAtomicFact] | None = None,
+        page_size: int = 500,
+    ) -> None:
+        self._ids = ids_to_facts or {}
+        self._channel_facts = channel_facts or []
+        self._page_size = page_size
+        self.fetch_calls: list[list[str]] = []
+        self.list_calls: list[tuple[int, int]] = []
+
+    async def fetch_by_ids(self, fact_ids: list[str]):
+        self.fetch_calls.append(list(fact_ids))
+        return [self._ids[i] for i in fact_ids if i in self._ids]
+
+    async def list_facts(self, channel_id: str, filters, page: int = 1, limit: int = 500):
+        self.list_calls.append((page, limit))
+        offset = (page - 1) * limit
+        slice_ = self._channel_facts[offset : offset + limit]
+        total = len(self._channel_facts)
+        pages = max(1, (total + limit - 1) // limit)
+        return _FakePaginatedFacts(slice_, page=page, pages=pages)
+
+
+@pytest.fixture
+def _fake_stores(monkeypatch):
+    """Patch ``stores.get_stores`` to inject a fake weaviate."""
+    fake_weaviate = _FakeWeaviate()
+
+    class _StoresContainer:
+        weaviate = fake_weaviate
+
+    container = _StoresContainer()
+
+    monkeypatch.setattr(
+        "beever_atlas.stores.get_stores",
+        lambda: container,
+    )
+    return container
+
+
+@pytest.mark.asyncio
+async def test_load_facts_by_explicit_ids_uses_fetch_by_ids(_fake_stores) -> None:
+    _fake_stores.weaviate._ids = {
+        "f1": _FakeAtomicFact("f1", cluster_id="auth", entity_tags=["alice"], fact_type="decision"),
+        "f2": _FakeAtomicFact("f2", cluster_id="ops", entity_tags=[], fact_type="observation"),
+    }
+    page_store = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    out = await maintainer._load_facts("C1", ["f1", "f2"])
+
+    assert len(out) == 2
+    # Routing dict carries the four routing keys plus memory_text +
+    # source_message_id (used by apply_update's prompt). Assert the
+    # routing keys are correct without locking the test to the exact
+    # extra-key set.
+    assert out[0]["id"] == "f1"
+    assert out[0]["cluster_id"] == "auth"
+    assert out[0]["entity_tags"] == ["alice"]
+    assert out[0]["fact_type"] == "decision"
+    assert out[1]["fact_type"] == "observation"
+    # Used the explicit-id path; no list_facts scan
+    assert _fake_stores.weaviate.fetch_calls == [["f1", "f2"]]
+    assert _fake_stores.weaviate.list_calls == []
+
+
+@pytest.mark.asyncio
+async def test_load_facts_channel_wide_pages_through_all(_fake_stores) -> None:
+    # 1200 facts across 3 pages of 500 each (last page has 200)
+    _fake_stores.weaviate._channel_facts = [
+        _FakeAtomicFact(f"f{i}", cluster_id="c", fact_type="observation") for i in range(1200)
+    ]
+    page_store = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    out = await maintainer._load_facts("C1", None)
+
+    assert len(out) == 1200
+    # Three list_facts calls (page 1, 2, 3) with limit=500
+    assert [c[0] for c in _fake_stores.weaviate.list_calls] == [1, 2, 3]
+    assert all(c[1] == 500 for c in _fake_stores.weaviate.list_calls)
+
+
+@pytest.mark.asyncio
+async def test_load_facts_caps_at_5000_and_emits_warning(_fake_stores, monkeypatch) -> None:
+    # 6500 synthetic facts — cap should kick in at 5000
+    _fake_stores.weaviate._channel_facts = [
+        _FakeAtomicFact(f"f{i}", cluster_id="c") for i in range(6500)
+    ]
+    page_store = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    # The ``beever_atlas`` logger sets ``propagate=False`` in app startup,
+    # so pytest's caplog (which attaches to root) won't see records. Spy
+    # on the module logger directly.
+    warnings_seen: list[str] = []
+    from beever_atlas.services import wiki_maintainer as wm_mod
+
+    real_warning = wm_mod.logger.warning
+
+    def _capture(msg, *args, **kwargs):
+        try:
+            warnings_seen.append(msg % args if args else msg)
+        except TypeError:
+            warnings_seen.append(str(msg))
+        real_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(wm_mod.logger, "warning", _capture)
+
+    out = await maintainer._load_facts("C1", None)
+
+    assert len(out) == 5000
+    assert any(
+        "wiki_maintainer_fact_load_truncated" in m and "channel_id=C1" in m for m in warnings_seen
+    )
+
+
+# ---------------------------------------------------------------------------
+# apply_update — real LLM call (mocked) replaces the placeholder
+# ---------------------------------------------------------------------------
+
+
+def _make_existing_page() -> WikiPage:
+    return WikiPage(
+        channel_id="C1",
+        target_lang="en",
+        page_id="topic:auth",
+        title="Authentication & Authorization",
+        slug="topic-auth",
+        page_voice_seed="formal-technical-3rd-person",
+        sections=[
+            WikiPageSection(
+                id="overview", title="Overview", content_md="OIDC across all services."
+            ),
+            WikiPageSection(id="decisions", title="Decisions", content_md="- Use Keycloak."),
+            WikiPageSection(id="risks", title="Risks", content_md="- Token leakage."),
+        ],
+        last_facts_seen=["f1", "f2"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_update_uses_llm_response_not_placeholder(_fake_stores) -> None:
+    """The smoking-gun regression test: saved content_md MUST NOT be the
+    legacy ``"New facts integrated: f7"`` placeholder.
+    """
+    _fake_stores.weaviate._ids = {
+        "f7": _FakeAtomicFact("f7", cluster_id="auth", entity_tags=["alice"], fact_type="decision"),
+    }
+    page_store = AsyncMock()
+    page_store.get_page = AsyncMock(return_value=_make_existing_page())
+    page_store.save_page = AsyncMock()
+
+    maintainer = WikiMaintainer(page_store=page_store)
+    # Mock the LLM to return a real JSON section diff.
+
+    async def _fake_llm(prompt: str) -> str:
+        return (
+            '{"affected_sections": [{"id": "decisions", "title": "Decisions", '
+            '"content_md": "- Use Keycloak.\\n- Mandate MFA for admins [f7]."}], '
+            '"reason": "new MFA decision"}'
+        )
+
+    maintainer._invoke_apply_update_llm = _fake_llm  # type: ignore[method-assign]
+
+    applied = await maintainer.apply_update("C1", "topic:auth", ["f7"])
+
+    assert applied is True
+    saved_page: WikiPage = page_store.save_page.call_args.args[0]
+    decisions = next(s for s in saved_page.sections if s.id == "decisions")
+    # The actual saved content_md is the LLM output, not the legacy placeholder.
+    assert decisions.content_md != "New facts integrated: f7"
+    assert "MFA" in decisions.content_md
+    assert "[f7]" in decisions.content_md
+
+
+@pytest.mark.asyncio
+async def test_apply_update_preserves_title_slug_and_voice(_fake_stores) -> None:
+    """Title / slug / page_voice_seed are byte-identical across LLM rewrite."""
+    _fake_stores.weaviate._ids = {
+        "f9": _FakeAtomicFact("f9", cluster_id="auth", fact_type="decision"),
+    }
+    original = _make_existing_page()
+    page_store = AsyncMock()
+    page_store.get_page = AsyncMock(return_value=original)
+    page_store.save_page = AsyncMock()
+
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _fake_llm(prompt: str) -> str:
+        return (
+            '{"affected_sections": [{"id": "decisions", "title": "Decisions", '
+            '"content_md": "- Use Keycloak.\\n- Adopt OIDC [f9]."}]}'
+        )
+
+    maintainer._invoke_apply_update_llm = _fake_llm  # type: ignore[method-assign]
+    await maintainer.apply_update("C1", "topic:auth", ["f9"])
+
+    saved: WikiPage = page_store.save_page.call_args.args[0]
+    assert saved.title == "Authentication & Authorization"
+    assert saved.slug == "topic-auth"
+    assert saved.page_voice_seed == "formal-technical-3rd-person"
+
+
+@pytest.mark.asyncio
+async def test_apply_update_preserves_section_order(_fake_stores) -> None:
+    """Regression: rewriting a middle section MUST NOT shift it to the
+    end. Code-review HIGH finding — the merge had been list-comprehension
+    + extend, which dropped affected sections to the bottom.
+    """
+    _fake_stores.weaviate._ids = {
+        "f9": _FakeAtomicFact("f9", cluster_id="auth", fact_type="decision"),
+    }
+    page = _make_existing_page()
+    # Sanity check: the original order is overview / decisions / risks.
+    assert [s.id for s in page.sections] == ["overview", "decisions", "risks"]
+
+    page_store = AsyncMock()
+    page_store.get_page = AsyncMock(return_value=page)
+    page_store.save_page = AsyncMock()
+
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _fake_llm(prompt: str) -> str:
+        # Rewrite the middle section. After merge, order MUST still be
+        # overview / decisions / risks — NOT overview / risks / decisions.
+        return (
+            '{"affected_sections": [{"id": "decisions", "title": "Decisions", '
+            '"content_md": "- Use Keycloak.\\n- Adopt OIDC [f9]."}]}'
+        )
+
+    maintainer._invoke_apply_update_llm = _fake_llm  # type: ignore[method-assign]
+    await maintainer.apply_update("C1", "topic:auth", ["f9"])
+
+    saved: WikiPage = page_store.save_page.call_args.args[0]
+    assert [s.id for s in saved.sections] == ["overview", "decisions", "risks"]
+
+
+@pytest.mark.asyncio
+async def test_apply_update_appends_new_sections_after_existing(_fake_stores) -> None:
+    """A truly new section (id not on the page) is appended at the end —
+    not interleaved into the existing order.
+    """
+    _fake_stores.weaviate._ids = {
+        "f9": _FakeAtomicFact("f9", cluster_id="auth", fact_type="action_item"),
+    }
+    page_store = AsyncMock()
+    page_store.get_page = AsyncMock(return_value=_make_existing_page())
+    page_store.save_page = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _fake_llm(prompt: str) -> str:
+        return (
+            '{"affected_sections": ['
+            '{"id": "decisions", "title": "Decisions", "content_md": "- Updated [f9]."},'
+            '{"id": "next-steps", "title": "Next Steps", "content_md": "- Roll out MFA"}'
+            "]}"
+        )
+
+    maintainer._invoke_apply_update_llm = _fake_llm  # type: ignore[method-assign]
+    await maintainer.apply_update("C1", "topic:auth", ["f9"])
+
+    saved: WikiPage = page_store.save_page.call_args.args[0]
+    # decisions stays in place at index 1; the brand-new ``next-steps``
+    # is appended at the end (index 3).
+    assert [s.id for s in saved.sections] == ["overview", "decisions", "risks", "next-steps"]
+
+
+@pytest.mark.asyncio
+async def test_apply_update_unaffected_sections_byte_identical(_fake_stores) -> None:
+    _fake_stores.weaviate._ids = {
+        "f9": _FakeAtomicFact("f9", cluster_id="auth", fact_type="decision"),
+    }
+    page_store = AsyncMock()
+    page_store.get_page = AsyncMock(return_value=_make_existing_page())
+    page_store.save_page = AsyncMock()
+
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _fake_llm(prompt: str) -> str:
+        # LLM only returns the "decisions" section; "overview" and "risks"
+        # MUST stay byte-identical to their original content.
+        return (
+            '{"affected_sections": [{"id": "decisions", "title": "Decisions", '
+            '"content_md": "- Use Keycloak.\\n- Adopt OIDC [f9]."}]}'
+        )
+
+    maintainer._invoke_apply_update_llm = _fake_llm  # type: ignore[method-assign]
+    await maintainer.apply_update("C1", "topic:auth", ["f9"])
+
+    saved: WikiPage = page_store.save_page.call_args.args[0]
+    overview = next(s for s in saved.sections if s.id == "overview")
+    risks = next(s for s in saved.sections if s.id == "risks")
+    assert overview.content_md == "OIDC across all services."
+    assert risks.content_md == "- Token leakage."
+
+
+@pytest.mark.asyncio
+async def test_apply_update_returns_false_and_skips_save_on_llm_failure(_fake_stores) -> None:
+    _fake_stores.weaviate._ids = {
+        "f9": _FakeAtomicFact("f9", cluster_id="auth", fact_type="decision"),
+    }
+    page_store = AsyncMock()
+    page_store.get_page = AsyncMock(return_value=_make_existing_page())
+    page_store.save_page = AsyncMock()
+
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _failing_llm(prompt: str) -> str:
+        raise RuntimeError("LLM provider 503")
+
+    maintainer._invoke_apply_update_llm = _failing_llm  # type: ignore[method-assign]
+    applied = await maintainer.apply_update("C1", "topic:auth", ["f9"])
+
+    assert applied is False
+    page_store.save_page.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_update_preserves_voice_across_three_consecutive_updates(_fake_stores) -> None:
+    _fake_stores.weaviate._ids = {
+        f"f{i}": _FakeAtomicFact(f"f{i}", cluster_id="auth", fact_type="observation")
+        for i in (10, 11, 12)
+    }
+    original = _make_existing_page()
+    saved_titles: list[str] = []
+    saved_voice_seeds: list[str] = []
+
+    state: dict[str, WikiPage] = {"page": original}
+
+    async def _get_page(channel_id, page_id, target_lang="en"):
+        return state["page"]
+
+    async def _save_page(page: WikiPage):
+        saved_titles.append(page.title)
+        saved_voice_seeds.append(page.page_voice_seed)
+        state["page"] = page
+
+    page_store = AsyncMock()
+    page_store.get_page = _get_page
+    page_store.save_page = _save_page
+
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    iter_idx = {"i": 0}
+
+    async def _fake_llm(prompt: str) -> str:
+        iter_idx["i"] += 1
+        return (
+            f'{{"affected_sections": [{{"id": "overview", "title": "Overview", '
+            f'"content_md": "Iteration {iter_idx["i"]}."}}]}}'
+        )
+
+    maintainer._invoke_apply_update_llm = _fake_llm  # type: ignore[method-assign]
+
+    for fid in ["f10", "f11", "f12"]:
+        await maintainer.apply_update("C1", "topic:auth", [fid])
+
+    assert saved_titles == ["Authentication & Authorization"] * 3
+    assert saved_voice_seeds == ["formal-technical-3rd-person"] * 3
+
+
+# ---------------------------------------------------------------------------
+# Prompt + parser unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_render_apply_update_prompt_includes_existing_sections_and_new_facts() -> None:
+    from beever_atlas.services.wiki_maintainer import _render_apply_update_prompt
+
+    page = _make_existing_page()
+    new_facts = [
+        {
+            "id": "f7",
+            "memory_text": "MFA mandated for admin accounts.",
+            "cluster_id": "auth",
+            "entity_tags": ["alice"],
+            "fact_type": "decision",
+        }
+    ]
+    prompt = _render_apply_update_prompt(page, new_facts)
+    # Existing sections present
+    assert "OIDC across all services." in prompt
+    # New fact present with id + memory_text
+    assert "MFA mandated for admin accounts." in prompt
+    assert "f7" in prompt
+    # System contract present
+    assert "Return ONLY the sections that need to change" in prompt
+    assert "affected_sections" in prompt
+
+
+def test_parse_apply_update_response_returns_sections() -> None:
+    from beever_atlas.services.wiki_maintainer import _parse_apply_update_response
+
+    raw = (
+        '{"affected_sections": [{"id": "overview", "title": "Overview", '
+        '"content_md": "Hello world"}]}'
+    )
+    sections = _parse_apply_update_response(raw)
+    assert len(sections) == 1
+    assert sections[0].id == "overview"
+    assert sections[0].content_md == "Hello world"
+
+
+def test_parse_apply_update_response_returns_empty_on_malformed_json() -> None:
+    from beever_atlas.services.wiki_maintainer import _parse_apply_update_response
+
+    sections = _parse_apply_update_response("{not valid json")
+    assert sections == []
+
+
+def test_parse_apply_update_response_drops_entries_with_empty_id_or_content() -> None:
+    from beever_atlas.services.wiki_maintainer import _parse_apply_update_response
+
+    raw = (
+        '{"affected_sections": ['
+        '{"id": "", "title": "Bad", "content_md": "x"},'
+        '{"id": "ok", "title": "Ok", "content_md": ""},'
+        '{"id": "valid", "title": "Valid", "content_md": "yes"}'
+        "]}"
+    )
+    sections = _parse_apply_update_response(raw)
+    assert len(sections) == 1
+    assert sections[0].id == "valid"
+
+
+# ---------------------------------------------------------------------------
+# First-touch title resolver
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_first_touch_title_topic_uses_cluster_label(monkeypatch) -> None:
+    class _FakeCluster:
+        title = "Product Roadmap Q3"
+
+    fake_weaviate = AsyncMock()
+    fake_weaviate.get_cluster = AsyncMock(return_value=_FakeCluster())
+
+    class _Stores:
+        weaviate = fake_weaviate
+        entity_registry = None
+
+    monkeypatch.setattr("beever_atlas.stores.get_stores", lambda: _Stores())
+    maintainer = WikiMaintainer(page_store=AsyncMock())
+    title = await maintainer._resolve_first_touch_title("topic:product-roadmap", "C1")
+    assert title == "Product Roadmap Q3"
+    fake_weaviate.get_cluster.assert_awaited_once_with("product-roadmap")
+
+
+@pytest.mark.asyncio
+async def test_resolve_first_touch_title_entity_uses_registry_canonical(monkeypatch) -> None:
+    fake_registry = AsyncMock()
+    # First call (un-slugified "alice yang") returns canonical
+    fake_registry.get_canonical = AsyncMock(return_value="Alice Yang")
+
+    class _Stores:
+        weaviate = None
+        entity_registry = fake_registry
+
+    monkeypatch.setattr("beever_atlas.stores.get_stores", lambda: _Stores())
+    maintainer = WikiMaintainer(page_store=AsyncMock())
+    title = await maintainer._resolve_first_touch_title("entity:alice-yang", "C1")
+    assert title == "Alice Yang"
+
+
+@pytest.mark.asyncio
+async def test_resolve_first_touch_title_role_pages_use_constants(monkeypatch) -> None:
+    class _Stores:
+        weaviate = None
+        entity_registry = None
+
+    monkeypatch.setattr("beever_atlas.stores.get_stores", lambda: _Stores())
+    maintainer = WikiMaintainer(page_store=AsyncMock())
+    assert await maintainer._resolve_first_touch_title("decisions", "C1") == "Decisions"
+    assert await maintainer._resolve_first_touch_title("faq", "C1") == "Frequently Asked Questions"
+    assert await maintainer._resolve_first_touch_title("action-items", "C1") == "Action Items"
+
+
+@pytest.mark.asyncio
+async def test_resolve_first_touch_title_falls_back_to_slug(monkeypatch) -> None:
+    class _Stores:
+        weaviate = None
+        entity_registry = None
+
+    monkeypatch.setattr("beever_atlas.stores.get_stores", lambda: _Stores())
+    maintainer = WikiMaintainer(page_store=AsyncMock())
+    title = await maintainer._resolve_first_touch_title("topic:unknown-topic", "C1")
+    assert title == "Unknown Topic"
+
+
+# ---------------------------------------------------------------------------
+# on_consolidation_complete — replaces legacy mark_all_stale hammer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_consolidation_complete_with_fact_ids_routes_in_auto(_fake_stores) -> None:
+    """Spec scenario: consolidation produces fact_ids → maintainer fires
+    for affected pages only (auto mode)."""
+    _fake_stores.weaviate._ids = {
+        "f10": _FakeAtomicFact(
+            "f10", cluster_id="auth", entity_tags=["alice"], fact_type="decision"
+        ),
+        "f11": _FakeAtomicFact("f11", cluster_id="ops", entity_tags=[], fact_type="observation"),
+    }
+    page_store = AsyncMock()
+    page_store.get_page = AsyncMock(return_value=None)
+    page_store.save_page = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    async def _stub_llm(prompt: str) -> str:
+        return '{"affected_sections": [{"id": "overview", "title": "Overview", "content_md": "x"}]}'
+
+    maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
+    counters = await maintainer.on_consolidation_complete("C1", ["f10", "f11"], mode="auto")
+    # f10 routes to topic:auth + entity:alice + decisions = 3 pages.
+    # f11 routes to topic:ops = 1 page. Total affected: 4.
+    assert counters["affected_pages"] == 4
+    # save_page called once per affected page (4 pages).
+    assert page_store.save_page.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_on_consolidation_complete_with_fact_ids_marks_dirty_in_manual(_fake_stores) -> None:
+    """Spec scenario: consolidation in manual mode marks affected pages dirty
+    (does NOT auto-fire apply_update)."""
+    _fake_stores.weaviate._ids = {
+        "f10": _FakeAtomicFact(
+            "f10", cluster_id="auth", entity_tags=["alice"], fact_type="decision"
+        ),
+    }
+    page_store = AsyncMock()
+    page_store.mark_dirty = AsyncMock(return_value=3)
+    page_store.save_page = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    counters = await maintainer.on_consolidation_complete("C1", ["f10"], mode="manual")
+    # 3 pages marked dirty (topic:auth, entity:alice, decisions), no save calls.
+    assert counters["marked_dirty"] == 3
+    page_store.save_page.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_consolidation_complete_with_empty_fact_ids_is_noop(_fake_stores) -> None:
+    """Spec scenario: empty fact_ids → maintainer is a no-op (no pages
+    touched, no dirty flag changes)."""
+    page_store = AsyncMock()
+    page_store.save_page = AsyncMock()
+    page_store.mark_dirty = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    counters = await maintainer.on_consolidation_complete("C1", [], mode="auto")
+
+    assert counters == {"affected_pages": 0, "marked_dirty": 0, "rewritten": 0}
+    page_store.save_page.assert_not_awaited()
+    page_store.mark_dirty.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_first_touch_title_swallows_lookup_errors(monkeypatch) -> None:
+    """A Weaviate hiccup must not block page creation — just fall back."""
+    fake_weaviate = AsyncMock()
+    fake_weaviate.get_cluster = AsyncMock(side_effect=RuntimeError("weaviate down"))
+
+    class _Stores:
+        weaviate = fake_weaviate
+        entity_registry = None
+
+    monkeypatch.setattr("beever_atlas.stores.get_stores", lambda: _Stores())
+    maintainer = WikiMaintainer(page_store=AsyncMock())
+    title = await maintainer._resolve_first_touch_title("topic:auth", "C1")
+    assert title == "Auth"
+
+
+@pytest.mark.asyncio
+async def test_load_facts_returns_empty_when_no_weaviate(monkeypatch) -> None:
+    """If the stores singleton has no weaviate (rare init order), return [] rather than raise."""
+
+    class _NoWeaviate:
+        pass
+
+    monkeypatch.setattr("beever_atlas.stores.get_stores", lambda: _NoWeaviate())
+    page_store = AsyncMock()
+    maintainer = WikiMaintainer(page_store=page_store)
+
+    out = await maintainer._load_facts("C1", ["f1"])
+
+    assert out == []

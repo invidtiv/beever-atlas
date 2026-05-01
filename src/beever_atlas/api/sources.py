@@ -27,9 +27,23 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from beever_atlas.infra.rate_limit import limiter
 from beever_atlas.models.persistence import ChannelMessage
 from beever_atlas.services.push_hmac import verify_push_signature
 from beever_atlas.stores import get_stores
+
+
+def _source_id_rate_key(request: Request) -> str:
+    """Slowapi ``key_func``: bucket per ``source_id`` path param.
+
+    slowapi's default key_func uses client IP, but a misbehaving OpenClaw
+    client might rotate egress IPs while still presenting the same HMAC
+    key, so the natural unit of trust + accountability is ``source_id``.
+    Falls back to ``"unknown"`` so an early-stage path-mismatch never
+    bypasses the limit entirely.
+    """
+    return str(request.path_params.get("source_id") or "unknown")
+
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +118,7 @@ class PushEventResponse(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
     response_model=PushEventResponse,
 )
+@limiter.limit("60/minute", key_func=_source_id_rate_key)
 async def post_source_events(
     source_id: str,
     request: Request,
