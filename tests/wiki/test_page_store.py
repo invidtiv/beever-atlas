@@ -111,13 +111,23 @@ class _FakeWikiPagesCollection:
         ):
             key = self._key(query)
             existing = self.docs.get(key)
-            if existing is None and not upsert:
+            is_insert = existing is None
+            if is_insert and not upsert:
                 return _FakeUpdateResult(0)
-            if existing is None:
+            if is_insert:
                 self.docs[key] = {}
                 existing = self.docs[key]
+            # Apply $setOnInsert FIRST so $set can override on update.
+            if is_insert:
+                for k, v in update.get("$setOnInsert", {}).items():
+                    existing[k] = v
             for k, v in update.get("$set", {}).items():
                 existing[k] = v
+            # $inc — atomic counter bump (PR-E close-out: WikiPageStore
+            # uses this to advance ``version`` without a read-modify-write
+            # race).
+            for k, v in update.get("$inc", {}).items():
+                existing[k] = (existing.get(k) or 0) + v
             for k, v in update.get("$push", {}).items():
                 if isinstance(v, dict) and "$each" in v:
                     existing.setdefault(k, []).extend(v["$each"])
@@ -203,6 +213,50 @@ async def test_save_page_bumps_version_on_each_save() -> None:
     fetched = await store.get_page("C1", "topic:auth")
     assert fetched is not None
     assert fetched.version == 3
+
+
+async def test_save_page_uses_atomic_inc_for_version() -> None:
+    """Code-review HIGH regression: ``save_page`` must use ``$inc`` for the
+    version bump rather than a read-then-write pattern. We verify by
+    inspecting the actual update operator the store sends to the
+    collection — if the implementation regressed to ``$set: {version: N+1}``,
+    two concurrent writers would both read N and both write N+1.
+
+    This test guards the contract structurally — the in-memory fake's
+    ``$inc`` handler does the right thing only because the production
+    code requested ``$inc``.
+    """
+    captured_updates: list[dict[str, Any]] = []
+
+    class _Capturer:
+        def __init__(self, inner):
+            self.inner = inner
+            self.docs = inner.docs
+
+        async def update_one(self, query, update, upsert=False):
+            captured_updates.append(update)
+            return await self.inner.update_one(query, update, upsert=upsert)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    fake = _FakeWikiPagesCollection()
+    capturer = _Capturer(fake)
+    store = WikiPageStore.__new__(WikiPageStore)
+    store._db = None  # type: ignore[attr-defined]
+    store._collection = capturer  # type: ignore[attr-defined]
+
+    await store.save_page(_make_page())
+    assert len(captured_updates) == 1
+    update = captured_updates[0]
+    assert "$inc" in update, (
+        "save_page must use $inc for version, not $set — otherwise concurrent writers race"
+    )
+    assert update["$inc"] == {"version": 1}
+    # And $set MUST NOT carry version (would override the atomic $inc).
+    assert "version" not in update.get("$set", {}), (
+        "version MUST NOT appear in $set — $inc is the only writer"
+    )
 
 
 async def test_save_page_isolates_channels() -> None:

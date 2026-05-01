@@ -110,35 +110,38 @@ class WikiPageStore:
         return pages
 
     async def save_page(self, page: WikiPage) -> None:
-        """Idempotent upsert — bumps ``version`` and ``updated_at``.
+        """Idempotent upsert — bumps ``version`` and ``updated_at`` atomically.
 
-        ``version`` increments by exactly one per save, so a future
-        ``WikiVersionStore`` migration can archive each prior version
-        without losing the linear edit history.
+        Code-review HIGH: uses ``$inc`` for the version bump rather than
+        a read-then-write ``existing.version + 1`` pattern, so two
+        concurrent saves on the same ``(channel_id, target_lang,
+        page_id)`` cannot both write the same version. The maintainer
+        runs single-threaded per channel today, but this keeps the
+        invariant intact when ``POST /wiki/edit`` lands.
         """
         if self._collection is None:
             raise RuntimeError("WikiPageStore not bound to a database")
-        existing = await self._collection.find_one(
-            {
-                "channel_id": page.channel_id,
-                "target_lang": page.target_lang,
-                "page_id": page.page_id,
-            },
-            {"version": 1},
-        )
-        next_version = int(existing.get("version", 0)) + 1 if existing else 1
+        # Build the $set document WITHOUT version — $inc handles that.
         doc = page.model_dump(mode="json")
-        doc["version"] = next_version
+        doc.pop("version", None)
         doc["updated_at"] = datetime.now(tz=UTC).isoformat()
+        on_insert: dict[str, Any] = {}
         if "created_at" not in doc or doc["created_at"] is None:
-            doc["created_at"] = doc["updated_at"]
+            on_insert["created_at"] = doc["updated_at"]
+            doc.pop("created_at", None)
+        update: dict[str, Any] = {
+            "$set": doc,
+            "$inc": {"version": 1},
+        }
+        if on_insert:
+            update["$setOnInsert"] = on_insert
         await self._collection.update_one(
             {
                 "channel_id": page.channel_id,
                 "target_lang": page.target_lang,
                 "page_id": page.page_id,
             },
-            {"$set": doc},
+            update,
             upsert=True,
         )
 

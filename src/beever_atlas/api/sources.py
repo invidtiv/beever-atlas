@@ -42,22 +42,27 @@ router = APIRouter()
 
 
 class PushEvent(BaseModel):
-    """One message in a push batch."""
+    """One message in a push batch.
 
-    message_id: str
+    Code-review M1: every variable-length field carries a ``max_length``
+    cap so a compromised source key cannot send a single 1GB message
+    that exhausts API server memory.
+    """
+
+    message_id: str = Field(max_length=512)
     """Source-stable identifier — combined with the path's ``source_id``
     and the body's ``channel_id`` forms the dedup key in
     ``channel_messages``."""
 
     timestamp: datetime
-    author: str = ""
-    author_name: str = ""
-    author_image: str = ""
-    content: str = ""
-    thread_id: str | None = None
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
-    reactions: list[dict[str, Any]] = Field(default_factory=list)
-    reply_count: int = 0
+    author: str = Field(default="", max_length=256)
+    author_name: str = Field(default="", max_length=256)
+    author_image: str = Field(default="", max_length=2048)
+    content: str = Field(default="", max_length=100_000)
+    thread_id: str | None = Field(default=None, max_length=512)
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    reactions: list[dict[str, Any]] = Field(default_factory=list, max_length=128)
+    reply_count: int = Field(default=0, ge=0, le=100_000)
     is_bot: bool = False
     raw_metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -65,16 +70,19 @@ class PushEvent(BaseModel):
 class PushEventRequest(BaseModel):
     """Body of the POST /api/sources/{source_id}/events request."""
 
-    channel_id: str
+    channel_id: str = Field(max_length=512)
     """Logical channel within the source (the source decides what
     counts as a channel — e.g. an OpenClaw conversation id, a Hermes
     agent session id)."""
 
-    channel_name: str = ""
+    channel_name: str = Field(default="", max_length=512)
     """Optional display label so the UI doesn't have to look up the
     channel by id every time. Defaults to ``channel_id``."""
 
-    events: list[PushEvent]
+    events: list[PushEvent] = Field(max_length=1000)
+    """Per-batch event cap of 1000. Code-review M1: prevents an
+    unbounded batch from blowing up the bulk_write op list. Sources
+    should chunk larger uploads."""
 
 
 class PushEventResponse(BaseModel):
@@ -114,19 +122,23 @@ async def post_source_events(
          strongly encouraged for retries).
     """
     stores = get_stores()
+    # Code-review M1: pre-flight content-length check rejects oversize
+    # payloads before reading them into memory. The Pydantic model also
+    # enforces per-field caps, but bailing early avoids the allocation.
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > 10_000_000:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Payload too large",
+        )
     body = await request.body()
 
-    # Look up the source's HMAC secret (stored as sha256 hash, but we
-    # need the plaintext to recompute the signature — so the source's
-    # original secret is recovered out-of-band, not stored. We store
-    # only the hash to detect rotation events.)
-    #
-    # Actually we DO need the plaintext: HMAC verification requires the
-    # key. The hash-stored variant uses a separate secret-resolver.
-    # For simplicity here we store the secret directly in a
-    # ``secret_plaintext`` field on the source registration when admin
-    # registers it. This is a pragmatic OSS-scale choice; enterprise
-    # would source from a KMS / secret manager.
+    # Look up the source's HMAC secret. ``ExternalSource.secret`` is
+    # the plaintext signing key (HMAC verification mathematically needs
+    # it); ``secret_fingerprint`` is the sha256 hex shown to operators
+    # for rotation observability. Plaintext storage is a documented OSS
+    # tradeoff — enterprise KMS integration is a separate path that
+    # swaps the secret resolver, not the verifier.
     source = await stores.mongodb.get_external_source(source_id)
     if source is None:
         # Generic 401 — do not leak whether the source exists.
@@ -161,9 +173,17 @@ async def post_source_events(
 
         payload = PushEventRequest.model_validate(json.loads(body))
     except Exception as exc:  # noqa: BLE001
+        # Code-review L4: don't echo exception class to the response —
+        # avoids leaking the server-side exception taxonomy to attackers
+        # who hold a valid HMAC key.
+        logger.warning(
+            "push_body_rejected source_id=%s reason=%s",
+            source_id,
+            type(exc).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Malformed body: {type(exc).__name__}",
+            detail="Malformed request body",
         ) from exc
 
     # Enforce the source's allowed_channels_pattern. ``*`` accepts all.

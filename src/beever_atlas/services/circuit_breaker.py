@@ -83,7 +83,13 @@ class CircuitBreaker:
         self._consecutive_failures: int = 0
         self._opened_at: float | None = None
         self._last_transition: str | None = None
-        self._lock: asyncio.Lock | None = None
+        # Code-review HIGH: eagerly create the lock. ``asyncio.Lock()``
+        # has not required a running event loop since Python 3.10 and
+        # this project requires 3.11+. Lazy creation under
+        # ``run_coroutine_threadsafe`` could race two threads into
+        # creating two different Lock instances, both proceeding
+        # without serialization.
+        self._lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -178,8 +184,6 @@ class CircuitBreaker:
     # ------------------------------------------------------------------
 
     def _get_lock(self) -> asyncio.Lock:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
         return self._lock
 
     def _transition(self, from_state: BreakerState, to_state: BreakerState) -> None:

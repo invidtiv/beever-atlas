@@ -180,9 +180,17 @@ class ExternalSource(BaseModel):
     (``POST /api/sources/{source_id}/events``). Convention: lowercase
     with-dashes-or-underscores. Example: ``openclaw-prod``."""
 
-    secret: str
+    secret: str = Field(exclude=True)
     """Plaintext HMAC-SHA256 signing key. Recommended length 32+ bytes
-    of random entropy. Stored to support verification."""
+    of random entropy. Stored to support verification.
+
+    Code-review CRITICAL: ``Field(exclude=True)`` keeps this out of any
+    API response that serializes ``ExternalSource`` via
+    ``model_dump()`` / FastAPI's automatic Pydantic encoding. The
+    plaintext is intentionally persisted (HMAC verification requires
+    the key) but MUST NOT appear in admin / list endpoints.
+    Verification reads it directly via ``get_external_source`` (see
+    ``api/sources.py``), bypassing the dump path."""
 
     secret_fingerprint: str = ""
     """sha256 hex of ``secret`` — exposed in admin endpoints so an
