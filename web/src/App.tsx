@@ -18,6 +18,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { NotFound } from "@/pages/NotFound";
+import { PushSources } from "@/pages/admin/PushSources";
 import { AskSessionsProvider } from "@/contexts/AskSessionsContext";
 import { TierBrowser } from "@/components/memories/TierBrowser";
 import { WikiTab } from "@/components/channel/WikiTab";
@@ -87,6 +88,7 @@ function AppShell() {
               <Route path="/ask/:sessionId" element={<AskPage />} />
               <Route path="/activity" element={<ActivityPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/admin/sources" element={<PushSources />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="*" element={<NotFound />} />
             </Routes>

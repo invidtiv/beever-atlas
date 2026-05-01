@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { AlertTriangle, ClipboardCheck, Loader2, Sparkles, X } from "lucide-react";
+import { AlertTriangle, ClipboardCheck, Loader2, RefreshCw, Sparkles, X, ListX } from "lucide-react";
 import { useWikiLint } from "@/hooks/useWikiLint";
 import { useWikiMaintain } from "@/hooks/useWikiMaintain";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { FailedBatchPanel } from "@/components/wiki/FailedBatchPanel";
 
 interface Props {
   channelId: string;
@@ -35,6 +37,7 @@ export function WikiHealthToolbar({ channelId, manualMode = true }: Props) {
   const lint = useWikiLint(channelId);
   const maintain = useWikiMaintain(channelId);
   const [reportOpen, setReportOpen] = useState(false);
+  const [failuresOpen, setFailuresOpen] = useState(false);
 
   const findingsCount = lint.report?.findings.length ?? 0;
   const errorCount = lint.report?.findings.filter((f) => f.severity === "error").length ?? 0;
@@ -43,106 +46,213 @@ export function WikiHealthToolbar({ channelId, manualMode = true }: Props) {
   return (
     <div className="flex items-center gap-2">
       {manualMode && (
-        <button
-          onClick={() => maintain.maintain()}
-          disabled={maintain.loading || !channelId}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-border/60 bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          title="Re-run the maintainer on pages flagged dirty since the last run"
-        >
-          {maintain.loading ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <Sparkles size={12} />
-          )}
-          {maintain.loading ? "Maintaining..." : "Maintain Wiki"}
-          {maintain.result && maintain.result.rewritten > 0 && (
-            <span className="text-muted-foreground">({maintain.result.rewritten})</span>
-          )}
-        </button>
+        <Tooltip>
+          <TooltipTrigger
+            aria-label="Maintain Wiki — re-run the maintainer on pages flagged dirty since the last run"
+            onClick={() => maintain.maintain()}
+            disabled={maintain.loading || !channelId}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-border/60 bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {maintain.loading ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Sparkles size={12} />
+            )}
+            {maintain.loading ? "Maintaining..." : "Maintain Wiki"}
+            {maintain.result && maintain.result.rewritten > 0 && (
+              <span className="text-muted-foreground">({maintain.result.rewritten})</span>
+            )}
+          </TooltipTrigger>
+          <TooltipContent>
+            Re-run the WikiMaintainer on all dirty pages. See{" "}
+            <a href="/docs/integrations/openclaw.md" className="underline" target="_blank" rel="noreferrer">
+              integration cookbook
+            </a>{" "}
+            for details.
+          </TooltipContent>
+        </Tooltip>
       )}
 
+      <Tooltip>
+        <TooltipTrigger
+          aria-label="Lint Wiki — scan for orphan, stale, duplicate, and coherence issues"
+          onClick={async () => {
+            await lint.runLint();
+            setReportOpen(true);
+          }}
+          disabled={lint.loading || !channelId}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-border/60 bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {lint.loading ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <ClipboardCheck size={12} />
+          )}
+          {lint.loading ? "Linting..." : "Lint Wiki"}
+          {findingsCount > 0 && (
+            <span className="ml-0.5 text-muted-foreground">
+              ({errorCount + warnCount > 0 ? `${errorCount + warnCount}!` : findingsCount})
+            </span>
+          )}
+        </TooltipTrigger>
+        <TooltipContent>
+          Scan the wiki for orphan, stale, duplicate, and coherence issues. See{" "}
+          <a href="/docs/integrations/openclaw.md" className="underline" target="_blank" rel="noreferrer">
+            integration cookbook
+          </a>{" "}
+          for details.
+        </TooltipContent>
+      </Tooltip>
+
       <button
-        onClick={async () => {
-          await lint.runLint();
-          setReportOpen(true);
-        }}
-        disabled={lint.loading || !channelId}
+        aria-label="View failed extractions"
+        onClick={() => setFailuresOpen((v) => !v)}
+        disabled={!channelId}
         className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-border/60 bg-background hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        title="Scan the wiki for orphan / stale / duplicate / coherence issues"
       >
-        {lint.loading ? (
-          <Loader2 size={12} className="animate-spin" />
-        ) : (
-          <ClipboardCheck size={12} />
-        )}
-        {lint.loading ? "Linting..." : "Lint Wiki"}
-        {findingsCount > 0 && (
-          <span className="ml-0.5 text-muted-foreground">
-            ({errorCount + warnCount > 0 ? `${errorCount + warnCount}!` : findingsCount})
-          </span>
-        )}
+        <ListX size={12} />
+        Failures
       </button>
 
-      {/* Lint findings panel — slides in below the toolbar when populated */}
-      {reportOpen && lint.report && (
-        <div className="fixed right-4 top-20 z-30 w-96 max-h-[70vh] overflow-y-auto rounded-lg border border-border bg-background shadow-lg p-3">
-          <header className="flex items-center justify-between mb-2">
+      {/* Lint findings panel — Sheet-style, slides from right */}
+      {reportOpen && (
+        <div
+          role="dialog"
+          aria-label="Lint findings"
+          className="fixed right-0 top-0 z-40 h-full w-full max-w-sm md:w-96 bg-background border-l border-border shadow-2xl flex flex-col"
+        >
+          <header className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
             <h3 className="text-sm font-semibold">
               Lint findings
-              <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                ({findingsCount} across {lint.report.pages_scanned} pages)
-              </span>
+              {lint.report && (
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                  ({findingsCount} across {lint.report.pages_scanned} pages)
+                </span>
+              )}
             </h3>
             <button
               onClick={() => setReportOpen(false)}
-              className="p-0.5 rounded hover:bg-muted"
+              className="p-0.5 rounded hover:bg-muted transition-colors"
               aria-label="Close findings"
             >
               <X size={14} />
             </button>
           </header>
-          {findingsCount === 0 ? (
-            <p className="text-xs text-muted-foreground py-3">
-              No issues — wiki is healthy.
-            </p>
-          ) : (
-            <ul className="space-y-1.5">
-              {lint.report.findings.map((f, i) => (
-                <li
-                  key={`${f.page_id}-${f.section_id || ""}-${i}`}
-                  className={`rounded border px-2 py-1.5 text-[11px] ${SEVERITY_STYLES[f.severity]}`}
-                >
-                  <div className="flex items-start gap-1.5">
-                    {f.severity === "error" || f.severity === "warning" ? (
-                      <AlertTriangle size={11} className="mt-0.5 shrink-0" />
-                    ) : null}
-                    <div className="min-w-0">
-                      <p className="font-medium truncate">
-                        {f.page_id}
-                        {f.section_id && (
-                          <span className="text-muted-foreground/70"> · {f.section_id}</span>
-                        )}
-                      </p>
-                      <p className="leading-snug">{f.message}</p>
-                      {f.suggested_action && (
-                        <p className="mt-0.5 text-muted-foreground italic">
-                          {f.suggested_action}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </li>
+
+          {/* Loading skeleton during lint scan */}
+          {lint.loading && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex-1 px-4 py-4 space-y-2"
+            >
+              <p className="text-xs text-muted-foreground mb-3">
+                Scanning {lint.report?.pages_scanned ?? "…"} pages…
+              </p>
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="h-12 rounded-lg bg-muted animate-pulse" />
               ))}
-            </ul>
+            </div>
+          )}
+
+          {!lint.loading && lint.error && (
+            <div className="flex-1 px-4 py-6 space-y-3">
+              <p className="text-sm text-rose-600 dark:text-rose-400">Lint failed: {lint.error}</p>
+              <button
+                type="button"
+                onClick={async () => {
+                  await lint.runLint();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-border hover:bg-muted transition-colors"
+                aria-label="Retry lint"
+              >
+                <RefreshCw size={12} />
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!lint.loading && !lint.error && lint.report && (
+            <div className="flex-1 overflow-y-auto px-4 py-3">
+              {findingsCount === 0 ? (
+                <p className="text-xs text-muted-foreground py-3">
+                  No issues — wiki is healthy.
+                </p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {lint.report.findings.map((f, i) => (
+                    <li
+                      key={`${f.page_id}-${f.section_id || ""}-${i}`}
+                      className={`rounded border px-2 py-1.5 text-[11px] ${SEVERITY_STYLES[f.severity]}`}
+                    >
+                      <div className="flex items-start gap-1.5">
+                        {f.severity === "error" || f.severity === "warning" ? (
+                          <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+                        ) : null}
+                        <div className="min-w-0">
+                          <p className="font-medium truncate">
+                            {f.page_id}
+                            {f.section_id && (
+                              <span className="text-muted-foreground/70"> · {f.section_id}</span>
+                            )}
+                          </p>
+                          <p className="leading-snug">{f.message}</p>
+                          {f.suggested_action && (
+                            <p className="mt-0.5 text-muted-foreground italic">
+                              {f.suggested_action}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {/* View failures button inside findings panel */}
+          {channelId && (
+            <div className="px-4 py-3 border-t border-border shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setReportOpen(false);
+                  setFailuresOpen(true);
+                }}
+                aria-label="View failed extractions"
+                className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-md border border-border hover:bg-muted transition-colors"
+              >
+                <ListX size={12} />
+                View failed extractions
+              </button>
+            </div>
           )}
         </div>
       )}
 
-      {lint.error && (
-        <span className="text-xs text-red-600 dark:text-red-400">Lint failed</span>
-      )}
+      {/* Maintain error retry */}
       {maintain.error && (
-        <span className="text-xs text-red-600 dark:text-red-400">Maintain failed</span>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-red-600 dark:text-red-400">Maintain failed</span>
+          <button
+            type="button"
+            onClick={() => maintain.maintain()}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border border-border hover:bg-muted transition-colors"
+            aria-label="Retry maintain"
+          >
+            <RefreshCw size={10} />
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Failed extractions panel */}
+      {failuresOpen && channelId && (
+        <FailedBatchPanel
+          channelId={channelId}
+          onClose={() => setFailuresOpen(false)}
+        />
       )}
     </div>
   );

@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { Loader2, Clock, Zap, Calendar, Hand, ChevronDown, ChevronRight, Settings2, Info, Sparkles, FolderTree, BookOpen } from "lucide-react";
 import { useChannelPolicy } from "@/hooks/useChannelPolicy";
 import { cn } from "@/lib/utils";
-import type { SyncConfig, IngestionConfig, ConsolidationConfig, ConsolidationStrategy, WikiConfig, WikiGenerationStrategy } from "@/lib/types";
+import type { SyncConfig, IngestionConfig, ConsolidationConfig, ConsolidationStrategy, WikiConfig, WikiGenerationStrategy, WikiMaintenanceMode } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -394,7 +394,7 @@ export function ChannelSettingsTab() {
           </div>
 
           {/* ── 2c: Wiki generation ─────────────────────────── */}
-          <div className="rounded-2xl border border-border bg-card px-5 py-4 space-y-4">
+          <div className="rounded-2xl border border-border bg-card px-5 py-4 space-y-4" data-testid="wiki-generation-section">
             <div className="flex items-center gap-2">
               <BookOpen className="h-4 w-4 text-primary" />
               <h4 className="text-sm font-semibold text-foreground">Wiki generation</h4>
@@ -454,6 +454,70 @@ export function ChannelSettingsTab() {
               </>
             )}
           </div>
+          {/* ── 2d: Wiki maintenance mode ───────────────────── */}
+          <div className="rounded-2xl border border-border bg-card px-5 py-4 space-y-4" data-testid="wiki-maintenance-section">
+            <div className="flex items-center gap-2">
+              <BookOpen className="h-4 w-4 text-primary" />
+              <h4 className="text-sm font-semibold text-foreground">Wiki maintenance</h4>
+            </div>
+            <Tip>
+              Controls when the WikiMaintainer rewrites pages. <strong>Auto</strong> fires automatically after each extraction batch. <strong>Manual</strong> only runs when you click "Maintain Wiki" in the wiki toolbar. <strong>Inherit</strong> uses the server-wide default.{" "}
+              <a
+                href="/docs/integrations/wiki-maintenance.md"
+                className="underline hover:text-primary"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Learn more
+              </a>
+            </Tip>
+            <div className="space-y-1.5">
+              {(
+                [
+                  {
+                    value: "auto" as WikiMaintenanceMode,
+                    label: "Auto",
+                    hint: "Pages are maintained automatically after each extraction batch",
+                  },
+                  {
+                    value: "manual" as WikiMaintenanceMode,
+                    label: "Manual",
+                    hint: "Pages are only maintained when you trigger it explicitly",
+                  },
+                  {
+                    value: "inherit" as WikiMaintenanceMode,
+                    label: "Inherit (use global default)",
+                    hint: "Falls back to the server-wide WIKI_MAINTENANCE_MODE setting",
+                  },
+                ] as const
+              ).map((opt) => (
+                <label
+                  key={opt.value}
+                  className={cn(
+                    "flex items-start gap-2.5 cursor-pointer rounded-lg px-3 py-2.5 transition-colors",
+                    (wiki.maintenance_mode ?? "inherit") === opt.value
+                      ? "bg-primary/5"
+                      : "hover:bg-muted/30",
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="wiki_maintenance_mode"
+                    checked={(wiki.maintenance_mode ?? "inherit") === opt.value}
+                    onChange={() =>
+                      setWiki((prev) => ({ ...prev, maintenance_mode: opt.value }))
+                    }
+                    className="accent-primary mt-0.5"
+                  />
+                  <div>
+                    <div className="text-sm text-foreground">{opt.label}</div>
+                    <div className="text-[11px] text-muted-foreground">{opt.hint}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+
         </div>
       )}
 

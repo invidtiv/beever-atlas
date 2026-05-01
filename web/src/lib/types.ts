@@ -534,6 +534,8 @@ export interface ConsolidationConfig {
 
 export type WikiGenerationStrategy = "after_every_sync" | "after_consolidation" | "scheduled" | "manual";
 
+export type WikiMaintenanceMode = "auto" | "manual" | "inherit";
+
 export interface WikiConfig {
   enabled: boolean | null;
   generation_strategy: WikiGenerationStrategy | null;
@@ -541,6 +543,7 @@ export interface WikiConfig {
   auto_regenerate_on_stale: boolean | null;
   min_facts_for_generation: number | null;
   topic_subpage_threshold: number | null;
+  maintenance_mode?: WikiMaintenanceMode | null;
 }
 
 export interface ChannelPolicyResponse {

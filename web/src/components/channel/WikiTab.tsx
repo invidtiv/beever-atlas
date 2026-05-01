@@ -4,6 +4,7 @@ import { wikiT } from "@/lib/wikiI18n";
 import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, ArrowRight, FolderSync, History as HistoryIcon } from "lucide-react";
 import { PipelineEmptyState } from "@/components/shared/PipelineEmptyState";
 import { useWiki } from "@/hooks/useWiki";
+import { useExtractionStatus } from "@/hooks/useExtractionStatus";
 import { useWikiPage } from "@/hooks/useWikiPage";
 import { useWikiRefresh, type WikiGenerationStatus } from "@/hooks/useWikiRefresh";
 import { useWikiVersions } from "@/hooks/useWikiVersions";
@@ -453,6 +454,14 @@ export function WikiTab() {
     generationStatus,
   } = useWikiRefresh(channelId, targetLang);
 
+  const { status: extractionStatus } = useExtractionStatus(channelId, {
+    isSyncing: isRefreshing,
+  });
+  const showEnrichmentRow =
+    extractionStatus !== null &&
+    ((extractionStatus.counts.pending ?? 0) > 0 ||
+      (extractionStatus.counts.extracting ?? 0) > 0);
+
   const handleRefresh = useCallback(() => {
     triggerRefresh(() => {
       refetch();
@@ -703,6 +712,21 @@ export function WikiTab() {
         )}
         {viewingVersionNumber === null && isRefreshing && generationStatus && generationStatus.status === "running" && (
           <WikiRegeneratingBanner status={generationStatus} />
+        )}
+        {showEnrichmentRow && extractionStatus && (
+          <div
+            data-testid="enrichment-status-row"
+            className="mb-4 flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-foreground"
+          >
+            <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
+            <span>
+              Enriching{" "}
+              <strong>
+                {(extractionStatus.counts.pending ?? 0) + (extractionStatus.counts.extracting ?? 0)}
+              </strong>{" "}
+              of <strong>{extractionStatus.total}</strong> messages &mdash; wiki refresh queued
+            </span>
+          </div>
         )}
         {pageContent}
       </>
