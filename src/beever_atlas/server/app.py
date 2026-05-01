@@ -169,6 +169,44 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logging.getLogger(__name__).warning("SyncScheduler startup failed (non-fatal): %s", exc)
 
+    # Wire the WikiMaintainer singleton + subscribe it to ExtractionWorker
+    # events. Must happen AFTER ``scheduler.startup()`` because the
+    # ExtractionWorker singleton is registered by
+    # ``SyncScheduler._register_extraction_worker_jobs``. When auto mode is
+    # configured, every successful extraction batch fans out to
+    # ``WikiMaintainer.on_extraction_done`` so affected wiki pages refresh
+    # incrementally without waiting on a full consolidation pass.
+    try:
+        import asyncio as _asyncio
+
+        from beever_atlas.services.extraction_worker import get_extraction_worker
+        from beever_atlas.services.wiki_maintainer import (
+            WikiMaintainer,
+            init_wiki_maintainer,
+        )
+        from beever_atlas.wiki.page_store import WikiPageStore
+
+        page_store = WikiPageStore(db=stores.mongodb.db)
+        await page_store.ensure_indexes()
+        maintainer = WikiMaintainer(page_store=page_store)
+        init_wiki_maintainer(maintainer)
+
+        worker = get_extraction_worker()
+        if worker is not None:
+            _maintenance_mode = settings.wiki_maintenance_mode
+
+            def _on_extraction_done(channel_id: str, fact_ids: list[str]):
+                # Fire-and-forget so the worker's batch loop is never
+                # blocked by maintainer LLM calls. Per-page exceptions are
+                # already swallowed inside ``on_extraction_done``.
+                _asyncio.create_task(
+                    maintainer.on_extraction_done(channel_id, fact_ids, mode=_maintenance_mode)
+                )
+
+            worker.subscribe_extraction_done(_on_extraction_done)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("WikiMaintainer init failed (non-fatal): %s", exc)
+
     # Initialize outbound MCP registry — non-blocking, skips unreachable servers
     from beever_atlas.agents.mcp_registry import init_mcp_registry
 
