@@ -1,4 +1,4 @@
-"""Background extraction worker (PR-B).
+"""Background extraction worker.
 
 Drains pending messages from the durable Message Store and feeds them
 through the existing ``BatchProcessor`` so sync (fetch + persist) is
@@ -34,10 +34,10 @@ logger = logging.getLogger(__name__)
 ExtractionDoneCallback = Callable[[str, list[str]], Awaitable[None] | None]
 """Signature for ``on_extraction_done`` subscribers (channel_id, fact_ids).
 
-PR-F's :class:`WikiMaintainer` will subscribe to this event to route
-freshly-extracted facts to affected wiki pages. The worker fans out via
-``asyncio.gather`` and tolerates per-callback failures so one buggy
-subscriber cannot block extraction progress.
+:class:`WikiMaintainer` subscribes to this event to route freshly-extracted
+facts to affected wiki pages. The worker fans out via ``asyncio.gather`` and
+tolerates per-callback failures so one buggy subscriber cannot block
+extraction progress.
 """
 
 
@@ -115,7 +115,7 @@ longer than this is reset to ``pending`` (worker crash recovery).
 def _retry_backoff_seconds(attempt_count: int) -> int:
     """Look up the backoff seconds for a given attempt count.
 
-    Spec D6 / PR-C: monotonic exponential schedule capped at the tail.
+    Monotonic exponential schedule capped at the tail.
     """
     if attempt_count <= 0:
         return _RETRY_BACKOFF_SCHEDULE[0]
@@ -147,10 +147,10 @@ class ExtractionWorker:
         stale_seconds: int = 600,
         breaker: "CircuitBreaker | None" = None,
     ) -> None:
-        # PR-C: pass the same CircuitBreaker singleton into the
-        # BatchProcessor so the worker path and the inline path share
-        # one breaker — a 503 storm against the worker trips the same
-        # breaker that the inline path observes.
+        # Pass the same CircuitBreaker singleton into the BatchProcessor
+        # so the worker path and the inline path share one breaker —
+        # a 503 storm against the worker trips the same breaker that
+        # the inline path observes.
         from beever_atlas.services.circuit_breaker import get_circuit_breaker
 
         breaker = breaker or get_circuit_breaker()
@@ -165,14 +165,14 @@ class ExtractionWorker:
         self._on_extraction_done: list[ExtractionDoneCallback] = []
 
     # ------------------------------------------------------------------
-    # Event subscription (used by PR-F WikiMaintainer)
+    # Event subscription (used by WikiMaintainer)
     # ------------------------------------------------------------------
 
     def subscribe_extraction_done(self, callback: ExtractionDoneCallback) -> None:
         """Register a coroutine called after each successful batch.
 
         Subscribers receive ``(channel_id, fact_ids)``. Synchronous
-        callbacks are tolerated. PR-F will use this to fire
+        callbacks are tolerated. :class:`WikiMaintainer` uses this to fire
         :meth:`WikiMaintainer.on_extraction_done` so wiki pages refresh
         incrementally instead of waiting on full consolidation.
         """
@@ -241,13 +241,13 @@ class ExtractionWorker:
             async with self._semaphore:
                 return await self._process_channel_batch(ch_id, docs)
 
-        # Code-review fix (CRITICAL): use ``return_exceptions=True`` so a
-        # raise in one channel's processing does NOT cancel siblings and
-        # orphan their claimed-but-not-finalized rows. Each channel's
-        # success/failure tally is returned and summed AFTER gather, so
-        # there is no shared-mutation race on ``counters``. If a sibling
-        # itself crashes, we mark its claimed rows as failed via the
-        # store so the stale-sweep doesn't have to recover them later.
+        # Use ``return_exceptions=True`` so a raise in one channel's
+        # processing does NOT cancel siblings and orphan their
+        # claimed-but-not-finalized rows. Each channel's success/failure
+        # tally is returned and summed AFTER gather, so there is no
+        # shared-mutation race on ``counters``. If a sibling itself crashes,
+        # we mark its claimed rows as failed via the store so the
+        # stale-sweep doesn't have to recover them later.
         results: list[tuple[int, int] | BaseException] = await asyncio.gather(
             *[_process_channel(ch, docs) for ch, docs in by_channel.items()],
             return_exceptions=True,
@@ -322,10 +322,10 @@ class ExtractionWorker:
 
         Returns ``(succeeded_count, failed_count)``. On uncaught
         exception during ``process_messages`` the entire claimed batch is
-        transitioned to ``failed`` (per-message error attribution
-        requires per-row provenance from the BatchProcessor; that's
-        out-of-scope for PR-B). Per-row exponential backoff is applied
-        based on each row's ``attempt_count``.
+        transitioned to ``failed`` (per-message error attribution requires
+        per-row provenance from the BatchProcessor; that's a future
+        enhancement). Per-row exponential backoff is applied based on each
+        row's ``attempt_count``.
         """
         from beever_atlas.stores import get_stores
 
@@ -448,8 +448,8 @@ def init_extraction_worker(worker: ExtractionWorker) -> None:
     """Register the process-wide ExtractionWorker instance.
 
     Used by :class:`SyncScheduler` at startup so other services
-    (PR-F WikiMaintainer, admin endpoints) can subscribe to events
-    without threading a reference through every constructor.
+    (WikiMaintainer, admin endpoints) can subscribe to events without
+    threading a reference through every constructor.
     """
     global _worker_instance
     _worker_instance = worker

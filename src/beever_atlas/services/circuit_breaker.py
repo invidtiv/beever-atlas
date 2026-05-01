@@ -1,7 +1,7 @@
-"""Injectable LLM circuit breaker (PR-C).
+"""Injectable LLM circuit breaker.
 
-Replaces the module-level globals that previously lived at
-``services/batch_processor.py:53-54`` (``_consecutive_503_count`` /
+Replaces the module-level globals that previously lived in
+``services/batch_processor.py`` (``_consecutive_503_count`` /
 ``_consecutive_503_lock``). Module-level asyncio primitives are not
 test-injectable and bind to whichever event loop first imports the
 module — pytest tearing down a TestClient loop and starting a new one
@@ -92,12 +92,11 @@ class CircuitBreaker:
         self._consecutive_failures: int = 0
         self._opened_at: float | None = None
         self._last_transition: str | None = None
-        # Code-review HIGH: eagerly create the lock. ``asyncio.Lock()``
-        # has not required a running event loop since Python 3.10 and
-        # this project requires 3.11+. Lazy creation under
-        # ``run_coroutine_threadsafe`` could race two threads into
-        # creating two different Lock instances, both proceeding
-        # without serialization.
+        # Eagerly create the lock. ``asyncio.Lock()`` has not required a
+        # running event loop since Python 3.10 and this project requires
+        # 3.11+. Lazy creation under ``run_coroutine_threadsafe`` could race
+        # two threads into creating two different Lock instances, both
+        # proceeding without serialization.
         self._lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -258,8 +257,7 @@ def reset_circuit_breaker_for_tests() -> None:
 
     Replaces the autouse fixture's ad-hoc reset of ``_consecutive_503_*``
     module-globals in ``tests/test_sync_runner.py``. With this in place,
-    PR-A.6.1's test-pollution workaround is no longer needed because
-    the new flow has no module-globals to bleed across tests.
+    The new flow has no module-globals to bleed across tests.
     """
     global _breaker_instance
     _breaker_instance = None

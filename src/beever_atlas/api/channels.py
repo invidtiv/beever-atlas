@@ -189,17 +189,17 @@ def _apply_language_state(resp: ChannelResponse, state: Any | None) -> ChannelRe
 def _channel_message_row_to_response(row: dict[str, Any], channel_id: str) -> "MessageResponse":
     """Map a ``channel_messages`` row dict back to the API ``MessageResponse``.
 
-    PR-A.5 — used by the dual-read path when ``READ_FROM_MESSAGE_STORE`` is ON.
-    Mirrors the field mapping the legacy adapter path applied at
-    ``api/channels.py:448-467``: ``raw_metadata.is_bot`` and ``raw_metadata.links``
-    are surfaced as top-level fields, ``timestamp`` is rendered as ISO 8601, and
-    the API derives ``platform`` from the source row (``source_id`` for chat
-    adapters maps 1:1 to platform name in PR-A.3's ``_normalized_to_channel_messages``).
+    Used by the dual-read path when ``READ_FROM_MESSAGE_STORE`` is ON.
+    Mirrors the field mapping the legacy adapter path applies:
+    ``raw_metadata.is_bot`` and ``raw_metadata.links`` are surfaced as
+    top-level fields, ``timestamp`` is rendered as ISO 8601, and the API
+    derives ``platform`` from the row's ``source_id`` (for chat adapters
+    this maps 1:1 to the platform name).
 
-    PR-A.6.1 (review m6): ``channel_name`` is now persisted on the row by the
-    sync writer, so the response carries the platform's display name instead
-    of falling back to the opaque ``channel_id``. The ``channel_id`` fallback
-    remains for any row written before PR-A.6.1 ships (back-compat).
+    ``channel_name`` is persisted on the row by the sync writer, so the
+    response carries the platform's display name instead of falling back
+    to the opaque ``channel_id``. The ``channel_id`` fallback remains for
+    rows written before this field was added (back-compat).
     """
     raw_metadata = row.get("raw_metadata") or {}
     ts = row.get("timestamp")
@@ -256,11 +256,11 @@ async def _fetch_file_messages(
 ) -> "MessagesListResponse":
     """Read persisted messages for a file-imported channel.
 
-    PR-A.6.2 — When ``READ_FILE_IMPORTS_FROM_CHANNEL_MESSAGES`` is ON AND
+    When ``READ_FILE_IMPORTS_FROM_CHANNEL_MESSAGES`` is ON AND
     ``channel_messages`` carries rows for this channel with
     ``source_id="file"``, the request is served from the unified Message
     Store. Otherwise falls back to the legacy ``imported_messages``
-    collection. Mirrors the dual-read pattern from PR-A.5.
+    collection. Mirrors the dual-read pattern for platform channels.
     """
     stores = get_stores()
     settings = get_settings()
@@ -553,13 +553,12 @@ async def get_channel_messages(
     if since:
         since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
 
-    # PR-A.5 — Dual-read fallback during migration. When the
-    # READ_FROM_MESSAGE_STORE flag is ON, prefer the durable
-    # ``channel_messages`` collection populated by the sync runner (PR-A.3)
-    # and fall back to ``adapter.fetch_history`` when (a) the store has zero
-    # rows for this channel, or (b) a sync is currently writing into it
-    # (status="running") — in either case the user might otherwise see
-    # partial data. See
+    # Dual-read fallback during migration. When the READ_FROM_MESSAGE_STORE
+    # flag is ON, prefer the durable ``channel_messages`` collection populated
+    # by the sync runner and fall back to ``adapter.fetch_history`` when
+    # (a) the store has zero rows for this channel, or (b) a sync is currently
+    # writing into it (status="running") — in either case the user might
+    # otherwise see partial data. See
     # ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``
     # → "Dual-read fallback during migration".
     if get_settings().read_from_message_store:
@@ -696,9 +695,8 @@ async def get_channel_extraction_status(
 ) -> dict[str, Any]:
     """Return per-status extraction counts for a channel.
 
-    PR-B (extraction-worker spec). Backs the frontend's "Enriching: X
-    of Y messages complete" progress row that replaces the wall-of-503
-    banner when ``DECOUPLE_EXTRACTION`` is ON. Counts are aggregated
+    Backs the frontend's "Enriching: X of Y messages complete" progress
+    row shown when ``DECOUPLE_EXTRACTION`` is ON. Counts are aggregated
     via a single MongoDB pipeline that hits the partial-filter index
     on ``(extraction_status, next_attempt_at)``.
 

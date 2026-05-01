@@ -415,18 +415,16 @@ class Settings(BaseSettings):
         alias="BEEVER_LOADER_RAW_KEY_FALLBACK",
     )
 
-    # OSS pipeline + wiki redesign — PR-A.5 dual-read fallback.
+    # Dual-read fallback for channel messages.
     # When True, ``GET /api/channels/{channel_id}/messages`` reads from the
-    # durable ``channel_messages`` collection (PR-A.1) populated by the sync
-    # runner (PR-A.3). Falls back to ``adapter.fetch_history`` when the store
-    # is empty for that channel OR a sync is currently running (so partial
-    # rows are not surfaced mid-flight). Default OFF — staging soak before
-    # flipping in production. See
-    # ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``
+    # durable ``channel_messages`` collection populated by the sync runner.
+    # Falls back to ``adapter.fetch_history`` when the store is empty for that
+    # channel OR a sync is currently running (so partial rows are not surfaced
+    # mid-flight). Default OFF — staging soak before flipping in production.
+    # See ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``
     # → "Dual-read fallback during migration".
     read_from_message_store: bool = Field(default=False, alias="READ_FROM_MESSAGE_STORE")
 
-    # OSS pipeline + wiki redesign — PR-A.6.2 file-imports cutover.
     # Read-side flag for the file-imports branch in ``api/channels.py``.
     # When True AND ``channel_messages`` carries rows for the requested
     # file channel (``source_id="file"``), the messages tab serves data
@@ -437,7 +435,7 @@ class Settings(BaseSettings):
         default=False, alias="READ_FILE_IMPORTS_FROM_CHANNEL_MESSAGES"
     )
 
-    # OSS pipeline + wiki redesign — PR-A.6.2 dual-write window.
+    # Dual-write window for file imports.
     # When True, ``api/imports.commit_import`` writes new file-import rows
     # to BOTH ``channel_messages`` (the new home) and ``imported_messages``
     # (legacy, kept for instant rollback). Default ON for the soak window;
@@ -447,18 +445,17 @@ class Settings(BaseSettings):
     # this flag — only the legacy collection write is gated.
     write_dual_file_imports: bool = Field(default=True, alias="WRITE_DUAL_FILE_IMPORTS")
 
-    # OSS pipeline + wiki redesign — PR-B background extraction worker.
+    # Background extraction worker flag.
     # When True, ``services/sync_runner.py`` skips the inline
     # ``BatchProcessor.process_messages()`` call after upserting messages
-    # to ``channel_messages``. The background ``ExtractionWorker``
-    # registered by the scheduler then claims the rows in the next tick
-    # (default 30s) and runs the 6-stage ADK pipeline asynchronously.
-    # This is the primary lever that makes a Gemini 503 storm survivable
-    # — sync (fetch + persist) finishes in seconds; extraction proceeds
-    # in the background and retries with exponential backoff. Default
-    # OFF — staging soak (48h) before flipping in production. Rollback
-    # is reversible: flipping OFF returns to inline extraction; the
-    # worker idles harmlessly with no rows to claim.
+    # to ``channel_messages``. The background ExtractionWorker registered
+    # by the scheduler claims the rows in the next tick (default 30 s) and
+    # runs the 6-stage ADK pipeline asynchronously. This is the primary
+    # lever that makes a Gemini 503 storm survivable — sync (fetch + persist)
+    # finishes in seconds; extraction proceeds in the background and retries
+    # with exponential backoff. Default OFF — staging soak (48 h) before
+    # flipping in production. Rollback is reversible: flipping OFF returns to
+    # inline extraction; the worker idles harmlessly with no rows to claim.
     decouple_extraction: bool = Field(default=False, alias="DECOUPLE_EXTRACTION")
 
     # Tuning knobs (worker tick interval, stale-recovery window, max
@@ -468,21 +465,19 @@ class Settings(BaseSettings):
     # (``services/extraction_worker.py``, ``services/circuit_breaker.py``,
     # ``llm/provider.py``). Operator-tunable env vars are reserved for
     # behavior that an on-call would actually flip during an incident
-    # — capacity planning belongs in code-review-able PRs.
+    # — capacity planning belongs in reviewed PRs.
 
-    # OSS pipeline + wiki redesign — PR-E per-page wiki page-store.
-    # When True, ``WikiCache.get_page`` reads from the new
-    # ``wiki_pages`` collection (one document per
-    # (channel_id, target_lang, page_id)). When False, falls back to
-    # the legacy ``wiki_cache`` flat-pages-subdoc schema. Writes always
-    # go to the new collection so flipping the flag back to OFF after
-    # a soak doesn't lose page edits made under the new path. Default
-    # OFF — staging soak (48h) before flipping in production. Per-page
-    # incremental update (PR-F maintainer) requires PER_PAGE_WIKI=True
-    # to be effective.
+    # Per-page wiki page-store flag.
+    # When True, ``WikiCache.get_page`` reads from the ``wiki_pages``
+    # collection (one document per (channel_id, target_lang, page_id)).
+    # When False, falls back to the legacy ``wiki_cache`` flat-pages-subdoc
+    # schema. Writes always go to the new collection so flipping the flag
+    # back to OFF after a soak doesn't lose page edits made under the new
+    # path. Default OFF — staging soak (48 h) before flipping in production.
+    # Per-page incremental update via WikiMaintainer requires PER_PAGE_WIKI=True.
     per_page_wiki: bool = Field(default=False, alias="PER_PAGE_WIKI")
 
-    # OSS pipeline + wiki redesign — PR-F WikiMaintainer mode.
+    # WikiMaintainer mode.
     # ``manual``: maintainer marks affected pages is_dirty=True on
     # extraction events; user clicks "Maintain Wiki" to drain the
     # dirty queue on demand. Default — conservative for soak.

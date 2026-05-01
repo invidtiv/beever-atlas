@@ -49,7 +49,7 @@ async def _get_limiter(provider: str) -> AsyncLimiter:
     return _provider_limiters[provider]
 
 
-# PR-C: ``_consecutive_503_count`` and ``_consecutive_503_lock`` removed —
+# ``_consecutive_503_count`` and ``_consecutive_503_lock`` have been removed —
 # the breaker now lives in ``services/circuit_breaker.py`` and is injected
 # via :class:`BatchProcessor.__init__`. Tests that previously depended on
 # resetting these module-globals can drop their workaround fixture.
@@ -225,10 +225,10 @@ class BatchProcessor:
     """Chunks messages into batches and runs each through the ingestion pipeline."""
 
     def __init__(self, breaker: "CircuitBreaker | None" = None) -> None:
-        # PR-C: inject the CircuitBreaker so test fixtures can hand in a
-        # fresh instance and there are no module-globals to bleed across
-        # tests. Default singleton is shared with ExtractionWorker so a
-        # 503 storm trips one breaker that both call sites observe.
+        # Inject the CircuitBreaker so test fixtures can hand in a fresh
+        # instance and there are no module-globals to bleed across tests.
+        # Default singleton is shared with ExtractionWorker so a 503 storm
+        # trips one breaker that both call sites observe.
         from beever_atlas.services.circuit_breaker import get_circuit_breaker
 
         self._breaker = breaker or get_circuit_breaker()
@@ -326,8 +326,8 @@ class BatchProcessor:
                     _semaphore_wait_s,
                 )
                 # ── Circuit breaker: fail fast if provider is down ────────────
-                # PR-C: replaced module-globals with injected breaker. The
-                # half-open recovery path is automatic — if the breaker is
+                # The injected breaker replaces the old module-globals.
+                # The half-open recovery path is automatic — if the breaker is
                 # open but the cooldown has elapsed, allow() transitions to
                 # half_open and returns True, letting one probe through.
                 if not await self._breaker.allow():
@@ -1301,7 +1301,7 @@ class BatchProcessor:
                         weaviate_ids = persist_result.get("weaviate_ids") or []
                         for idx, fd in enumerate(embedded_facts_raw):
                             fact_channel = fd.get("channel_id") or channel_id
-                            # PR-B: content-derived deterministic ID for the
+                            # Content-derived deterministic ID for the
                             # contradiction-detector fallback path. Mirrors the
                             # persister so re-runs map to the same fact_id.
                             entity_names = fd.get("entity_tags") or []

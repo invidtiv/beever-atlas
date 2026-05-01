@@ -26,7 +26,7 @@ _MODEL_ALIASES: dict[str, str] = {
 # Ollama fallback model when local service is unreachable
 _OLLAMA_FALLBACK = "gemini-2.5-flash-lite"
 
-# PR-C provider failover — out of OSS scope per the architecture doc.
+# Provider failover — out of OSS scope per the architecture doc.
 # Hardcoded to disabled. Enterprise tier flips ``_FAILOVER_ENABLED`` to
 # True and populates ``_FALLBACK_MAP`` with their multi-provider routing
 # (e.g. ``"gemini-2.5-pro": "claude-3-5-sonnet"``). The map shape uses
@@ -69,8 +69,8 @@ class LLMProvider:
         Priority: MongoDB override → default map → LLM_FAST_MODEL env var.
         Returns a string (Gemini) or LiteLlm instance (Ollama).
 
-        PR-C provider failover seam: when ``_FAILOVER_ENABLED=True`` AND
-        the global CircuitBreaker is open AND the resolved model has a
+        Provider failover seam: when ``_FAILOVER_ENABLED=True`` AND the
+        global CircuitBreaker is open AND the resolved model has a
         ``_FALLBACK_MAP`` entry, the call is re-mapped to the fallback
         model. Out of OSS scope by default — enterprise enablement flips
         the module constants in code (NO env var since failover requires
@@ -87,7 +87,7 @@ class LLMProvider:
 
         model_str = self._resolve_alias(model_str, f"agent={agent_name}")
 
-        # PR-C: provider failover seam.
+        # Provider failover seam.
         # Out of OSS scope per docs/architecture/oss-pipeline.md — multi-
         # provider failover requires a second-provider key (Claude /
         # OpenAI) which OSS doesn't ship. The seam is preserved as code

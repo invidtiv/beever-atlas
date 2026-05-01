@@ -1,4 +1,4 @@
-"""Push-source ingest endpoint (PR-D).
+"""Push-source ingest endpoint.
 
 Lets external agent runtimes (OpenClaw, Hermes Agent) push messages
 into Beever Atlas's durable Message Store via:
@@ -11,7 +11,7 @@ into Beever Atlas's durable Message Store via:
 
 The payload lands in ``channel_messages`` with the registered
 ``source_id`` (preserves source provenance for queries) and
-``extraction_status="pending"`` so the worker (PR-B) picks them up
+``extraction_status="pending"`` so the ExtractionWorker picks them up
 in the next tick. Returns 202 Accepted with counters for the
 sender — it should NOT block on extraction completion.
 
@@ -44,9 +44,9 @@ router = APIRouter()
 class PushEvent(BaseModel):
     """One message in a push batch.
 
-    Code-review M1: every variable-length field carries a ``max_length``
-    cap so a compromised source key cannot send a single 1GB message
-    that exhausts API server memory.
+    Every variable-length field carries a ``max_length`` cap so a
+    compromised source key cannot send a single 1 GB message that
+    exhausts API server memory.
     """
 
     message_id: str = Field(max_length=512)
@@ -80,9 +80,9 @@ class PushEventRequest(BaseModel):
     channel by id every time. Defaults to ``channel_id``."""
 
     events: list[PushEvent] = Field(max_length=1000)
-    """Per-batch event cap of 1000. Code-review M1: prevents an
-    unbounded batch from blowing up the bulk_write op list. Sources
-    should chunk larger uploads."""
+    """Per-batch event cap of 1000 — prevents an unbounded batch from
+    blowing up the bulk_write op list. Sources should chunk larger
+    uploads."""
 
 
 class PushEventResponse(BaseModel):
@@ -122,15 +122,15 @@ async def post_source_events(
          strongly encouraged for retries).
     """
     stores = get_stores()
-    # Code-review M1 + HIGH (second pass): hard memory cap on the
-    # request body. Reads chunks via ``request.stream()`` and bails
-    # the moment the accumulated body exceeds 10 MB. Catches both:
-    #   * Honest clients with Content-Length > 10MB (we'd reject the
+    # Hard memory cap on the request body. Reads chunks via
+    # ``request.stream()`` and bails the moment the accumulated body
+    # exceeds 10 MB. Catches:
+    #   * Honest clients with Content-Length > 10 MB (we'd reject the
     #     header but Starlette has already started buffering when the
     #     dependency runs).
     #   * Chunked-transfer-encoding clients with no Content-Length
-    #     (the previous header-only check missed these entirely).
-    #   * Lying clients that send Content-Length=5MB then 50MB body.
+    #     (a header-only check would miss these entirely).
+    #   * Lying clients that send Content-Length=5 MB then 50 MB body.
     # Per-field max_length caps on PushEvent are still enforced by
     # Pydantic — this is the outer guard.
     MAX_BODY_BYTES = 10_000_000
@@ -189,9 +189,9 @@ async def post_source_events(
 
         payload = PushEventRequest.model_validate(json.loads(body))
     except Exception as exc:  # noqa: BLE001
-        # Code-review L4: don't echo exception class to the response —
-        # avoids leaking the server-side exception taxonomy to attackers
-        # who hold a valid HMAC key.
+        # Don't echo the exception class to the response — avoids leaking
+        # the server-side exception taxonomy to attackers who hold a valid
+        # HMAC key.
         logger.warning(
             "push_body_rejected source_id=%s reason=%s",
             source_id,
@@ -220,9 +220,8 @@ async def post_source_events(
             )
 
     # Convert each PushEvent to a ChannelMessage and bulk-upsert. The
-    # PR-A.1 unique compound index on (source_id, channel_id, message_id)
-    # gives us idempotency for free — re-delivery of the same message_id
-    # is a no-op.
+    # unique compound index on (source_id, channel_id, message_id) gives
+    # idempotency for free — re-delivery of the same message_id is a no-op.
     rows: list[ChannelMessage] = []
     channel_name = payload.channel_name or payload.channel_id
     for ev in payload.events:

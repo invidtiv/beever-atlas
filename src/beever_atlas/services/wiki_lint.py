@@ -1,4 +1,4 @@
-"""Wiki lint service (PR-G).
+"""Wiki lint service.
 
 Surfaces signals that keep a wiki from rotting (Karpathy):
   * orphan pages — page exists but its source cluster no longer does
@@ -138,7 +138,7 @@ def _section_signature(content_md: str) -> str:
 def find_duplicate_sections(pages: list[WikiPage]) -> list[LintFinding]:
     """Sections across pages that share substantially the same content.
 
-    Heuristic at the deterministic layer; PR-G's LLM coherence pass
+    Heuristic at the deterministic layer; a future LLM coherence pass
     can add semantic equivalence detection later. Skips empty sections.
     """
     findings: list[LintFinding] = []

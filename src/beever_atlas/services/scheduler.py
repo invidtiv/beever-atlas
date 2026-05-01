@@ -63,10 +63,10 @@ class SyncScheduler:
             await self._register_sync_job(policy.channel_id, policy)
             await self._register_consolidation_job(policy.channel_id, policy)
 
-        # PR-B: register the background ExtractionWorker. Two periodic jobs:
+        # Register the background ExtractionWorker. Two periodic jobs:
         # ``tick`` drains the pending queue, ``sweep_stale`` recovers rows
         # stuck in "extracting" past the stale window. The worker singleton
-        # is registered so PR-F's WikiMaintainer (and admin endpoints) can
+        # is registered so the WikiMaintainer (and admin endpoints) can
         # subscribe to ``on_extraction_done`` without a constructor weave.
         await self._register_extraction_worker_jobs()
 
@@ -230,7 +230,8 @@ class SyncScheduler:
 
         Tuning constants (`_TICK_SECONDS`, `_STALE_SECONDS`) live in
         ``services/extraction_worker.py``, not in env vars — capacity
-        planning belongs in code-review-able PRs, not in `.env`.
+        planning decisions should be tracked as code changes, not via
+        operator `.env` overrides.
         """
         from beever_atlas.services.extraction_worker import (
             _STALE_SECONDS,

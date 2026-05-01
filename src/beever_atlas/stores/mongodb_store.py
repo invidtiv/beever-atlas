@@ -42,11 +42,11 @@ class MongoDBStore:
         self._channel_policies = self._db["channel_policies"]
         self._global_policy_defaults = self._db["global_policy_defaults"]
         self._pipeline_checkpoints = self._db["pipeline_checkpoints"]
-        # PR-A (oss-pipeline-and-wiki-redesign): durable Message Store. Replaces
-        # the prior in-memory ``list[NormalizedMessage]`` flow during sync and
-        # serves as the queue substrate for the future ExtractionWorker (PR-B).
+        # Durable Message Store: replaces the prior in-memory
+        # ``list[NormalizedMessage]`` flow during sync and serves as the queue
+        # substrate for the background ExtractionWorker.
         self._channel_messages = self._db["channel_messages"]
-        # PR-D: push-source registry + idempotency replay cache.
+        # Push-source registry + idempotency replay cache.
         self._external_sources = self._db["external_sources"]
         self._idempotency_keys = self._db["idempotency_keys"]
 
@@ -66,7 +66,7 @@ class MongoDBStore:
         await self._activity_events.create_index([("timestamp", -1)])
         await self._channel_policies.create_index("channel_id", unique=True)
         await self._pipeline_checkpoints.create_index("batch_key", unique=True)
-        # PR-A: ``channel_messages`` indexes.
+        # ``channel_messages`` indexes.
         # 1) Compound unique key for idempotent upsert.
         await self._channel_messages.create_index(
             [("source_id", 1), ("channel_id", 1), ("message_id", 1)],
@@ -78,7 +78,7 @@ class MongoDBStore:
             [("channel_id", 1), ("timestamp", -1)],
             name="channel_messages_channel_timestamp",
         )
-        # 3) Sparse index for the future ExtractionWorker queue scan (PR-B).
+        # 3) Sparse index for the ExtractionWorker queue scan.
         # ``extraction_status`` is always set on insert, but the sparse condition
         # keeps the index cheap by excluding ``done`` rows from the workload.
         await self._channel_messages.create_index(
@@ -88,7 +88,7 @@ class MongoDBStore:
                 "extraction_status": {"$in": ["pending", "extracting", "failed"]}
             },
         )
-        # PR-D: push-source registry + idempotency replay cache.
+        # Push-source registry + idempotency replay cache indexes.
         await self._external_sources.create_index(
             "source_id",
             unique=True,
@@ -280,8 +280,7 @@ class MongoDBStore:
         """Mark a sync job as completed or failed with an optional error list.
 
         ``failed_batches`` records per-batch diagnostic context so an operator
-        can identify which messages need manual recovery after a partial failure
-        (PR-0 of the OSS pipeline + wiki redesign).
+        can identify which messages need manual recovery after a partial failure.
         """
         update: dict[str, Any] = {
             "status": status,
@@ -724,7 +723,7 @@ class MongoDBStore:
         )
 
     # ------------------------------------------------------------------
-    # Message Store (PR-A of oss-pipeline-and-wiki-redesign)
+    # Message Store (channel_messages collection)
     # ------------------------------------------------------------------
 
     async def upsert_channel_messages(self, messages: list[ChannelMessage]) -> dict[str, int]:
@@ -835,8 +834,8 @@ class MongoDBStore:
     async def count_channel_messages_by_status(self, channel_id: str) -> dict[str, int]:
         """Aggregate counts by ``extraction_status`` for one channel.
 
-        Backs the future ``GET /api/channels/{id}/extraction-status`` endpoint
-        in PR-B. Returns a dict with keys ``pending``, ``extracting``, ``done``,
+        Backs the ``GET /api/channels/{id}/extraction-status`` endpoint.
+        Returns a dict with keys ``pending``, ``extracting``, ``done``,
         ``failed`` (zero-filled for missing statuses).
         """
         pipeline: list[dict[str, Any]] = [
@@ -884,9 +883,9 @@ class MongoDBStore:
 
         Validates the transition against ``EXTRACTION_STATUS_TRANSITIONS`` and
         returns False without mutating the document if the transition is
-        illegal. The ExtractionWorker (PR-B) is the primary caller; the sync
-        runner does not write status (initial ``pending`` lands via
-        ``$setOnInsert`` in :meth:`upsert_channel_messages`).
+        illegal. The ExtractionWorker is the primary caller; the sync runner
+        does not write status (initial ``pending`` lands via ``$setOnInsert``
+        in :meth:`upsert_channel_messages`).
         """
         existing = await self._channel_messages.find_one(
             {"source_id": source_id, "channel_id": channel_id, "message_id": message_id},
@@ -923,7 +922,7 @@ class MongoDBStore:
         return True
 
     # ------------------------------------------------------------------
-    # Message Store: ExtractionWorker primitives (PR-B)
+    # Message Store: ExtractionWorker primitives
     # ------------------------------------------------------------------
 
     async def claim_pending_messages_for_extraction(
@@ -935,20 +934,19 @@ class MongoDBStore:
     ) -> list[dict[str, Any]]:
         """Atomically claim up to ``batch_size`` pending OR failed-and-due messages.
 
-        Implements design D6 (extraction-worker spec): worker queries rows
-        whose ``extraction_status="pending"`` OR (``extraction_status="failed"``
-        AND ``attempt_count < max_retries``), ``next_attempt_at <= now``,
-        and ``created_at < now - settle_seconds`` (the settle window gives
-        bulk upserts a chance to land before the worker scans), then flips
-        them to ``"extracting"`` via per-row ``find_one_and_update`` so two
-        worker instances cannot pick up the same row.
+        Worker queries rows whose ``extraction_status="pending"`` OR
+        (``extraction_status="failed"`` AND ``attempt_count < max_retries``),
+        ``next_attempt_at <= now``, and ``created_at < now - settle_seconds``
+        (the settle window gives bulk upserts a chance to land before the
+        worker scans), then flips them to ``"extracting"`` via per-row
+        ``find_one_and_update`` so two worker instances cannot pick up the
+        same row.
 
-        PR-C: ``failed`` rows whose ``next_attempt_at`` has elapsed AND
-        whose ``attempt_count`` is below ``max_retries`` are also eligible.
-        This is the auto-retry path — combined with the content-hash
-        deterministic fact ID (PR-B.1), retries do not produce phantom
-        Weaviate duplicates. Rows that exhaust their retry budget stay
-        ``failed`` permanently.
+        ``failed`` rows whose ``next_attempt_at`` has elapsed AND whose
+        ``attempt_count`` is below ``max_retries`` are also eligible. This
+        is the auto-retry path — combined with the content-hash deterministic
+        fact ID, retries do not produce phantom Weaviate duplicates. Rows
+        that exhaust their retry budget stay ``failed`` permanently.
 
         Returns the claimed documents (with ``_id`` stripped) — possibly
         fewer than ``batch_size`` if the queue is short. Each returned
@@ -967,10 +965,10 @@ class MongoDBStore:
         # ``$or`` lets a single claim cycle drain both fresh pending rows
         # AND failed-but-eligible-for-retry rows. The state-machine
         # transitions encoded in ``EXTRACTION_STATUS_TRANSITIONS`` allow
-        # ``failed → pending``, but the worker takes the shortcut of
-        # going straight to ``extracting`` here because the row is being
-        # actively reclaimed (the brief intermediate state is invisible
-        # to readers — the find_one_and_update is atomic).
+        # ``failed → pending``, but the worker takes the shortcut of going
+        # straight to ``extracting`` here because the row is being actively
+        # reclaimed (the brief intermediate state is invisible to readers —
+        # the find_one_and_update is atomic).
         filter_doc: dict[str, Any] = {
             "$or": [
                 {"extraction_status": "pending"},
@@ -984,11 +982,10 @@ class MongoDBStore:
         }
         if channel_id is not None:
             filter_doc["channel_id"] = channel_id
-        # PR-C: ``attempt_count`` is intentionally NOT reset on the
-        # failed → extracting shortcut. The total attempts encodes the
+        # ``attempt_count`` is intentionally NOT reset on the
+        # failed → extracting shortcut. The total attempts encode the
         # retry budget (capped by ``max_retries``) and the worker's
-        # backoff schedule expects monotonic counts. m5 from PR-A code
-        # review documented this expectation.
+        # backoff schedule expects monotonic counts.
         update_doc = {
             "$set": {
                 "extraction_status": "extracting",
@@ -1035,12 +1032,12 @@ class MongoDBStore:
         from pymongo import UpdateOne
 
         # Determine the set of allowed source states for this transition.
-        # Code-review: do NOT permit self-transitions (``new_status ==
-        # from_state``). The ``EXTRACTION_STATUS_TRANSITIONS`` map encodes
-        # ``done -> done`` as forbidden so a re-extraction must go through
-        # ``failed -> pending -> extracting -> done`` and not silently
-        # skip a step. Idempotency is provided by ``$setOnInsert`` at
-        # upsert time, not by self-transitions here.
+        # Do NOT permit self-transitions (``new_status == from_state``).
+        # The ``EXTRACTION_STATUS_TRANSITIONS`` map encodes ``done -> done``
+        # as forbidden so a re-extraction must go through
+        # ``failed -> pending -> extracting -> done`` and not silently skip
+        # a step. Idempotency is provided by ``$setOnInsert`` at upsert
+        # time, not by self-transitions here.
         allowed_from = {
             from_state
             for from_state, allowed in EXTRACTION_STATUS_TRANSITIONS.items()
@@ -1081,7 +1078,7 @@ class MongoDBStore:
         return result.modified_count
 
     # ------------------------------------------------------------------
-    # Push-source registry (PR-D)
+    # Push-source registry
     # ------------------------------------------------------------------
 
     async def get_external_source(self, source_id: str) -> ExternalSource | None:
@@ -1104,13 +1101,12 @@ class MongoDBStore:
         in-flight signatures with a previous secret fail validation
         immediately on the next request.
 
-        Code-review CRITICAL (second pass): ``ExternalSource.secret``
-        carries ``Field(exclude=True)`` so it does NOT appear in
-        ``model_dump()``. The persistence path explicitly re-adds the
-        secret AFTER the dump so it lands in MongoDB (HMAC verification
-        needs the plaintext) — defense in depth: the model-level
-        exclude protects API serialization, the explicit re-add here
-        protects the storage path. Removing either is a regression.
+        ``ExternalSource.secret`` carries ``Field(exclude=True)`` so it
+        does NOT appear in ``model_dump()``. The persistence path explicitly
+        re-adds the secret AFTER the dump so it lands in MongoDB (HMAC
+        verification needs the plaintext) — defense in depth: the model-level
+        exclude protects API serialization, the explicit re-add here protects
+        the storage path. Removing either is a regression.
         """
         from beever_atlas.services.push_hmac import hash_secret
 
@@ -1132,7 +1128,7 @@ class MongoDBStore:
         return bool(result.deleted_count)
 
     # ------------------------------------------------------------------
-    # Idempotency replay cache (PR-D)
+    # Idempotency replay cache
     # ------------------------------------------------------------------
 
     async def get_idempotency_record(

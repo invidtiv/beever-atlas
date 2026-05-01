@@ -92,7 +92,7 @@ class ActivityEvent(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Message Store (PR-A of oss-pipeline-and-wiki-redesign)
+# Message Store (channel_messages collection)
 # ---------------------------------------------------------------------------
 
 
@@ -102,7 +102,7 @@ class ChannelMessage(BaseModel):
     Replaces the prior in-memory ``list[NormalizedMessage]`` flow during sync
     with an idempotent persistent store keyed by ``(source_id, channel_id,
     message_id)``. ``extraction_status`` drives the per-message state machine
-    consumed by the background ExtractionWorker (PR-B).
+    consumed by the background ExtractionWorker.
 
     See ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``.
     """
@@ -150,13 +150,13 @@ EXTRACTION_STATUS_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"extracting"},
     "extracting": {"done", "failed"},
     "done": set(),
-    # ``failed → pending`` is the retry path (worker auto-retry, PR-C).
+    # ``failed → pending`` is the worker auto-retry path.
     "failed": {"pending"},
 }
 
 
 # ---------------------------------------------------------------------------
-# Push-source ingest (PR-D of oss-pipeline-and-wiki-redesign)
+# Push-source ingest (external_sources + idempotency_keys collections)
 # ---------------------------------------------------------------------------
 
 
@@ -184,13 +184,13 @@ class ExternalSource(BaseModel):
     """Plaintext HMAC-SHA256 signing key. Recommended length 32+ bytes
     of random entropy. Stored to support verification.
 
-    Code-review CRITICAL: ``Field(exclude=True)`` keeps this out of any
-    API response that serializes ``ExternalSource`` via
-    ``model_dump()`` / FastAPI's automatic Pydantic encoding. The
-    plaintext is intentionally persisted (HMAC verification requires
-    the key) but MUST NOT appear in admin / list endpoints.
-    Verification reads it directly via ``get_external_source`` (see
-    ``api/sources.py``), bypassing the dump path."""
+    ``Field(exclude=True)`` keeps this out of any API response that
+    serializes ``ExternalSource`` via ``model_dump()`` / FastAPI's
+    automatic Pydantic encoding. The plaintext is intentionally persisted
+    (HMAC verification requires the key) but MUST NOT appear in admin /
+    list endpoints. Verification reads it directly via
+    ``get_external_source`` (see ``api/sources.py``), bypassing the dump
+    path."""
 
     secret_fingerprint: str = ""
     """sha256 hex of ``secret`` — exposed in admin endpoints so an
@@ -223,19 +223,19 @@ class IdempotencyKeyRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Wiki page-store split (PR-E of oss-pipeline-and-wiki-redesign)
+# Wiki page-store (wiki_pages collection)
 # ---------------------------------------------------------------------------
 
 
 class WikiPageSection(BaseModel):
     """One section within a wiki page.
 
-    The maintainer (PR-F) updates these one at a time when new facts
-    arrive, preserving unchanged sections byte-identical so page voice
-    doesn't drift across incremental rewrites. ``last_facts_hash``
-    records which facts were considered when the section was last
-    written — the maintainer compares against the current fact set to
-    decide whether the section needs a refresh.
+    The WikiMaintainer updates these one at a time when new facts arrive,
+    preserving unchanged sections byte-identical so page voice doesn't
+    drift across incremental rewrites. ``last_facts_hash`` records which
+    facts were considered when the section was last written — the
+    maintainer compares against the current fact set to decide whether
+    the section needs a refresh.
     """
 
     id: str
@@ -248,8 +248,8 @@ class WikiTension(BaseModel):
     """A surfaced contradiction between two facts.
 
     Populated by ``services/contradiction_detector.check_and_supersede``
-    (already running at ``services/batch_processor.py:1283-1317``) and
-    rendered as a Tensions section on the affected pages by PR-G.
+    (running at ``services/batch_processor.py``) and rendered as a
+    Tensions section on the affected pages by the wiki lint pass.
     """
 
     fact_id: str
@@ -263,10 +263,9 @@ class WikiPage(BaseModel):
 
     Replaces the flat ``pages`` subdoc on the legacy ``wiki_cache`` row.
     Per-page documents enable incremental update, per-page versioning,
-    and per-page dirty tracking — none of which were possible with the
-    monolith schema. ``last_facts_seen`` lets the maintainer route new
-    facts to affected pages deterministically (by membership) and to
-    skip pages whose fact set hasn't changed.
+    and per-page dirty tracking. ``last_facts_seen`` lets the
+    WikiMaintainer route new facts to affected pages deterministically (by
+    membership) and skip pages whose fact set hasn't changed.
     """
 
     channel_id: str
@@ -283,7 +282,7 @@ class WikiPage(BaseModel):
     sections: list[WikiPageSection] = Field(default_factory=list)
     version: int = 1
     is_dirty: bool = False
-    """Set by the maintainer in ``manual`` mode when new facts have
+    """Set by the WikiMaintainer in ``manual`` mode when new facts have
     arrived but the user hasn't clicked ``Maintain Wiki`` yet. The
     Maintain button reads pages where ``is_dirty=True`` and processes
     them on demand."""
@@ -297,9 +296,9 @@ class WikiPage(BaseModel):
     """Inline contradictions surfaced from the contradiction detector."""
 
     page_voice_seed: str = ""
-    """Optional reference excerpt the maintainer uses to keep the
-    rewrite tone consistent. PR-F populates this on first generation
-    from the original page content; subsequent rewrites preserve it."""
+    """Optional reference excerpt the WikiMaintainer uses to keep the
+    rewrite tone consistent. Populated on first generation from the
+    original page content; subsequent rewrites preserve it."""
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))

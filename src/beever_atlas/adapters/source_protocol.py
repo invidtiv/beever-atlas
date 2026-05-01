@@ -1,18 +1,18 @@
 """Source protocols for the Message Store.
 
 Defines the seam between content sources and the durable
-``channel_messages`` collection introduced in PR-A.1. Two structurally-typed
-protocols cover the two ingestion shapes:
+``channel_messages`` collection. Two structurally-typed protocols cover
+the two ingestion shapes:
 
 * :class:`PullSource` — cursor-based, called by the sync runner. Existing
   platform adapters (Slack / Discord / Teams / etc.) are wrapped to satisfy
   this protocol.
 * :class:`PushSource` — webhook-driven, called by an external system that
-  pushes events. The OpenClaw / Hermes push-ingest endpoint (PR-D)
-  registers as a ``PushSource``.
+  pushes events. The OpenClaw / Hermes push-ingest endpoint registers as
+  a ``PushSource``.
 
 Both write to the Message Store; neither owns LLM extraction (that's the
-worker's job, PR-B). The split keeps interface segregation honest — a
+ExtractionWorker's job). The split keeps interface segregation honest — a
 ``PullSource`` does not implement ``on_message_received``, and a
 ``PushSource`` does not implement ``fetch_and_persist``.
 
@@ -59,9 +59,9 @@ class PushSource(Protocol):
     """A source that receives messages via webhook / lifecycle hook.
 
     Implementations are typically registered HTTP endpoints (e.g. the
-    OpenClaw / Hermes push-ingest endpoint introduced in PR-D). The handler
-    validates the inbound event and calls ``on_message_received`` once per
-    event, which upserts into ``channel_messages``.
+    OpenClaw / Hermes push-ingest endpoint). The handler validates the inbound
+    event and calls ``on_message_received`` once per event, which upserts into
+    ``channel_messages``.
     """
 
     source_id: str
@@ -78,7 +78,7 @@ class PushSource(Protocol):
         message_id)`` MUST NOT produce duplicate rows. The compound unique
         index on the collection enforces this at the storage layer; the
         receiver SHOULD also guard with the per-source idempotency-key replay
-        cache from PR-D (24h TTL) to avoid the duplicate-then-noop round-trip.
+        cache (24h TTL) to avoid the duplicate-then-noop round-trip.
         """
         ...
 

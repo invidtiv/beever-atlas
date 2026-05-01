@@ -1,4 +1,4 @@
-"""WikiMaintainer service (PR-F).
+"""WikiMaintainer service.
 
 Karpathy-style LLM Wiki bookkeeping. Replaces the
 ``cache.mark_all_stale(channel_id)`` invocation at
@@ -174,9 +174,9 @@ class WikiMaintainer:
             return counters
 
         # In a real deployment, plan_updates would fetch fact records
-        # from Weaviate. For PR-F we expose the routing function as
-        # the testable seam; the fetch + apply layer is a separate
-        # close-out task (7.7). On the integration boundary we call
+        # from Weaviate. The routing function is the testable seam;
+        # the fetch + apply layer is a separate close-out task. On the
+        # integration boundary we call
         # ``_load_facts(channel_id, fact_ids)`` which production wires
         # to the Weaviate store; tests stub it.
         facts = await self._load_facts(channel_id, fact_ids)
@@ -313,9 +313,9 @@ class WikiMaintainer:
         # The LLM rewrite is intentionally minimal here — production
         # wires to LLMProvider.resolve_model("wiki_maintainer") and
         # passes the page's existing sections + new facts as a
-        # diff-style prompt. For PR-F the routing + structure is the
-        # contract; tests stub the LLM and assert on the structural
-        # invariants (title preserved, version bumped, is_dirty=False).
+        # diff-style prompt. The routing + structure is the contract;
+        # tests stub the LLM and assert on the structural invariants
+        # (title preserved, version bumped, is_dirty=False).
         rewritten_section = WikiPageSection(
             id="latest",
             title="Latest",

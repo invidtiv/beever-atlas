@@ -1,10 +1,9 @@
-"""Per-page wiki document store (PR-E).
+"""Per-page wiki document store.
 
 Replaces the flat ``pages`` subdoc on the legacy ``wiki_cache`` row
 with one MongoDB document per ``(channel_id, target_lang, page_id)``.
-Per-page documents are the structural prerequisite for everything in
-PR-F (incremental maintainer) and PR-G (lint + tensions) — neither
-can work over the monolithic schema.
+Per-page documents enable incremental maintenance, per-page versioning,
+and dirty tracking — none of which were possible with the monolithic schema.
 
 The legacy ``WikiCache`` is retained during the dual-write window;
 the ``PER_PAGE_WIKI`` flag dispatches reads. Writes go to the new
@@ -32,8 +31,8 @@ class WikiPageStore:
 
     Compound unique index on ``(channel_id, target_lang, page_id)``
     gives idempotent upsert. The ``version`` field is bumped on every
-    write so PR-F can archive prior versions (PR-E doesn't archive
-    yet — that's task 6.4 / 6.5 deferred to maintainer landing).
+    write so the WikiMaintainer can detect staleness and archive prior
+    versions in a future enhancement.
     """
 
     def __init__(self, db: AsyncIOMotorDatabase | None = None) -> None:
@@ -112,18 +111,16 @@ class WikiPageStore:
     async def save_page(self, page: WikiPage) -> None:
         """Idempotent upsert — bumps ``version`` and ``updated_at`` atomically.
 
-        Code-review HIGH: uses ``$inc`` for the version bump rather than
-        a read-then-write ``existing.version + 1`` pattern, so two
-        concurrent saves on the same ``(channel_id, target_lang,
-        page_id)`` cannot both write the same version. The maintainer
-        runs single-threaded per channel today, but this keeps the
-        invariant intact when ``POST /wiki/edit`` lands.
+        Uses ``$inc`` for the version bump rather than a read-then-write
+        ``existing.version + 1`` pattern, so two concurrent saves on the
+        same ``(channel_id, target_lang, page_id)`` cannot both write the
+        same version. The maintainer runs single-threaded per channel today,
+        but this keeps the invariant intact when concurrent edits land.
 
-        Code-review MEDIUM (second pass): ``created_at`` is ALWAYS
-        moved to ``$setOnInsert`` so the original creation timestamp
-        is preserved across rewrites. The maintainer typically
-        re-builds the page from a fresh ``WikiPage`` on each refresh,
-        and Pydantic's ``default_factory`` would set a new
+        ``created_at`` is ALWAYS moved to ``$setOnInsert`` so the original
+        creation timestamp is preserved across rewrites. The maintainer
+        typically re-builds the page from a fresh ``WikiPage`` on each
+        refresh, and Pydantic's ``default_factory`` would set a new
         ``datetime.now()`` every time — putting it in ``$set`` would
         overwrite the genuine first-creation timestamp on every save.
         """
@@ -155,9 +152,9 @@ class WikiPageStore:
     ) -> int:
         """Set ``is_dirty=True`` on the named pages.
 
-        Used by the maintainer's ``manual`` mode (PR-F) — the
-        Maintain Wiki button reads pages where ``is_dirty=True`` and
-        processes them on demand.
+        Used by the WikiMaintainer's ``manual`` mode — the Maintain Wiki
+        button reads pages where ``is_dirty=True`` and processes them on
+        demand.
         """
         if self._collection is None or not page_ids:
             return 0
@@ -206,9 +203,9 @@ class WikiPageStore:
     ) -> bool:
         """Append contradictions to a page's ``tensions`` list.
 
-        Used by PR-G's lint pass + the contradiction detector wire-up.
-        Idempotent — duplicate (fact_id, contradicts_fact_id) tuples
-        are deduped on read by the renderer.
+        Used by the wiki lint pass and the contradiction detector wire-up.
+        Idempotent — duplicate (fact_id, contradicts_fact_id) tuples are
+        deduped on read by the renderer.
         """
         if self._collection is None or not new_tensions:
             return False

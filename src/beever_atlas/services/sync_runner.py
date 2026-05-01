@@ -27,11 +27,11 @@ logger = logging.getLogger(__name__)
 
 def _normalized_to_channel_messages(messages: list[Any]) -> list[ChannelMessage]:
     """Convert ``NormalizedMessage``-shaped objects to ``ChannelMessage`` rows
-    for upsert into the durable Message Store (PR-A.3).
+    for upsert into the durable Message Store.
 
     ``source_id`` is derived from the message's ``platform`` field — for chat
     adapters that's "slack" | "discord" | "teams"; file imports use "file";
-    push sources (PR-D) set their own registered ``source_id`` directly on the
+    push sources set their own registered ``source_id`` directly on the
     payload before reaching this helper.
 
     Tolerates duck-typed dicts (used by the file importer) in addition to
@@ -76,8 +76,8 @@ def _normalized_to_channel_messages(messages: list[Any]) -> list[ChannelMessage]
                 )
             )
         except Exception as exc:  # noqa: BLE001 — best-effort conversion
-            # PR-A.6.1 (review m1): preserve channel_id + source_id + exc class
-            # so an operator can grep the WARN log and pinpoint a stuck channel.
+            # Preserve channel_id + source_id + exc class in the log so an
+            # operator can grep the WARN line and pinpoint a stuck channel.
             logger.warning(
                 "_normalized_to_channel_messages: skipped source_id=%s "
                 "channel_id=%s message_id=%s exc=%s: %.200s",
@@ -675,23 +675,21 @@ class SyncRunner:
 
             effective_policy = await resolve_effective_policy(channel_id)
 
-            # PR-A.3: Persist messages into the durable channel_messages
-            # collection BEFORE LLM extraction. The store is the source of
-            # truth from the moment a message is fetched — extraction failures
-            # (e.g. Gemini 503) no longer make the message disappear, and the
-            # future ExtractionWorker (PR-B) consumes pending rows from here.
+            # Persist messages into the durable channel_messages collection
+            # BEFORE LLM extraction. The store is the source of truth from the
+            # moment a message is fetched — extraction failures (e.g. Gemini
+            # 503) no longer make the message disappear, and the background
+            # ExtractionWorker consumes pending rows from here.
             #
             # Best-effort: a Mongo-side failure logs a WARN and the sync
             # continues with inline extraction (existing behaviour). The
-            # READ_FROM_MESSAGE_STORE flag (PR-A.4) is what makes UI reads
-            # depend on the upsert succeeding; nothing here blocks on it yet.
+            # READ_FROM_MESSAGE_STORE flag is what makes UI reads depend on the
+            # upsert succeeding; nothing here blocks on it yet.
             #
-            # PR-A.6.1 (review C1): capture ``inserted_count`` so the
-            # cursor-advance branch increments ``total_synced_messages`` by
-            # NEW rows only. Pre-PR-0 the all-or-nothing predicate masked an
-            # inflation bug on re-sync; PR-0 removed the predicate, so we
-            # now plumb the upsert's inserted count back to keep the total
-            # honest.
+            # Capture ``inserted_count`` so the cursor-advance branch
+            # increments ``total_synced_messages`` by NEW rows only, avoiding
+            # inflation on a manual re-sync that re-fetches already-stored
+            # messages.
             inserted_count: int | None = None
             if messages:
                 try:
@@ -712,17 +710,17 @@ class SyncRunner:
                     logger.warning(
                         "SyncRunner: channel_messages upsert failed job_id=%s "
                         "channel=%s err=%s — sync continues without store; "
-                        "PR-A.4 dual-read fallback will keep UI working",
+                        "dual-read fallback will keep UI working",
                         job_id,
                         channel_id,
                         exc,
                     )
 
-            # PR-B: with DECOUPLE_EXTRACTION ON, sync skips inline extraction
-            # entirely — messages already landed in ``channel_messages`` (PR-A)
-            # with ``extraction_status="pending"`` via ``$setOnInsert``, so the
-            # background ``ExtractionWorker`` will pick them up in the next
-            # tick (default 30s). Sync returns in seconds; a Gemini 503 can no
+            # With DECOUPLE_EXTRACTION ON, sync skips inline extraction
+            # entirely — messages already landed in ``channel_messages`` with
+            # ``extraction_status="pending"`` via ``$setOnInsert``, so the
+            # background ExtractionWorker picks them up in the next tick
+            # (default 30 s). Sync returns in seconds; a Gemini 503 can no
             # longer kill the job. Rolls back trivially: flag OFF returns to
             # inline extraction.
             decouple_extraction = get_settings().decouple_extraction
@@ -773,7 +771,7 @@ class SyncRunner:
                         )
 
             # Mark job complete.
-            # PR-0: Three terminal states replace the prior all-or-nothing model.
+            # Three terminal states replace the prior all-or-nothing model.
             # ``completed_with_errors`` lets the cursor advance even when some
             # batches fail, so successful batches are not discarded by a Gemini 503.
             sync_status = "completed" if not result.errors else "completed_with_errors"
@@ -790,7 +788,7 @@ class SyncRunner:
                 last_err = result.errors[-1]
                 failed_stage = f"Failed at batch {last_err.get('batch_num')}: {last_err.get('error', 'unknown error')}"
 
-                # PR-0: Build structured per-batch diagnostics and emit a WARN log
+                # Build structured per-batch diagnostics and emit a WARN log
                 # per failed batch so operators can trace and re-sync if needed.
                 # Cross-reference batch_breakdowns for duration / counts where present.
                 breakdown_by_idx = {bb.batch_num: bb for bb in result.batch_breakdowns}
@@ -839,19 +837,17 @@ class SyncRunner:
                 failed_batches=failed_batches if failed_batches else None,
             )
 
-            # PR-0: Cursor advances on successful fetch regardless of extraction
+            # Cursor advances on successful fetch regardless of extraction
             # outcome. Successful batches are no longer discarded when sibling
             # batches fail — the per-batch ``failed_batches`` diagnostic above is
-            # the trace for any messages that need manual recovery. The full
-            # self-healing path arrives with PR-A (Message Store) + PR-B
-            # (background extraction worker).
+            # the trace for any messages that need manual recovery.
             if last_ts is not None:
-                # PR-A.6.1 (review C1): for incremental syncs, increment
-                # `total_synced_messages` by the upsert's NEW-rows count —
-                # not by `parent_count`, which double-counts on a manual
-                # re-sync that re-fetches messages already in the store.
-                # Falls back to `parent_count` only when the upsert was
-                # skipped (no messages) or failed (best-effort path).
+                # For incremental syncs, increment ``total_synced_messages``
+                # by the upsert's NEW-rows count — not by ``parent_count``,
+                # which double-counts on a re-sync that re-fetches messages
+                # already in the store. Falls back to ``parent_count`` only
+                # when the upsert was skipped (no messages) or failed
+                # (best-effort path).
                 if sync_type == "incremental":
                     increment = inserted_count if inserted_count is not None else parent_count
                     await stores.mongodb.update_channel_sync_state(
