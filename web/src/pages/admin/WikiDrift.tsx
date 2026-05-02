@@ -307,7 +307,17 @@ export function WikiDrift() {
           </div>
         ) : summary ? (
           <>
-            <StatusBanner summary={summary} />
+            {/* Render the pass/fail banner ONLY when we have data to score
+             * against. With an empty collection the API returns
+             * ``{channels: [], pass: false, ...}`` which the banner
+             * would otherwise mis-render as a red "FAILING — drift 0.00
+             * exceeds threshold on 0 channels" — caught during fresh
+             * dogfood (Alan, 2026-05-02). The ChannelTable's own
+             * empty-state copy guides operators to flip
+             * ``WIKI_DRIFT_AB=true`` so the dashboard cleanly says
+             * "awaiting data" instead of "failing" before any data
+             * exists. */}
+            {summary.channels.length > 0 && <StatusBanner summary={summary} />}
             {!summary.data_fresh && summary.channels.length > 0 && (
               <DataFreshnessWarning />
             )}

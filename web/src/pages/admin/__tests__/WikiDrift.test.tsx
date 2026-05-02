@@ -126,6 +126,24 @@ describe("WikiDrift dashboard", () => {
     expect(banner).toHaveTextContent(/1 channel\b/);
   });
 
+  it("hides the pass/fail banner when channels list is empty", async () => {
+    // Regression: with an empty drift_reports collection the API returns
+    // ``{channels: [], pass: false, data_fresh: false}`` which the banner
+    // would otherwise mis-render as a red "FAILING — drift 0.00 exceeds
+    // threshold on 0 channels". The empty state should rely on the
+    // ChannelTable's own "no reports yet" copy instead.
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      makeFetchResponse({ channels: [], pass: false, data_fresh: false }),
+    );
+    render(<WikiDrift />);
+    await waitFor(() => {
+      expect(screen.getByTestId("drift-empty")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("drift-banner-fail")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("drift-banner-pass")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("drift-banner-stale")).not.toBeInTheDocument();
+  });
+
   it("renders the data_fresh warning when last report > 1h old", async () => {
     vi.mocked(globalThis.fetch).mockResolvedValueOnce(
       makeFetchResponse(STALE_FIXTURE),
