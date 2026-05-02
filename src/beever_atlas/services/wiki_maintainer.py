@@ -27,7 +27,9 @@ Spec: ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/wiki-maintainer/``
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -280,6 +282,19 @@ class WikiMaintainer:
         # routing (``plan_updates``) MUST NOT call any LLM. Tests
         # leave it None to lock in that invariant.
         self._llm_provider = llm_provider
+        # Per-(channel, page) timestamps of the most recent drift comparator
+        # invocation. Trimmed of entries older than 5 min on each insert so
+        # this never grows unbounded — the rate limiter only needs the most
+        # recent timestamp per key, the trim is just memory-bounding.
+        self._drift_compare_last_run: dict[tuple[str, str], float] = {}
+        # Rolling-window observability counters. ``apply_update_records`` is
+        # ``[(monotonic_ts, page_kind), ...]`` trimmed to the last 60 min;
+        # ``mark_dirty_records`` is ``[monotonic_ts, ...]`` (one entry per
+        # page that flipped to dirty); ``apply_update_failures`` is capped
+        # at 10 entries (oldest first) per the spec for the metrics endpoint.
+        self._apply_update_records: list[tuple[float, str]] = []
+        self._mark_dirty_records: list[float] = []
+        self._apply_update_failures: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Deterministic routing — no LLM call
@@ -380,6 +395,7 @@ class WikiMaintainer:
                 channel_id, list(plan.keys()), target_lang=target_lang
             )
             counters["marked_dirty"] = modified
+            self._record_mark_dirty(modified)
             logger.info(
                 "wiki_maintainer.on_extraction_done channel=%s mode=manual "
                 "affected=%d marked_dirty=%d",
@@ -550,6 +566,7 @@ class WikiMaintainer:
                 page_id,
                 exc,
             )
+            self._record_apply_update_failure(channel_id, page_id, exc)
             return False
 
         affected_sections = _parse_apply_update_response(raw)
@@ -560,6 +577,9 @@ class WikiMaintainer:
                 channel_id,
                 page_id,
                 len(raw or ""),
+            )
+            self._record_apply_update_failure(
+                channel_id, page_id, ValueError("no_affected_sections")
             )
             return False
 
@@ -586,6 +606,20 @@ class WikiMaintainer:
         # path only rewrites sections by id. Voice preservation is a
         # structural invariant.
         await self._page_store.save_page(page)
+        self._record_apply_update_success(page_id)
+        # Drift A/B comparator (gated by ``Settings.wiki_drift_ab``). MUST run
+        # AFTER ``save_page`` succeeds so the comparator sees the canonical
+        # incremental output the user will read. The schedule helper is
+        # fire-and-forget — it never blocks ``apply_update`` and never
+        # propagates exceptions back to the maintainer's primary path.
+        try:
+            self._schedule_drift_compare(channel_id, page_id, page, target_lang)
+        except Exception:  # noqa: BLE001 — never destabilise apply_update
+            logger.exception(
+                "event=wiki_drift_schedule_failed channel_id=%s page_id=%s",
+                channel_id,
+                page_id,
+            )
         return True
 
     async def _invoke_apply_update_llm(self, prompt: str) -> str:
@@ -698,6 +732,306 @@ class WikiMaintainer:
             return None
 
     # ------------------------------------------------------------------
+    # Drift A/B comparator wiring
+    # ------------------------------------------------------------------
+
+    def _should_compare_drift(self, channel_id: str, page_id: str) -> bool:
+        """Per-(channel, page) rate-limit gate for the drift comparator.
+
+        Returns False when the same key was last compared inside the rate
+        limit window. The window length is read from
+        ``Settings.wiki_drift_ab_rate_limit_seconds`` (default 60s) on each
+        call so an operator can tune it via env without restart-on-import.
+        Trims entries older than 5 minutes on every check so the in-memory
+        dict cannot grow unbounded for a churning channel set.
+        """
+        from beever_atlas.infra.config import get_settings
+
+        window = float(get_settings().wiki_drift_ab_rate_limit_seconds)
+        now = time.monotonic()
+        # Trim entries older than max(5 min, window) — bounds memory while
+        # guaranteeing we never evict a timestamp before its rate-limit
+        # window has actually elapsed. The 5-min floor keeps memory tight
+        # for the typical 60s default; the max() shields against an
+        # operator setting WIKI_DRIFT_AB_RATE_LIMIT_SECONDS > 300 (e.g.
+        # raised to 10 min during a high-cost soak window).
+        if self._drift_compare_last_run:
+            cutoff = now - max(300.0, window)
+            self._drift_compare_last_run = {
+                k: v for k, v in self._drift_compare_last_run.items() if v >= cutoff
+            }
+        key = (channel_id, page_id)
+        last = self._drift_compare_last_run.get(key)
+        if last is None:
+            return True
+        elapsed = now - last
+        if elapsed >= window:
+            return True
+        logger.info(
+            "event=wiki_drift_rate_limited channel_id=%s page_id=%s "
+            "since_last_seconds=%.1f window=%.1f",
+            channel_id,
+            page_id,
+            elapsed,
+            window,
+        )
+        return False
+
+    def _make_regenerate_factory(self, channel_id: str, page_id: str, target_lang: str):
+        """Build an async factory that returns the from-scratch ``WikiPage``
+        for the same ``(channel_id, page_id, target_lang)``.
+
+        The factory invokes ``WikiBuilder.generate_wiki`` (the legacy "build
+        the whole channel's wiki, then extract this page" path) so the
+        comparator can score the incremental output's drift versus a fresh
+        regeneration. The closure is the small contract change that
+        quarantines WikiBuilder coupling to the maintainer module.
+        """
+
+        async def _factory() -> WikiPage | None:
+            try:
+                from beever_atlas.infra.config import get_settings
+                from beever_atlas.stores import get_stores
+                from beever_atlas.wiki.builder import WikiBuilder
+                from beever_atlas.wiki.cache import WikiCache
+
+                stores = get_stores()
+                weaviate = getattr(stores, "weaviate", None)
+                graph = getattr(stores, "graph", None)
+                # ``WikiCache`` takes a Mongo URI string (not the store).
+                # Construct it the same way ``api/wiki.py:_get_cache`` does
+                # so a soak run sees the same backing collection production
+                # uses. The cache is cheap to instantiate (no startup
+                # handshake) — no need to hold a singleton here.
+                cache = WikiCache(get_settings().mongodb_uri)
+                builder = WikiBuilder(weaviate, graph, cache)
+                response = await builder.generate_wiki(channel_id, target_lang=target_lang)
+            except Exception as exc:  # noqa: BLE001 — comparator must not destabilise
+                logger.warning(
+                    "event=wiki_drift_regenerate_factory_failed channel_id=%s page_id=%s err=%s",
+                    channel_id,
+                    page_id,
+                    exc,
+                )
+                return None
+            # ``WikiResponse`` shape varies across builder revisions; the
+            # comparator only needs a ``WikiPage`` shape with title +
+            # sections, which we can synthesise from whatever per-page
+            # representation the builder returned.
+            page_payload = _extract_regenerate_page(response, page_id)
+            if page_payload is None:
+                return None
+            return WikiPage(
+                channel_id=channel_id,
+                target_lang=target_lang,
+                page_id=page_id,
+                title=page_payload.get("title", "") or "",
+                slug=page_payload.get("slug", page_id.replace(":", "-")),
+                sections=[
+                    WikiPageSection(
+                        id=str(s.get("id", "")) or "section",
+                        title=str(s.get("title", "")),
+                        content_md=str(s.get("content_md", "")),
+                    )
+                    for s in (page_payload.get("sections") or [])
+                ],
+            )
+
+        return _factory
+
+    def _schedule_drift_compare(
+        self,
+        channel_id: str,
+        page_id: str,
+        saved_page: WikiPage,
+        target_lang: str,
+    ) -> None:
+        """Fire the drift comparator as a fire-and-forget asyncio task.
+
+        Gated on ``Settings.wiki_drift_ab`` and the per-(channel, page) rate
+        limit. Captures the just-saved ``WikiPage`` as the incremental
+        factory so the comparator times only the regenerate side
+        meaningfully (the incremental side already finished). Records the
+        post-schedule timestamp so the rate limiter ticks even if the task
+        itself is still in-flight (otherwise a slow comparator could be
+        re-scheduled before it finishes, defeating the rate limit).
+
+        ``done_callback`` surfaces unhandled exceptions to the structured
+        log — an unhandled task exception in asyncio would otherwise be
+        silently logged to ``sys.stderr`` only on event-loop shutdown.
+        """
+        from beever_atlas.infra.config import get_settings
+
+        if not get_settings().wiki_drift_ab:
+            return
+        if not self._should_compare_drift(channel_id, page_id):
+            return
+        regenerate_factory = self._make_regenerate_factory(channel_id, page_id, target_lang)
+
+        async def _incremental_factory() -> WikiPage:
+            return saved_page
+
+        from beever_atlas.services.wiki_drift_comparator import (
+            compare_apply_update_vs_regenerate,
+        )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (e.g. a sync test path) — nothing to schedule.
+            logger.warning(
+                "event=wiki_drift_schedule_no_loop channel_id=%s page_id=%s",
+                channel_id,
+                page_id,
+            )
+            return
+
+        task = loop.create_task(
+            compare_apply_update_vs_regenerate(
+                channel_id=channel_id,
+                page_id=page_id,
+                incremental_factory=_incremental_factory,
+                regenerate_factory=regenerate_factory,
+            )
+        )
+        # Stamp the rate-limit timestamp now (post-schedule) so a quick
+        # second apply_update for the same page within the window is
+        # rejected even if the original task is still running.
+        self._drift_compare_last_run[(channel_id, page_id)] = time.monotonic()
+
+        def _on_done(t: asyncio.Task) -> None:
+            try:
+                exc = t.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is not None:
+                logger.warning(
+                    "event=wiki_drift_task_failed channel_id=%s page_id=%s err=%s",
+                    channel_id,
+                    page_id,
+                    exc,
+                )
+
+        task.add_done_callback(_on_done)
+
+    # ------------------------------------------------------------------
+    # Observability counters
+    # ------------------------------------------------------------------
+
+    def _record_apply_update_success(self, page_id: str) -> None:
+        """Record a successful ``apply_update`` rewrite. Trims rolling
+        window to the last 60 minutes on each insert so the list stays
+        bounded under sustained traffic."""
+        now = time.monotonic()
+        self._trim_rolling(self._apply_update_records, now)
+        self._apply_update_records.append((now, _page_kind_from_id(page_id)))
+
+    def _record_apply_update_failure(
+        self, channel_id: str, page_id: str, exc: BaseException
+    ) -> None:
+        """Append a failure record (capped at 10 entries — oldest first
+        dropped when the cap is reached)."""
+        entry = {
+            "channel_id": channel_id,
+            "page_id": page_id,
+            "error_class": type(exc).__name__,
+            "ts": datetime.now(tz=UTC).isoformat(),
+        }
+        self._apply_update_failures.append(entry)
+        if len(self._apply_update_failures) > 10:
+            # Drop oldest first.
+            del self._apply_update_failures[0 : len(self._apply_update_failures) - 10]
+
+    def _record_mark_dirty(self, count: int) -> None:
+        """Record ``count`` mark-dirty events — one timestamp per page that
+        flipped to dirty. Trims rolling window like the apply-update one."""
+        if count <= 0:
+            return
+        now = time.monotonic()
+        self._trim_rolling_floats(self._mark_dirty_records, now)
+        self._mark_dirty_records.extend([now] * count)
+
+    @staticmethod
+    def _trim_rolling(records: list[tuple[float, str]], now: float) -> None:
+        cutoff = now - 3600.0
+        # Records are appended in chronological order so the oldest sit at
+        # the front; drop the prefix older than the cutoff in O(N) once.
+        keep_from = len(records)
+        for i, entry in enumerate(records):
+            if entry[0] >= cutoff:
+                keep_from = i
+                break
+        if keep_from > 0:
+            del records[0:keep_from]
+
+    @staticmethod
+    def _trim_rolling_floats(records: list[float], now: float) -> None:
+        cutoff = now - 3600.0
+        keep_from = len(records)
+        for i, ts in enumerate(records):
+            if ts >= cutoff:
+                keep_from = i
+                break
+        if keep_from > 0:
+            del records[0:keep_from]
+
+    def _in_memory_metrics_snapshot(self) -> dict[str, Any]:
+        """Synchronous slice of metrics — no Mongo. Used both by tests
+        (cheap) and by the async ``metrics_snapshot`` (which adds the
+        Mongo-backed ``pending_dirty_pages_per_channel`` count)."""
+        now = time.monotonic()
+        self._trim_rolling(self._apply_update_records, now)
+        self._trim_rolling_floats(self._mark_dirty_records, now)
+
+        def _count_within(records: list[tuple[float, str]], window: float) -> int:
+            cutoff = now - window
+            return sum(1 for ts, _ in records if ts >= cutoff)
+
+        def _count_within_floats(records: list[float], window: float) -> int:
+            cutoff = now - window
+            return sum(1 for ts in records if ts >= cutoff)
+
+        rewrite_by_kind = {
+            "topic": 0,
+            "entity": 0,
+            "decisions": 0,
+            "faq": 0,
+            "action_items": 0,
+        }
+        for _ts, kind in self._apply_update_records:
+            if kind in rewrite_by_kind:
+                rewrite_by_kind[kind] += 1
+        return {
+            "apply_update_count_5min": _count_within(self._apply_update_records, 300.0),
+            "apply_update_count_15min": _count_within(self._apply_update_records, 900.0),
+            "apply_update_count_60min": _count_within(self._apply_update_records, 3600.0),
+            "mark_dirty_count_5min": _count_within_floats(self._mark_dirty_records, 300.0),
+            "apply_update_failures": list(self._apply_update_failures),
+            "rewrite_count_by_page_kind": rewrite_by_kind,
+        }
+
+    async def metrics_snapshot(self) -> dict[str, Any]:
+        """Return the documented metrics shape, including the Mongo-backed
+        ``pending_dirty_pages_per_channel``. On Mongo failure the rest of
+        the metrics are returned with ``pending_dirty_pages_per_channel={}``
+        and a warning log line — the endpoint must never crash on a
+        transient observability dependency."""
+        snapshot = self._in_memory_metrics_snapshot()
+        pending: dict[str, int] = {}
+        try:
+            from beever_atlas.stores import get_stores
+
+            stores = get_stores()
+            mongo = getattr(stores, "mongodb", None)
+            if mongo is not None:
+                pending = await _aggregate_pending_dirty(mongo)
+        except Exception as exc:  # noqa: BLE001 — observability is best-effort
+            logger.warning("event=wiki_maintainer_pending_dirty_failed err=%s", exc)
+            pending = {}
+        snapshot["pending_dirty_pages_per_channel"] = pending
+        return snapshot
+
+    # ------------------------------------------------------------------
     # Internal — fact loader (overridden in tests)
     # ------------------------------------------------------------------
 
@@ -765,6 +1099,126 @@ def _hash_fact_ids(fact_ids: list[str]) -> str:
 
     joined = "\x00".join(sorted(fact_ids))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def _page_kind_from_id(page_id: str) -> str:
+    """Derive the metrics-bucket kind from a ``page_id``.
+
+    Returns one of: ``topic``, ``entity``, ``decisions``, ``faq``,
+    ``action_items``, or ``other``. The role pages (``decisions``, ``faq``,
+    ``action-items``) are flat slugs; the prefixed kinds split on ``:``.
+    """
+    if not page_id:
+        return "other"
+    if page_id.startswith("topic:"):
+        return "topic"
+    if page_id.startswith("entity:"):
+        return "entity"
+    if page_id == "decisions":
+        return "decisions"
+    if page_id == "faq":
+        return "faq"
+    if page_id == "action-items":
+        return "action_items"
+    return "other"
+
+
+def _extract_regenerate_page(response: Any, page_id: str) -> dict[str, Any] | None:
+    """Best-effort extraction of one page from a ``WikiBuilder.generate_wiki``
+    response. The legacy response has a flat ``pages`` subdoc whose entries
+    each carry a ``page_id`` (or a ``slug`` derivable into one). Defensive
+    against shape drift — returns None when nothing matches.
+    """
+    if response is None:
+        return None
+    pages = None
+    if isinstance(response, dict):
+        pages = response.get("pages")
+    else:
+        pages = getattr(response, "pages", None)
+    if pages is None:
+        return None
+    if hasattr(pages, "items"):
+        # Flat dict keyed by page_id.
+        for pid, page in pages.items():
+            if str(pid) != page_id:
+                continue
+            return _normalise_legacy_page(page)
+        return None
+    # Iterable of pages.
+    try:
+        for page in pages:
+            pid = page.get("page_id") if isinstance(page, dict) else getattr(page, "page_id", None)
+            if pid == page_id:
+                return _normalise_legacy_page(page)
+    except TypeError:
+        return None
+    return None
+
+
+def _normalise_legacy_page(page: Any) -> dict[str, Any]:
+    """Coerce a builder-shape page (Pydantic model OR plain dict) into the
+    title/slug/sections dict shape ``WikiPage`` expects."""
+    if isinstance(page, dict):
+        return {
+            "title": page.get("title", ""),
+            "slug": page.get("slug", ""),
+            "sections": page.get("sections", []),
+        }
+    return {
+        "title": getattr(page, "title", "") or "",
+        "slug": getattr(page, "slug", "") or "",
+        "sections": [
+            {
+                "id": getattr(s, "id", "") or "section",
+                "title": getattr(s, "title", "") or "",
+                "content_md": getattr(s, "content_md", "") or "",
+            }
+            for s in (getattr(page, "sections", []) or [])
+        ],
+    }
+
+
+async def _aggregate_pending_dirty(mongo: Any) -> dict[str, int]:
+    """Aggregate ``wiki_pages`` documents where ``is_dirty=true`` grouped by
+    ``channel_id``. Returns ``{channel_id: count}``. Reaches into the Mongo
+    store's database accessor — the existing ``MongoDBStore`` exposes
+    ``.db``."""
+    out: dict[str, int] = {}
+    db = getattr(mongo, "db", None)
+    if db is None:
+        return out
+    pipeline: list[dict[str, Any]] = [
+        {"$match": {"is_dirty": True}},
+        {"$group": {"_id": "$channel_id", "count": {"$sum": 1}}},
+    ]
+    cursor = db["wiki_pages"].aggregate(pipeline)
+    async for row in cursor:
+        cid = row.get("_id") or ""
+        if cid:
+            out[str(cid)] = int(row.get("count", 0) or 0)
+    return out
+
+
+def zeroed_maintainer_metrics() -> dict[str, Any]:
+    """Default response shape used by the admin endpoint when the
+    maintainer singleton is not registered or the snapshot raises. Kept
+    in sync with :meth:`WikiMaintainer.metrics_snapshot`'s real shape."""
+    return {
+        "apply_update_count_5min": 0,
+        "apply_update_count_15min": 0,
+        "apply_update_count_60min": 0,
+        "mark_dirty_count_5min": 0,
+        "apply_update_failures": [],
+        "rewrite_count_by_page_kind": {
+            "topic": 0,
+            "entity": 0,
+            "decisions": 0,
+            "faq": 0,
+            "action_items": 0,
+        },
+        "pending_dirty_pages_per_channel": {},
+    }
 
 
 # ----------------------------------------------------------------------

@@ -121,3 +121,24 @@ for the symptom → cause table. Hermes-specific gotchas:
   conversation that posts one turn per day; you don't need a longer
   TTL because the compound unique index handles duplicate `message_id`
   retries beyond the cache window.
+
+## 6. Watch the wiki-drift dashboard during first soak
+
+Hermes' slow, sustained traffic makes drift easy to read on the
+`/admin/wiki-drift` admin dashboard. Because Hermes posts one turn at
+a time, the maintainer's per-page comparator runs naturally inside the
+60s rate-limit window — every turn that touches a page in `auto` mode
+yields one drift report. Within ≈30 turns you'll have enough samples
+to confirm `pass_criterion_met=true`.
+
+If the row trends toward `pass_criterion_met=false`, suspect one of:
+
+- **Voice drift** — Hermes' user-facing turns mix model + assistant
+  voice; the maintainer's `_render_apply_update_prompt` may be picking
+  up the assistant tone where it should be preserving the user voice.
+- **Compounding-fact errors** — slow-traffic channels are where
+  incremental updates compound the longest; a small per-turn drift
+  will surface as elevated p95 medians over the 14-day window.
+
+See [`docs/runbooks/wiki-maintenance-soak.md`](../runbooks/wiki-maintenance-soak.md)
+§22.4–§22.7 for the full drift-soak procedure.

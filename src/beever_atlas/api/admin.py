@@ -298,4 +298,121 @@ async def extraction_worker_metrics() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# WikiMaintainer observability metrics (close-the-soak-loop §4)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/wiki-maintainer/metrics")
+async def wiki_maintainer_metrics() -> dict:
+    """Return a snapshot of the WikiMaintainer's current state.
+
+    Mirrors :func:`extraction_worker_metrics` so operators learn one
+    pattern: rolling apply_update counts (5/15/60min), recent failures,
+    by-page-kind rewrite counts, mark_dirty rate, and per-channel
+    pending-dirty page counts. Per-process — multi-replica deploys
+    aggregate at the UI layer.
+
+    Snapshot is best-effort. When the maintainer singleton has not been
+    registered yet (early lifespan) OR ``metrics_snapshot`` raises, the
+    endpoint returns the documented zeroed shape rather than a 500.
+    """
+    try:
+        from beever_atlas.services.wiki_maintainer import (
+            get_wiki_maintainer,
+            zeroed_maintainer_metrics,
+        )
+
+        maintainer = get_wiki_maintainer()
+        if maintainer is None:
+            return zeroed_maintainer_metrics()
+        return await maintainer.metrics_snapshot()
+    except Exception as exc:  # noqa: BLE001 — never crash an observability endpoint
+        from beever_atlas.services.wiki_maintainer import zeroed_maintainer_metrics
+
+        logger.warning("wiki-maintainer metrics: snapshot failed: %s", exc)
+        return zeroed_maintainer_metrics()
+
+
+# ---------------------------------------------------------------------------
+# Wiki drift threshold dashboard endpoint (close-the-soak-loop §5)
+# ---------------------------------------------------------------------------
+
+
+# Hard cap on the ``days`` query parameter. The aggregator runs an
+# unbounded $match over the TTL collection; pinning a server-side ceiling
+# guarantees a single misbehaving caller cannot trigger a 30-million-row
+# scan even if the TTL grows beyond the documented 30-day window.
+_WIKI_DRIFT_SUMMARY_MAX_DAYS = 60
+
+
+def _summary_pass_criterion(p50_median: float, p95_median: float) -> bool:
+    """Pass threshold from spec: median Levenshtein < 0.15 AND p95 < 0.30.
+
+    Stays a module-level helper so the criterion is one source of truth
+    if a future change tunes it.
+    """
+    return p50_median < 0.15 and p95_median < 0.30
+
+
+@router.get("/wiki-drift/summary")
+async def wiki_drift_summary(days: int = 14) -> dict:
+    """Aggregated drift summary for the soak-pass dashboard.
+
+    Returns ``{channels, pass, data_fresh}``:
+      * ``channels``: per-channel ``{channel_id, page_count,
+        levenshtein_section_p50_median, levenshtein_section_p95_median,
+        last_run_ts, pass_criterion_met}``.
+      * ``pass``: True iff every channel meets the threshold.
+      * ``data_fresh``: True iff every channel's most recent report is
+        within the last 60 minutes.
+
+    Empty window returns ``{channels: [], pass: false, data_fresh: false}``
+    with HTTP 200 — empty soak data is a documented state, not an error.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    capped_days = max(1, min(days, _WIKI_DRIFT_SUMMARY_MAX_DAYS))
+    try:
+        stores = get_stores()
+        rows = await stores.mongodb.aggregate_wiki_drift_summary(capped_days)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wiki-drift summary: aggregate failed: %s", exc)
+        rows = []
+
+    if not rows:
+        return {"channels": [], "pass": False, "data_fresh": False}
+
+    now = datetime.now(tz=UTC)
+    fresh_cutoff = now - timedelta(minutes=60)
+    channels: list[dict] = []
+    pass_overall = True
+    data_fresh_overall = True
+    for row in rows:
+        p50m = float(row.get("levenshtein_section_p50_median", 0.0) or 0.0)
+        p95m = float(row.get("levenshtein_section_p95_median", 0.0) or 0.0)
+        criterion = _summary_pass_criterion(p50m, p95m)
+        last_ts = row.get("last_run_ts")
+        is_fresh = isinstance(last_ts, datetime) and last_ts >= fresh_cutoff
+        if not criterion:
+            pass_overall = False
+        if not is_fresh:
+            data_fresh_overall = False
+        channels.append(
+            {
+                "channel_id": row.get("channel_id", ""),
+                "page_count": int(row.get("page_count", 0) or 0),
+                "levenshtein_section_p50_median": p50m,
+                "levenshtein_section_p95_median": p95m,
+                "last_run_ts": last_ts.isoformat() if isinstance(last_ts, datetime) else last_ts,
+                "pass_criterion_met": criterion,
+            }
+        )
+    return {
+        "channels": channels,
+        "pass": pass_overall,
+        "data_fresh": data_fresh_overall,
+    }
+
+
 __all__ = ["router"]

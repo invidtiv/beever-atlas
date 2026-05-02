@@ -72,28 +72,69 @@ Pass criteria:
 
 This is the longest-running step. Run it on **at least 3 real channels**
 for a continuous 2-week window. The comparator emits one
-`wiki_drift_report` log line per `apply_update`; aggregate them through
-your logging stack.
+`wiki_drift_report` log line per `apply_update` AND persists each report
+to the `wiki_drift_reports` Mongo collection (TTL=30 days). The admin
+dashboard reads the persisted collection — the log lines are kept as
+defense-in-depth.
 
 ### Setup
 
 1. Pick 3 channels with active conversation: ideally one short
    (low traffic), one medium, one busy.
 2. Set `WIKI_DRIFT_AB=true` in their staging env.
-3. Set `wiki.maintenance_mode=auto` per-channel (via the
+3. Optional: tune `WIKI_DRIFT_AB_RATE_LIMIT_SECONDS` (default `60`) —
+   raise to `300` if soak LLM cost is too high; drop to `30` if data
+   density is too low for confident percentile estimation. The rate
+   limit is per `(channel_id, page_id)` pair and applies in addition to
+   the maintainer's existing per-page semaphore.
+4. Set `wiki.maintenance_mode=auto` per-channel (via the
    ChannelSettingsTab toggle).
-4. Wire the comparator into `WikiMaintainer.apply_update`'s success
-   path so each successful incremental update also runs the regenerate
-   factory in parallel. (The comparator service is shipped; this
-   wiring is the §19.4 "deferred" step.)
+5. The comparator wiring is now LIVE in `WikiMaintainer.apply_update`'s
+   success path — no manual hookup required (close-the-soak-loop §1).
 
-### Monitoring
+### Monitoring — primary path
 
-Tail logs, filter to `event=wiki_drift_report`. Alternatively:
+Open the admin dashboard:
+
+```
+https://atlas.staging/admin/wiki-drift
+```
+
+The page polls `GET /api/admin/wiki-drift/summary?days=14` every 5
+minutes and renders:
+
+- Top banner: green `PASSING — soak threshold met across N channels` or
+  red `FAILING — drift X.XX exceeds threshold on M channels`.
+- Yellow `data_fresh=false` warning when the most recent drift report
+  per channel is more than 1 hour old (likely cause: `WIKI_DRIFT_AB`
+  was flipped off mid-soak, or the comparator stalled).
+- Per-channel rows with `page_count`, `p50_median`, `p95_median`,
+  relative `last_run` time, and the threshold ✓/✗ marker.
+
+`VITE_BEEVER_ADMIN_TOKEN` must be set in `web/.env.local` for the
+dashboard to authenticate against `/api/admin/wiki-drift/summary`.
+
+### How the dashboard works
+
+The aggregation runs on the API layer over the persisted
+`wiki_drift_reports` collection (NOT log files). Each per-channel row
+shows the **median of medians** — i.e. for each `apply_update` the
+comparator records `levenshtein_section_p50` (one number per page); the
+dashboard takes the median of those numbers per channel over the window.
+That smooths over per-page noise without hiding a sustained shift in any
+direction. The `data_fresh` indicator reads `MAX(ts)` per channel; ANY
+channel falling behind by more than an hour flips the dashboard-wide
+freshness warning regardless of overall pass status.
+
+### Monitoring — fallback (no dashboard access)
+
+If you don't have admin-token access to the staging dashboard, tail
+logs and aggregate manually:
 
 ```bash
 # Aggregate per-channel medians + p95 from the structured log lines.
-# Adjust the log path to your environment.
+# Adjust the log path to your environment. The dashboard is the
+# canonical view; this is for ops without admin-token access.
 grep -h "event=wiki_drift_report" /var/log/beever-atlas/*.log \
   | python -c "
 import sys, statistics
@@ -133,9 +174,44 @@ for 2 weeks across all 3 channels. Document the daily summary.
   is prompt template not preserving voice).
 - Re-run the soak on the iterated prompt for another 2 weeks.
 
+## Worked example — "PASSING after 2 weeks"
+
+After 14 days of soak across 3 channels, the dashboard reads:
+
+| Channel | Reports | p50 median | p95 median | Last run | Threshold |
+|---|---:|---:|---:|---|:---:|
+| `C-design`  | 412 | 0.082 | 0.198 | 2m ago  | ✓ |
+| `C-eng`     | 631 | 0.094 | 0.221 | 4m ago  | ✓ |
+| `C-product` | 287 | 0.074 | 0.187 | 8m ago  | ✓ |
+
+Banner reads `PASSING — soak threshold met across 3 channels`. At this
+point:
+
+1. Capture the dashboard screenshot — `${BEEVER_DOCS_URL}/runbooks/wiki-soak-pass-2026Q2.png`
+   (placeholder — substitute the actual artifact path).
+2. Open a PR flipping the env-default for `WIKI_MAINTENANCE_MODE` from
+   `"manual"` to `"auto"` in `infra/config.py`.
+3. Tag the responsible operator + a code reviewer; reference this
+   runbook section for the soak evidence.
+
+## Related — push-source integrations
+
+Operators integrating new push sources (OpenClaw, Hermes, etc.) should
+keep an eye on `/admin/wiki-drift` during the first week of the
+integration's soak. A new ingestion path can introduce subtle source-
+language or fact-shape changes that may show up as elevated p95 even
+when p50 stays clean.
+
+- See `docs/integrations/openclaw.md` for the OpenClaw HMAC-signed
+  push setup. Watch the dashboard during the first sync to confirm
+  `pass_criterion_met=true` once their channel accumulates ≥30 drift
+  reports.
+- See `docs/integrations/hermes.md` for the Hermes push integration.
+  Same drift-watch contract applies.
+
 ## Scheduled re-runs
 
 After the initial soak, schedule a re-run quarterly so prompt-shift
 on the underlying LLM doesn't silently drift back over the threshold.
 The drift comparator stays in the code; flip `WIKI_DRIFT_AB=true` for
-the soak window each quarter.
+the soak window each quarter and watch `/admin/wiki-drift` again.

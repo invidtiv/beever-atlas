@@ -49,6 +49,11 @@ class MongoDBStore:
         # Push-source registry + idempotency replay cache.
         self._external_sources = self._db["external_sources"]
         self._idempotency_keys = self._db["idempotency_keys"]
+        # Wiki page-voice drift A/B reports — TTL=30d, populated by
+        # ``services.wiki_drift_comparator`` when ``WIKI_DRIFT_AB=true``.
+        # Aggregated by the ``GET /api/admin/wiki-drift/summary`` endpoint
+        # to drive the soak-pass dashboard.
+        self._wiki_drift_reports = self._db["wiki_drift_reports"]
 
     @property
     def db(self):
@@ -104,6 +109,19 @@ class MongoDBStore:
             "created_at",
             expireAfterSeconds=86400,
             name="idempotency_keys_ttl",
+        )
+        # ``wiki_drift_reports`` indexes:
+        # 1) TTL — documents auto-expire 30 days after their inserted ``ts``.
+        await self._wiki_drift_reports.create_index(
+            [("ts", 1)],
+            expireAfterSeconds=2592000,
+            name="wiki_drift_reports_ttl",
+        )
+        # 2) Compound (channel_id, ts DESC) for the per-channel + recent
+        # query the summary endpoint runs.
+        await self._wiki_drift_reports.create_index(
+            [("channel_id", 1), ("ts", -1)],
+            name="wiki_drift_reports_channel_ts",
         )
         # Seed global policy defaults from Settings if not present
         existing = await self._global_policy_defaults.find_one({"id": "global"})
@@ -1245,6 +1263,93 @@ class MongoDBStore:
             return True
         except DuplicateKeyError:
             return False
+
+    # ------------------------------------------------------------------
+    # Wiki drift reports (close-the-soak-loop §3)
+    # ------------------------------------------------------------------
+
+    async def insert_wiki_drift_report(self, report: Any) -> None:
+        """Persist one ``DriftReport`` to ``wiki_drift_reports``.
+
+        Accepts a dataclass instance or a plain dict (the comparator
+        always passes the dataclass; tests sometimes pass dicts).
+        Adds an inserted ``ts`` field used by the TTL index + the
+        per-channel summary aggregation.
+        """
+        from dataclasses import asdict, is_dataclass
+
+        if is_dataclass(report) and not isinstance(report, type):
+            doc: dict[str, Any] = asdict(report)
+        elif isinstance(report, dict):
+            doc = dict(report)
+        else:
+            # Defensive: best-effort attribute scrape so a future Pydantic
+            # rework doesn't silently drop persistence.
+            doc = {
+                k: getattr(report, k)
+                for k in (
+                    "channel_id",
+                    "page_id",
+                    "levenshtein_title",
+                    "levenshtein_section_max",
+                    "levenshtein_section_p50",
+                    "levenshtein_section_p95",
+                    "section_id_jaccard",
+                    "incremental_ms",
+                    "regenerate_ms",
+                    "incremental_section_count",
+                    "regenerate_section_count",
+                )
+                if hasattr(report, k)
+            }
+        doc["ts"] = datetime.now(tz=UTC)
+        await self._wiki_drift_reports.insert_one(doc)
+
+    async def aggregate_wiki_drift_summary(self, days: int) -> list[dict[str, Any]]:
+        """Aggregate ``wiki_drift_reports`` over the last ``days`` days.
+
+        Returns one row per channel with median + p95 medians of the
+        Levenshtein section metrics. The pass criterion + freshness
+        evaluation lives at the API layer — this method is the data fan-in
+        only. ``days`` is treated as inclusive of any rows whose ``ts``
+        lies within the window.
+        """
+        import statistics
+
+        cutoff = datetime.now(tz=UTC) - timedelta(days=max(1, days))
+        pipeline: list[dict[str, Any]] = [
+            {"$match": {"ts": {"$gte": cutoff}}},
+            {
+                "$group": {
+                    "_id": "$channel_id",
+                    "page_count": {"$sum": 1},
+                    "section_p50_values": {"$push": "$levenshtein_section_p50"},
+                    "section_p95_values": {"$push": "$levenshtein_section_p95"},
+                    "last_run_ts": {"$max": "$ts"},
+                }
+            },
+        ]
+        out: list[dict[str, Any]] = []
+        async for row in self._wiki_drift_reports.aggregate(pipeline):
+            # Defensive None-guard — DriftReport's dataclass schema today
+            # guarantees these fields are floats, but partial-failure
+            # writes or a future schema migration could land docs with
+            # missing fields. Filter so the float() coercion never raises
+            # TypeError mid-aggregate (would 500 the dashboard).
+            p50s = [float(v) for v in (row.get("section_p50_values") or []) if v is not None]
+            p95s = [float(v) for v in (row.get("section_p95_values") or []) if v is not None]
+            p50_median = statistics.median(p50s) if p50s else 0.0
+            p95_median = statistics.median(p95s) if p95s else 0.0
+            out.append(
+                {
+                    "channel_id": str(row.get("_id") or ""),
+                    "page_count": int(row.get("page_count", 0) or 0),
+                    "levenshtein_section_p50_median": p50_median,
+                    "levenshtein_section_p95_median": p95_median,
+                    "last_run_ts": row.get("last_run_ts"),
+                }
+            )
+        return out
 
     async def sweep_stale_extracting(self, stale_seconds: int = 600) -> int:
         """Reset rows stuck in ``"extracting"`` for more than ``stale_seconds``

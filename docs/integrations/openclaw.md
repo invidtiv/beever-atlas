@@ -115,3 +115,19 @@ for the symptom → cause table. OpenClaw-specific gotchas:
   message_id)` compound unique index makes this a no-op; the response
   reports them in `deduplicated`. Watch that counter — if it grows
   unboundedly, OpenClaw's idempotency-key generation is misconfigured.
+
+## 7. Watch the wiki-drift dashboard during first soak
+
+After OpenClaw starts pushing, open `/admin/wiki-drift` in the staging
+dashboard. Once the integrated channel has accumulated ≥30 drift
+reports (typically within the first day of active traffic with
+`WIKI_DRIFT_AB=true`), confirm `pass_criterion_met=true`. A failing row
+on a brand-new push integration usually points at one of:
+
+- **Source-language mismatch** — OpenClaw is forwarding messages whose
+  BCP-47 tag differs from the channel's `primary_language` setting.
+- **Fact-shape skew** — OpenClaw's payload schema includes a non-
+  standard field that's confusing the extractor's coreference pass.
+
+See [`docs/runbooks/wiki-maintenance-soak.md`](../runbooks/wiki-maintenance-soak.md)
+§22.4–§22.7 for the full drift-soak procedure.

@@ -487,6 +487,29 @@ class Settings(BaseSettings):
     # full-regenerate quality on three real channels.
     wiki_maintenance_mode: str = Field(default="manual", alias="WIKI_MAINTENANCE_MODE")
 
+    # Wiki page-voice drift A/B comparator.
+    # When True, every successful ``WikiMaintainer.apply_update`` ALSO
+    # schedules a fire-and-forget ``compare_apply_update_vs_regenerate``
+    # task that builds the regenerate-from-scratch wiki page for the same
+    # ``(channel_id, page_id, target_lang)`` and emits a structured
+    # ``wiki_drift_report`` log line + persists a row to the
+    # ``wiki_drift_reports`` Mongo collection. Default OFF — the comparator
+    # doubles LLM cost on the affected page so we only enable it during the
+    # 2-week soak that gates flipping ``WIKI_MAINTENANCE_MODE=auto`` to
+    # default ON. The maintainer's primary path is unaffected when this
+    # flag is OFF.
+    wiki_drift_ab: bool = Field(default=False, alias="WIKI_DRIFT_AB")
+
+    # Per-(channel, page) rate-limit window for the drift comparator.
+    # The maintainer skips a comparator invocation when the same
+    # ``(channel_id, page_id)`` was last compared less than this many
+    # seconds ago. 60s default keeps soak data dense without doubling LLM
+    # cost on a busy channel; soak operators may tune to 30s (denser
+    # samples) or 300s (cheaper) without redeploy.
+    wiki_drift_ab_rate_limit_seconds: int = Field(
+        default=60, alias="WIKI_DRIFT_AB_RATE_LIMIT_SECONDS"
+    )
+
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared

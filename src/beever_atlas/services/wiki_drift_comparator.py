@@ -223,6 +223,25 @@ async def compare_apply_update_vs_regenerate(
     logger.info(
         "event=wiki_drift_report " + _format_report(report),
     )
+    # Persist alongside the structured log line — defense-in-depth so the
+    # admin dashboard endpoint can aggregate without depending on log-
+    # shipping. Persistence failures emit a warning but do NOT alter the
+    # primary success-log invariant: the structured log line above is the
+    # contract every analytic pipeline reads first.
+    try:
+        from beever_atlas.stores import get_stores
+
+        stores = get_stores()
+        mongo = getattr(stores, "mongodb", None)
+        if mongo is not None and hasattr(mongo, "insert_wiki_drift_report"):
+            await mongo.insert_wiki_drift_report(report)
+    except Exception as exc:  # noqa: BLE001 — observability is best-effort
+        logger.warning(
+            "event=wiki_drift_persist_failed channel_id=%s page_id=%s err=%s",
+            channel_id,
+            page_id,
+            exc,
+        )
     return report
 
 
