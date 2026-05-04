@@ -612,3 +612,234 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
                 channel_id,
             )
             return {"error": "extraction_status_failed"}
+
+    # ----------------------------------------------------------------------
+    # wiki-llm-native-redesign §7 — read-only MCP surface for the wiki
+    # ----------------------------------------------------------------------
+    # The legacy ``get_wiki_page(channel_id, page_type)`` tool consumes the
+    # static-page namespace; these three tools expose the redesigned wiki:
+    # slug-keyed identity, kind-aware filtering, and the cross-link graph.
+    # All three return structured dicts; callers route through the channel
+    # ACL enforced by ``assert_channel_access`` so an MCP token without
+    # access to a channel sees ``{"error": "channel_access_denied"}``.
+    #
+    # v2 SEAM (skip-in-v1): a future change will add
+    # ``propose_wiki_edit(channel_id, slug, content_md, citations)`` writing
+    # to the ``wiki_proposed_edits`` Mongo collection (TTL=30d, indexed by
+    # (channel_id, slug, status)). v1 ships read-only — the operator UI
+    # has no surface for sandboxed agent edits yet, and the access-control
+    # design needs more time. The collection is reserved at startup so
+    # the v2 ship is purely additive.
+
+    @mcp.tool(name="read_wiki_page")
+    async def read_wiki_page(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        slug: Annotated[
+            str,
+            "The page slug — stable, human-readable identifier from the wiki",
+        ],
+        ctx: Context,
+        target_lang: Annotated[str, "Target language tag (BCP-47); defaults to 'en'"] = "en",
+    ) -> dict:
+        """Return the structured payload for one wiki page (slug-keyed).
+
+        Returns the full WikiPage document including ``content_md`` (markdown
+        for human reading), ``kind`` + ``kind_schema`` (structured payload
+        agents can iterate without re-parsing markdown), ``cross_links``
+        (title→slug), ``cross_links_broken`` (titles with no destination
+        page yet), ``pin_state``, and ``last_updated``. Hidden pages are
+        excluded UNLESS the caller's MCP token carries the
+        ``read:hidden_pages`` scope (set in ``BEEVER_MCP_API_KEY_SCOPES``).
+
+        Returns ``{error: "wiki_page_not_found"}`` on missing slug,
+        ``{error: "channel_access_denied"}`` on ACL denial.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return {"error": "authentication_missing"}
+        err = _validate_id(channel_id, "channel_id") or _validate_id(slug, "slug")
+        if err:
+            return err
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return {"error": "channel_access_denied", "channel_id": channel_id}
+
+        try:
+            from beever_atlas.stores import get_stores
+            from beever_atlas.wiki.page_store import WikiPageStore
+
+            stores = get_stores()
+            page_store = WikiPageStore(db=stores.mongodb.db)
+            page = await page_store.get_page_by_slug(channel_id, slug, target_lang=target_lang)
+            if page is None:
+                return {"error": "wiki_page_not_found", "slug": slug}
+            # Honour pin_state.hidden — hidden pages drop unless the
+            # caller has the ``read:hidden_pages`` scope.
+            scopes = _principal_scopes(ctx)
+            if (
+                isinstance(page.pin_state, dict)
+                and page.pin_state.get("hidden")
+                and "read:hidden_pages" not in scopes
+            ):
+                return {"error": "wiki_page_not_found", "slug": slug}
+            return page.model_dump(mode="json")
+        except Exception:
+            logger.exception(
+                "read_wiki_page: failed principal=%s channel=%s slug=%s",
+                principal_id,
+                channel_id,
+                slug,
+            )
+            return {"error": "wiki_read_failed", "slug": slug}
+
+    @mcp.tool(name="list_wiki_pages")
+    async def list_wiki_pages(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        ctx: Context,
+        kind: Annotated[
+            str | None,
+            "Optional kind filter: topic / entity / decisions / faq / action_items",
+        ] = None,
+        scope: Annotated[
+            str,
+            "'human' (default) excludes hidden + merged pages; 'all' returns "
+            "everything when the caller has read:hidden_pages",
+        ] = "human",
+        target_lang: Annotated[str, "Target language tag (BCP-47)"] = "en",
+    ) -> dict:
+        """Return a list of wiki pages for a channel, optionally filtered.
+
+        Returns ``{channel_id, target_lang, scope, pages: [<summary>...]}``
+        where each summary carries ``slug``, ``title``, ``kind``,
+        ``last_updated``, ``version``, and ``pin_state.pinned/hidden``. The
+        ``content_md`` body is intentionally NOT included — agents that
+        need the body should follow up with ``read_wiki_page(slug=...)``
+        to keep the per-call payload bounded.
+
+        ``scope="all"`` requires the ``read:hidden_pages`` token scope —
+        otherwise the caller silently downgrades to ``scope="human"``.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return {"error": "authentication_missing"}
+        err = _validate_id(channel_id, "channel_id")
+        if err:
+            return err
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return {"error": "channel_access_denied", "channel_id": channel_id}
+
+        scopes = _principal_scopes(ctx)
+        effective_scope = scope
+        if scope == "all" and "read:hidden_pages" not in scopes:
+            effective_scope = "human"
+
+        try:
+            from beever_atlas.stores import get_stores
+            from beever_atlas.wiki.page_store import WikiPageStore
+
+            stores = get_stores()
+            page_store = WikiPageStore(db=stores.mongodb.db)
+            pages = await page_store.list_pages_by_kind(
+                channel_id,
+                kind=kind,
+                target_lang=target_lang,
+                scope=effective_scope,
+            )
+            return {
+                "channel_id": channel_id,
+                "target_lang": target_lang,
+                "scope": effective_scope,
+                "pages": [
+                    {
+                        "slug": p.slug or p.page_id.replace(":", "-"),
+                        "title": p.title,
+                        "kind": p.kind,
+                        "version": p.version,
+                        "last_updated": p.updated_at.isoformat() if p.updated_at else "",
+                        "pinned": bool((p.pin_state or {}).get("pinned")),
+                        "hidden": bool((p.pin_state or {}).get("hidden")),
+                    }
+                    for p in pages
+                ],
+            }
+        except Exception:
+            logger.exception(
+                "list_wiki_pages: failed principal=%s channel=%s",
+                principal_id,
+                channel_id,
+            )
+            return {"error": "wiki_list_failed"}
+
+    @mcp.tool(name="get_wiki_graph")
+    async def get_wiki_graph(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        ctx: Context,
+    ) -> dict:
+        """Return the channel's wiki cross-link graph in Cytoscape format.
+
+        Same payload as ``GET /api/channels/{cid}/wiki/graph``:
+        ``{channel_id, nodes: [{data:{id,label,kind,page_kind?,version?,last_updated?}}],
+        edges: [{data:{id,source,target,kind}}]}``. Empty arrays when
+        the graph backend is unavailable so the route remains
+        always-200 across deployments.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return {"error": "authentication_missing"}
+        err = _validate_id(channel_id, "channel_id")
+        if err:
+            return err
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return {"error": "channel_access_denied", "channel_id": channel_id}
+        try:
+            from beever_atlas.stores import get_stores
+
+            stores = get_stores()
+            graph = stores.graph
+            if not hasattr(graph, "get_wiki_graph"):
+                return {"channel_id": channel_id, "nodes": [], "edges": []}
+            payload = await graph.get_wiki_graph(channel_id)
+            payload.setdefault("channel_id", channel_id)
+            payload.setdefault("nodes", [])
+            payload.setdefault("edges", [])
+            return payload
+        except Exception:
+            logger.exception(
+                "get_wiki_graph: failed principal=%s channel=%s",
+                principal_id,
+                channel_id,
+            )
+            return {"channel_id": channel_id, "nodes": [], "edges": []}
+
+
+def _principal_scopes(ctx: Context) -> set[str]:
+    """Return the MCP token scopes for the request principal.
+
+    Wraps ``ctx`` defensively because the testing fixtures sometimes
+    hand in a SimpleNamespace without the ``request_context.lifespan_context``
+    chain. Empty set is the safe default — every scope-gated branch
+    reads ``"foo" in scopes`` so an empty set degrades to "no extra
+    scopes", which is the most-restrictive answer.
+    """
+    try:
+        scopes = getattr(ctx, "principal_scopes", None) or getattr(
+            getattr(ctx, "request_context", None), "principal_scopes", None
+        )
+        if scopes is None:
+            return set()
+        if isinstance(scopes, set | list | tuple):
+            return {str(s) for s in scopes}
+        return {str(scopes)}
+    except Exception:
+        return set()

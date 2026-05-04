@@ -37,9 +37,11 @@ import pytest
 # ---------------------------------------------------------------------------
 
 # Increased from 16 → 19 in commit 35a1832 (search_memory, lint_wiki,
-# get_extraction_status redesign tools). Bump alongside any new tool
-# registration so the catalog count stays a load-bearing assertion.
-_EXPECTED_TOOL_COUNT = 19
+# get_extraction_status redesign tools). Bumped 19 → 22 by the
+# wiki-llm-native-redesign §7.6 ship (read_wiki_page, list_wiki_pages,
+# get_wiki_graph). Bump alongside any new tool registration so the
+# catalog count stays a load-bearing assertion.
+_EXPECTED_TOOL_COUNT = 22
 _EXPECTED_RESOURCE_COUNT = 5
 _EXPECTED_PROMPT_COUNT = 3
 

@@ -1,26 +1,26 @@
 """Phase 3/5b task 3.8/3.9/5.2-5.4: verify the tool registry has exactly the right set.
 
-`tools/list` (via build_mcp()) must return exactly 17 entries:
-  - 13 v1 tools (3 discovery + 5 retrieval + 3 graph + 1 session + 1 shim)
-  - 3 orchestration tools added in Phase 5b (trigger_sync, refresh_wiki, get_job_status)
-
-Total: 17 (within the 18-tool v1 cap).
+`tools/list` (via build_mcp()) returns the catalog. The set extends as
+new tools ship — bumped to 22 by the wiki-llm-native-redesign §7.6
+ship (read_wiki_page, list_wiki_pages, get_wiki_graph).
 """
 
 from __future__ import annotations
 
 from beever_atlas.api.mcp_server import build_mcp
 
-# Phase 5b adds 3 orchestration tools on top of the 13 v1 + 1 shim = 14.
-# New total: 17.
+# Catalogue:
 #   whoami, list_connections, list_channels            (discovery      ×3)
 #   ask_channel, search_channel_facts, get_wiki_page,
 #   get_recent_activity, search_media_references       (retrieval      ×5)
+#   search_memory, lint_wiki, get_extraction_status    (retrieval      ×3)
 #   find_experts, search_relationships,
 #   trace_decision_history                             (graph          ×3)
 #   start_new_session                                  (session        ×1)
 #   search_channel_knowledge                           (shim           ×1)
 #   trigger_sync, refresh_wiki, get_job_status         (orchestration  ×3)
+#   read_wiki_page, list_wiki_pages, get_wiki_graph    (wiki-redesign  ×3)
+# Total: 22.
 
 EXPECTED_TOOLS = frozenset(
     {
@@ -50,6 +50,10 @@ EXPECTED_TOOLS = frozenset(
         "trigger_sync",
         "refresh_wiki",
         "get_job_status",
+        # wiki-llm-native-redesign §7
+        "read_wiki_page",
+        "list_wiki_pages",
+        "get_wiki_graph",
     }
 )
 
@@ -84,7 +88,7 @@ def test_tool_registry_contains_expected_set():
     )
 
 
-def test_tool_count_is_seventeen():
+def test_tool_count_matches_expected_set():
     mcp = build_mcp()
     names = _tool_names(mcp)
     assert len(names) == len(EXPECTED_TOOLS), (
