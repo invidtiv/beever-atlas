@@ -291,20 +291,20 @@ export function WikiHealthToolbar({
               <span className="flex-1">Download</span>
             </button>
 
-            {/* Graph view (§6.10) — deep-links into the channel's Graph
-                tab pre-toggled to the wiki view, so the operator lands
-                in the same surface as if they had clicked the Graph
-                tab directly + flipped the view toggle. */}
+            {/* Graph view — opens the wiki cross-link graph in-place
+                inside the wiki tab via ?view=graph. The standalone
+                /graph route was retired when the IA collapsed graphs
+                into their parent tabs; this no longer switches tabs. */}
             <button
               role="menuitem"
               type="button"
               onClick={() => {
                 setToolsOpen(false);
-                navigate(`/channels/${channelId}/graph?view=wiki`);
+                navigate(`/channels/${channelId}/wiki?view=graph`);
               }}
               disabled={!channelId}
               className={TOOL_BTN + " disabled:opacity-40 disabled:cursor-not-allowed"}
-              aria-label="Open the wiki cross-link graph view"
+              aria-label="Open the wiki cross-link graph view in this tab"
             >
               <Network size={12} className="shrink-0" />
               <span className="flex-1">Graph</span>
