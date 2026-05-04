@@ -1,7 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ComponentType } from "react";
 import { useParams, Outlet, useNavigate, useLocation, Link, Navigate } from "react-router-dom";
 import { api } from "@/lib/api";
-import { ArrowLeft, ShieldAlert, RefreshCw, MessageCircleQuestion } from "lucide-react";
+import {
+  ArrowLeft,
+  ShieldAlert,
+  RefreshCw,
+  MessageCircleQuestion,
+  BookOpen,
+  Brain,
+  FileText,
+  History,
+  Settings,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useConnectionMap } from "@/hooks/useConnectionMap";
 import { ChannelBreadcrumb } from "@/components/channel/Breadcrumb";
@@ -48,6 +58,20 @@ const TAB_LABELS: Record<TabPath, string> = {
   // Settings entry in the left rail — operators were clicking the
   // wrong one and getting confused by the scope mismatch.
   settings: "Channel Settings",
+};
+
+// Lucide icon per tab. Rendered small (h-3.5) and inherits the row's
+// text color so it acts as a visual anchor without competing with
+// the label. Picked for specificity (Brain for memory, FileText for
+// raw source) — generic glyphs (Settings cog, History clock) are
+// kept because the rename "Channel Settings" + grouping already
+// disambiguates them at the strip level.
+const TAB_ICONS: Record<TabPath, ComponentType<{ className?: string }>> = {
+  wiki: BookOpen,
+  memories: Brain,
+  messages: FileText,
+  "sync-history": History,
+  settings: Settings,
 };
 
 // Visual grouping for the desktop tab strip:
@@ -327,20 +351,24 @@ export function ChannelWorkspace() {
                   {/* Tabs grouped by purpose — AI · raw · ops. */}
                   {TAB_GROUPS.map((group, groupIdx) => (
                     <div key={groupIdx} className="flex items-center gap-1">
-                      {group.map((tab) => (
-                        <button
-                          key={tab}
-                          onClick={() => handleTabChange(tab)}
-                          className={cn(
-                            "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
-                            activeTab === tab
-                              ? "bg-primary/10 text-primary"
-                              : "text-muted-foreground hover:text-foreground hover:bg-muted",
-                          )}
-                        >
-                          {TAB_LABELS[tab]}
-                        </button>
-                      ))}
+                      {group.map((tab) => {
+                        const Icon = TAB_ICONS[tab];
+                        return (
+                          <button
+                            key={tab}
+                            onClick={() => handleTabChange(tab)}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
+                              activeTab === tab
+                                ? "bg-primary/10 text-primary"
+                                : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                            )}
+                          >
+                            <Icon className="h-3.5 w-3.5 shrink-0" />
+                            {TAB_LABELS[tab]}
+                          </button>
+                        );
+                      })}
                       {groupIdx < TAB_GROUPS.length - 1 && (
                         <span aria-hidden className="h-4 w-px bg-border/50 mx-1" />
                       )}
