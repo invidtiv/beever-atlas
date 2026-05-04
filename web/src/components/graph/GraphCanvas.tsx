@@ -26,6 +26,21 @@ const positionCache = new Map<string, { x: number; y: number }>();
  * Obsidian-style: small fixed dot (12 px) with label BELOW.
  * Hub nodes get slightly larger dots (up to 20 px) and bolder labels.
  */
+/**
+ * Convert an entity name into something cytoscape's text-wrap can
+ * actually break gracefully. Underscored snake_case strings (like
+ * ``a_set_of_4_highly_polished_..._.png``) have no whitespace, so
+ * cytoscape can't wrap them at all and they crash horizontally
+ * across the entire canvas. Replace ``_`` with space so wrap engages,
+ * and cap to ~64 chars with an ellipsis so a single 200-char filename
+ * can't dominate the layout.
+ */
+function prepareLabel(raw: string): string {
+  const cleaned = raw.replace(/_/g, " ").trim();
+  if (cleaned.length <= 64) return cleaned;
+  return cleaned.slice(0, 63).trim() + "…";
+}
+
 function buildNode(
   e: GraphEntity,
   connectionCount: Map<string, number>,
@@ -33,17 +48,19 @@ function buildNode(
 ): ElementDefinition {
   const colors = getTypeColors(e.type);
   const conns = connectionCount.get(e.id) ?? 0;
-  // Dot size: 12 px base, +1 px per connection, max 22 px — keeps nodes small
-  const dotSize = Math.min(22, 12 + conns);
+  // Dot size: 16 px base, +2 px per connection, capped at 32 px so
+  // hubs read as visually anchored without becoming filled disks.
+  const dotSize = Math.min(32, 16 + conns * 2);
   const cached = positionCache.get(e.id);
   const visualDesc = (e.properties as Record<string, unknown>)?.visual_description as string | undefined;
   const isPending = e.status === "pending";
-  // Label font: 9 px base for orphans, slightly larger for hubs
-  const fontSize = conns === 0 ? 9 : Math.min(12, 9 + Math.floor(conns / 2));
+  // Larger label font so the user doesn't have to zoom in to read each
+  // node — 11 px base for orphans, scaling up to 14 px for hubs.
+  const fontSize = conns === 0 ? 11 : Math.min(14, 11 + Math.floor(conns / 2));
   return {
     data: {
       id: e.id,
-      label: e.name,
+      label: prepareLabel(e.name),
       type: e.type,
       bgColor: colors.node,
       borderColor: colors.nodeBorder,
@@ -177,7 +194,11 @@ export function GraphCanvas({
             "text-margin-y": 6,
             "text-wrap": "wrap",
             // Allow 2 lines for long snake_case names
-            "text-max-width": "90px",
+            // Wider wrap window so 3-5 word phrases stay on 1-2 lines
+            // instead of cramped 4-line stacks. Pairs with the bigger
+            // 11-14 px font and ``prepareLabel`` underscore-to-space
+            // pre-processing so cytoscape can actually break the line.
+            "text-max-width": "130px",
             // No outline — label is outside the colored disk so no clash
             "text-outline-width": 0,
             width: "data(dotSize)",
@@ -305,8 +326,12 @@ export function GraphCanvas({
             // labels are BELOW nodes so they need layout clearance to avoid
             // overlapping adjacent labels.
             nodeDimensionsIncludeLabels: true,
-            nodeRepulsion: () => 100000,
-            idealEdgeLength: () => 220,
+            // Pushed further than the previous 100k/220 pass — user
+            // reported the graph still felt collapsed/concentrated.
+            // Combined with minZoom 0.2 (set below) the graph stays
+            // visible without crushing back into a dot-cluster.
+            nodeRepulsion: () => 140000,
+            idealEdgeLength: () => 280,
             edgeElasticity: () => 45,
             gravity: 0.15,
             padding: 100,

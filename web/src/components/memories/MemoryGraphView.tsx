@@ -71,7 +71,10 @@ export function MemoryGraphView({ channelId }: Props) {
   } | null>(null);
 
   // Floating filter panel open/close
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  // Filter panel defaults open — the user said the floating pill is too
+  // hidden as a slim vertical strip. The panel still collapses on
+  // click; the user can dismiss when they want canvas real-estate.
+  const [filtersOpen, setFiltersOpen] = useState(true);
 
   // Orphan node toggle — GraphCanvas handles the cy.add/remove internally;
   // we just pass the boolean down.
