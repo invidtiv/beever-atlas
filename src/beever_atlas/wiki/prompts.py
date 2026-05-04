@@ -516,3 +516,133 @@ SUBTOPIC_PROMPT_V2 = (
     + _NO_MARKER_ECHO_INSTRUCTION
     + "\n"
 )
+
+
+# ---------------------------------------------------------------------------
+# llm-wiki-folder-structure — Structure Planner Prompt
+# ---------------------------------------------------------------------------
+
+# Single channel-wide LLM call. Receives the channel summary, a
+# condensed cluster index, and the heuristic candidate groups; returns
+# a JSON tree describing which clusters become folders, which become
+# leaves, and what each folder's title + slug should be.
+#
+# Hard constraints stated in the prompt itself:
+#   - Every cluster id from the input MUST appear exactly once in the
+#     output (either inside a folder's child_slugs OR in leaves).
+#   - Folder slugs MUST be kebab-case ASCII and MUST NOT collide with
+#     any cluster id.
+#   - Maximum tree depth is 4. Prefer depth 2-3 unless a strong
+#     justification exists for going deeper.
+#   - Confirm/refine the candidate groups; you may reject candidates
+#     or invent new groupings, but bias toward refinement.
+#   - Output JSON ONLY — no markdown fences, no commentary.
+STRUCTURE_PLANNER_PROMPT = """You are an information architect organizing a knowledge wiki for a chat channel.
+
+The wiki has many topic pages. Your job is to decide how to **group them into folders** so the operator can navigate efficiently. A folder is a first-class wiki page with its own synthesized index AND a list of child pages (sub-folders or leaf topics).
+
+## Inputs
+
+### Channel narrative
+{channel_summary}
+
+### Topic clusters (you MUST place each exactly once in your output)
+{cluster_index_json}
+
+### Heuristic candidate groups (deterministic clusters discovered from prefix similarity, entity overlap, and co-citation density)
+{candidates_json}
+
+## Your task
+
+Produce a JSON object with this exact shape:
+
+{{
+  "folders": [
+    {{
+      "slug": "kebab-case-folder-id",
+      "title": "Human Folder Name",
+      "child_slugs": ["cluster-id-1", "cluster-id-2"],
+      "rationale": "1-line explanation of why these belong together"
+    }}
+  ],
+  "leaves": ["cluster-id-3", "cluster-id-4"]
+}}
+
+## Hard rules
+
+1. **Every cluster id from the input list MUST appear exactly once** — either inside one folder's `child_slugs`, OR in `leaves`. Never both. Never neither.
+2. **Folder slugs MUST be kebab-case ASCII** (e.g., `beever-atlas`, `security`, `growth-marketing`). NO spaces, NO uppercase, NO underscores.
+3. **Folder slugs MUST NOT collide with any cluster id.** Check before naming.
+4. **Maximum depth = 4.** A folder may contain other folders, but the deepest nested folder may have leaves at most 4 levels from the root.
+5. **Default to depth 2.** Only nest a folder inside another folder when the inner group is genuinely a sub-domain (e.g., "GitHub" inside "Beever Atlas").
+6. **Use the candidate groups as a strong prior.** Confirm them, rename them, expand them, or split them — but don't invent radically different groupings unless the candidates clearly miss a pattern.
+7. **Output JSON ONLY.** No markdown code fences. No leading or trailing prose. Just the JSON object.
+
+## Quality bar
+
+- A folder is worth creating only when it has 3+ children OR the children form a self-contained domain a reader would explore together.
+- Folder titles should read like Notion section names: short, scannable, capitalized normally ("Security", "Growth Campaigns", "Beever Atlas").
+- Singletons stay in `leaves` — never wrap a single cluster in a folder.
+
+Return the JSON now.
+"""
+
+
+def build_structure_planner_prompt(
+    *,
+    channel_summary: str,
+    clusters: list[dict],
+    candidate_groups: list,
+) -> str:
+    """Render ``STRUCTURE_PLANNER_PROMPT`` with the given context.
+
+    Compresses each cluster to its essentials (id, title, summary
+    truncated to 200 chars, member_count, top-5 entity names) so the
+    prompt fits comfortably under the model's context window even for
+    100+ topic channels. Candidates are flattened to ``{group_id,
+    members, signals}`` triples so the LLM can see why each was
+    proposed.
+    """
+    import json as _json
+
+    cluster_index = []
+    for c in clusters:
+        cid = c.get("id")
+        if not cid:
+            continue
+        summary = (c.get("summary") or "")[:200]
+        entities = []
+        for e in (c.get("key_entities") or [])[:5]:
+            if isinstance(e, dict):
+                name = e.get("name") or e.get("entity_name") or ""
+                if name:
+                    entities.append(name)
+            elif isinstance(e, str) and e:
+                entities.append(e)
+        cluster_index.append(
+            {
+                "id": cid,
+                "title": c.get("title") or "",
+                "summary": summary,
+                "member_count": c.get("member_count") or 0,
+                "key_entities": entities,
+            }
+        )
+
+    candidate_payload = []
+    for i, group in enumerate(candidate_groups):
+        members = sorted(group.cluster_ids) if hasattr(group, "cluster_ids") else []
+        signals = group.signals if hasattr(group, "signals") else {}
+        candidate_payload.append(
+            {
+                "candidate_id": f"cand-{i + 1}",
+                "members": members,
+                "signals": signals,
+            }
+        )
+
+    return STRUCTURE_PLANNER_PROMPT.format(
+        channel_summary=channel_summary or "(no channel summary available)",
+        cluster_index_json=_json.dumps(cluster_index, indent=2),
+        candidates_json=_json.dumps(candidate_payload, indent=2),
+    )

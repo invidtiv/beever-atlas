@@ -522,6 +522,23 @@ class Settings(BaseSettings):
     # only after the soak runbook closes (see §9.3 of the change tasks).
     wiki_llm_native_redesign: bool = Field(default=False, alias="WIKI_LLM_NATIVE_REDESIGN")
 
+    # ``llm-wiki-folder-structure`` Phase B+ — enables the structure
+    # planner pass that decides folder boundaries between gather and
+    # compile. Default OFF so existing installs see today's flat
+    # structure until they explicitly opt in. When ON, the planner
+    # runs on full regenerate (and on the new ``?restructure=true``
+    # query). Maintain runs never invoke the planner.
+    wiki_folder_planner: bool = Field(default=False, alias="WIKI_FOLDER_PLANNER")
+
+    # Below this many topic clusters the planner skips folder creation
+    # entirely — sparse channels read better as a flat list, and the
+    # heuristic candidate signals don't accumulate enough evidence to
+    # be reliable. Operators can lower it for testing on small
+    # channels but the default is conservative.
+    wiki_min_topics_for_folders: int = Field(
+        default=8, alias="WIKI_MIN_TOPICS_FOR_FOLDERS"
+    )
+
     # Per-kind drift-A/B sample rate (§8.1). The legacy ``WIKI_DRIFT_AB``
     # rate-limiter applies only to the legacy single-prompt comparison;
     # this knob governs the redesign-vs-legacy A/B that runs alongside.
