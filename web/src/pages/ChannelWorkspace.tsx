@@ -30,14 +30,19 @@ interface ChannelRouteState {
   connection_id?: string | null;
 }
 
-const TAB_PATHS = ["wiki", "messages", "memories", "graph", "sync-history", "settings"] as const;
+// Tab order is intentional — Channel Wiki first so the breadcrumb
+// fallback in ``getCurrentTab`` lands on a useful surface, then Agent
+// Memory (which now hosts both the TierBrowser and the entity graph
+// via ``?view=graph``), Messages, Sync History, Settings. Path
+// segments stay stable so existing deep-links still resolve; only the
+// labels were updated to match the new IA.
+const TAB_PATHS = ["wiki", "memories", "messages", "sync-history", "settings"] as const;
 type TabPath = (typeof TAB_PATHS)[number];
 
 const TAB_LABELS: Record<TabPath, string> = {
-  wiki: "Wiki",
+  wiki: "Channel Wiki",
+  memories: "Agent Memory",
   messages: "Messages",
-  memories: "Memories",
-  graph: "Graph",
   "sync-history": "Sync History",
   settings: "Settings",
 };
