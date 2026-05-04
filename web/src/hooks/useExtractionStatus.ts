@@ -53,6 +53,14 @@ export function useExtractionStatus(
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Last response signature — used to skip ``setStatus`` when the
+  // counts are identical so sibling-hook re-renders don't trigger a
+  // wiki-page opacity flash on every 30s idle poll. Mirrors the
+  // ``last_updated`` guard in ``useWikiPage`` from commit c23c955 but
+  // applied per-field rather than over the full payload (the backend
+  // may add timestamp/etag fields later that would defeat a
+  // ``JSON.stringify`` guard — see plan §"What NOT to do" item 5).
+  const lastKeyRef = useRef<string | null>(null);
 
   const refetch = useCallback(async () => {
     if (!channelId) return;
@@ -61,7 +69,11 @@ export function useExtractionStatus(
       const resp = await api.get<ExtractionStatusResponse>(
         `/api/channels/${channelId}/extraction-status`,
       );
-      setStatus(resp);
+      const key = `${resp.total}|${resp.counts.pending}|${resp.counts.extracting}|${resp.counts.done}|${resp.counts.failed}`;
+      if (key !== lastKeyRef.current) {
+        lastKeyRef.current = key;
+        setStatus(resp);
+      }
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch extraction status");
@@ -73,8 +85,13 @@ export function useExtractionStatus(
   useEffect(() => {
     if (!channelId) {
       setStatus(null);
+      lastKeyRef.current = null;
       return;
     }
+    // Reset the dedup key when the channel changes so the first
+    // response for the new channel is always pushed to state, even if
+    // its counts happen to match the previous channel's last response.
+    lastKeyRef.current = null;
     void refetch();
     const cadence = isSyncing ? pollMsActive : pollMsIdle;
     if (cadence > 0) {

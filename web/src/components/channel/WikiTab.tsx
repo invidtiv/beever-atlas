@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { wikiT } from "@/lib/wikiI18n";
 import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, ArrowRight, FolderSync, History as HistoryIcon } from "lucide-react";
@@ -687,7 +687,16 @@ export function WikiTab() {
     activePage = activePageId === "overview" ? wiki.overview : (pageData ?? null);
   }
 
-  const topicPages = activeStructure.pages.filter((p) => p.page_type === "topic");
+  // Memoize to keep array reference stable across parent re-renders.
+  // Without this, sibling-hook polls (extraction-status, version count,
+  // etc.) trigger a fresh ``filter()`` call → fresh array → OverviewPage
+  // gets new ``topicPages`` prop ref → wrapping ``transition-opacity``
+  // div remounts → visible flash. Paired with the ``useExtractionStatus``
+  // last-key guard in step 1.
+  const topicPages = useMemo(
+    () => activeStructure.pages.filter((p) => p.page_type === "topic"),
+    [activeStructure],
+  );
 
   const showPageLoading = isViewingVersion ? isVersionLoading : isPageLoading;
 
