@@ -173,30 +173,49 @@ function colorForNode(node: WikiGraphNode): string {
 // overlapping into an unreadable crush — the full title is on the
 // preview panel + tooltip on hover, so the truncation is purely
 // visual relief.
-function _truncateLabel(raw: string, max = 36): string {
+function _truncateLabel(raw: string, max = 30): string {
   const s = (raw || "").trim();
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + "…";
 }
 
 /**
- * Wiki nodes wear their section number AS A PREFIX inside the label
- * — visually communicates "this is a numbered document section" and
- * gives the eye a stable anchor when scanning the tree. Entity nodes
- * (e.g. "Person", "Project") and the channel hub use the raw label.
+ * Cleaner labels: drop the "§N" prefix the previous pass added — it
+ * was visually noisy at this density. Section number lives on the
+ * preview panel + tooltip; the label just carries the title.
  */
 function buildLabel(node: WikiGraphNode): string {
   const d = node.data ?? {};
-  const dAny = d as Record<string, unknown>;
-  const section = typeof dAny.section_number === "string" ? dAny.section_number.trim() : "";
   const raw = (typeof d.label === "string" ? d.label : String(d.id ?? "")).trim();
-  if (d.kind !== "wiki") return _truncateLabel(raw);
-  // Slug "overview" is the root — show as "Overview" without §
-  const slug = typeof dAny.slug === "string" ? dAny.slug : "";
-  if (slug === "overview") return _truncateLabel(raw, 36);
-  if (section) return _truncateLabel(`§${section} ${raw}`, 40);
-  return _truncateLabel(raw, 36);
+  return _truncateLabel(raw);
 }
+
+/**
+ * Inline SVG document icon, base64-encoded as a data URL so cytoscape
+ * can use it as ``background-image`` without a network round-trip.
+ * Shape: rounded paper page with a folded top-right corner — the
+ * universal "document" affordance. White stroke on transparent fill so
+ * it picks up the per-kind ``data(color)`` background underneath.
+ */
+const DOC_ICON_SVG = encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M14 3 H6 a2 2 0 0 0 -2 2 v14 a2 2 0 0 0 2 2 h12 a2 2 0 0 0 2 -2 V9 z"/>' +
+    '<polyline points="14 3 14 9 20 9"/>' +
+    '<line x1="8" y1="13" x2="16" y2="13"/>' +
+    '<line x1="8" y1="17" x2="13" y2="17"/>' +
+    "</svg>",
+);
+const DOC_ICON_URL = `data:image/svg+xml;utf8,${DOC_ICON_SVG}`;
+
+const HOME_ICON_SVG = encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M3 9 L12 2 L21 9 V20 a2 2 0 0 1 -2 2 H5 a2 2 0 0 1 -2 -2 z"/>' +
+    '<polyline points="9 22 9 12 15 12 15 22"/>' +
+    "</svg>",
+);
+const HOME_ICON_URL = `data:image/svg+xml;utf8,${HOME_ICON_SVG}`;
 
 function buildElements(filtered: WikiGraphPayload): unknown[] {
   const out: unknown[] = [];
@@ -207,26 +226,22 @@ function buildElements(filtered: WikiGraphPayload): unknown[] {
     out.push({
       data: {
         ...node.data,
-        // Wiki + channel = document-shaped pillbox (label INSIDE),
-        // entities stay as the small dot+caption pattern so the
-        // visual contrast between the two graphs is immediately
-        // legible — wiki reads as a structured document tree, not
-        // a knowledge graph.
         displayLabel: buildLabel(node),
         color: colorForNode(node),
-        // Pill-shaped wiki cards: width = label-driven (cytoscape
-        // ``width: label``), height = generous so titles read at a
-        // glance. Channel hub is bigger + pill-prominent.
-        nodeShape: isChannel || isWiki ? "round-rectangle" : "ellipse",
-        nodeWidth: isChannel ? 180 : isWiki ? "label" : 36,
-        nodeHeight: isChannel ? 56 : isWiki ? 42 : 36,
-        labelSize: isChannel ? 16 : isWiki ? 12 : 11,
-        labelWeight: isChannel ? 700 : isWiki ? 600 : 500,
-        // Label position: inside for wiki documents (paper metaphor),
-        // below for entity dots (Obsidian metaphor — matches the
-        // sibling entity graph's design language).
-        labelValign: isEntity ? "bottom" : "center",
-        labelMarginY: isEntity ? 6 : 0,
+        // Visual identity per kind:
+        //   • channel hub = chunky home-icon disc (root of the wiki)
+        //   • wiki page   = small rounded square with document icon
+        //   • entity      = tiny dot (Obsidian-style, hints at the
+        //                   adjacent entity-graph surface)
+        nodeShape: isEntity ? "ellipse" : "round-rectangle",
+        nodeWidth: isChannel ? 60 : isWiki ? 38 : 16,
+        nodeHeight: isChannel ? 60 : isWiki ? 38 : 16,
+        // Per-kind icon glyph rendered as a centered background-image.
+        // The base color of the disc is ``data(color)`` so kinds remain
+        // distinguishable; the white-stroke icon sits on top.
+        icon: isChannel ? HOME_ICON_URL : isWiki ? DOC_ICON_URL : "",
+        labelSize: isChannel ? 13 : isWiki ? 11 : 10,
+        labelWeight: isChannel ? 700 : 500,
       },
     });
   }
@@ -246,13 +261,13 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
     touchedWithin: "all",
     minCitations: 0,
   });
-  // Default to dagre (top-down hierarchy) — wikis ARE structured
-  // document trees (Overview → Topics → Sub-topics + cross-links),
-  // and the hierarchical layout immediately telegraphs "this is a
-  // wiki, not an entity graph". The entity graph uses force-directed
-  // fcose; the visual contrast separates the two surfaces. Operators
-  // who want the radial view can switch via the dropdown.
-  const [layout, setLayout] = useState<LayoutKey>("dagre");
+  // Default to concentric — radial mind-map with the channel hub at
+  // the center and pages clustered by kind in expanding rings. This
+  // matches the actual data shape (mostly star-graph: 1 channel + N
+  // leaf pages) far better than dagre's tree, and visually telegraphs
+  // "wiki = a constellation of documents around a channel." Entity
+  // graph uses force-directed fcose; the difference is immediate.
+  const [layout, setLayout] = useState<LayoutKey>("concentric");
   const containerRef = useRef<HTMLDivElement | null>(null);
   // ``unknown`` because cytoscape's type surface (Core, ElementDefinition)
   // adds a non-trivial type-import; the runtime methods we touch
@@ -372,56 +387,72 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           wheelSensitivity: 0.2,
           style: [
             {
-              // Default node — pillbox/dot driven by ``data(nodeShape)``.
-              // Wiki + channel = round-rectangle pill (document
-              // metaphor); entities = small ellipse with caption-below
-              // (Obsidian metaphor). The two surfaces read distinctly.
+              // Wiki + channel nodes: rounded square card with a
+              // centered SVG icon + the title below. The icon is the
+              // single strongest visual signal that this is a *wiki
+              // graph of documents* — distinct from entity-graph dots.
               selector: "node",
               style: {
                 shape: "data(nodeShape)" as unknown as "round-rectangle",
                 label: "data(displayLabel)",
-                "text-valign": "data(labelValign)" as unknown as "center",
+                "text-valign": "bottom",
                 "text-halign": "center",
-                "text-margin-y": "data(labelMarginY)" as unknown as number,
-                color: "#f8fafc",
+                "text-margin-y": 8,
+                color: "#e2e8f0",
                 "font-size": "data(labelSize)",
                 "font-weight": "data(labelWeight)",
                 "text-wrap": "wrap",
-                "text-max-width": "160px",
+                "text-max-width": "120px",
                 "text-outline-color": "#0f172a",
                 "text-outline-width": 1,
                 "background-color": "data(color)",
+                "background-image": "data(icon)",
+                "background-fit": "contain",
+                "background-image-opacity": 0.95,
+                "background-width": "60%",
+                "background-height": "60%",
                 width: "data(nodeWidth)" as unknown as number,
                 height: "data(nodeHeight)" as unknown as number,
-                "border-width": 1.5,
-                "border-color": "rgba(255,255,255,0.18)",
-                "padding-left": 12,
-                "padding-right": 12,
-                "padding-top": 6,
-                "padding-bottom": 6,
+                "border-width": 1,
+                "border-color": "rgba(255,255,255,0.12)",
                 "transition-property":
                   "background-color, border-color, width, height, opacity",
                 "transition-duration": 150,
               } as unknown as cytoscape.Css.Node,
             },
             {
-              // Wiki cards: subtle inner shadow via background-opacity
-              // gradient + thicker pill border so they read as paper
-              // documents, not the raw colored disks of the entity graph.
+              // Wiki page cards keep the document-icon presentation +
+              // a subtle paper-edge border so they read as documents
+              // rather than colored tiles.
               selector: "node[kind = 'wiki']",
               style: {
-                "background-opacity": 0.92,
                 "border-width": 1.5,
-                "border-color": "rgba(255,255,255,0.22)",
+                "border-color": "rgba(255,255,255,0.18)",
+                "background-opacity": 0.92,
               },
             },
             {
+              // Channel hub: bigger disc with the "home" icon. Reads
+              // as the root node of the wiki space.
               selector: "node[kind = 'channel']",
               style: {
-                "border-width": 3,
+                shape: "round-rectangle" as unknown as "round-rectangle",
+                "border-width": 2.5,
                 "border-color": "rgba(168,85,247,0.7)",
                 "background-opacity": 0.95,
                 color: "#faf5ff",
+                "font-weight": 700,
+              },
+            },
+            {
+              // Entity nodes (rare in wiki graph) keep the dot+caption
+              // form — hints at the entity-graph surface they belong to.
+              selector: "node[kind = 'entity']",
+              style: {
+                "background-image": "none",
+                "border-width": 1,
+                "border-color": "rgba(255,255,255,0.18)",
+                "background-opacity": 1,
               },
             },
             {
@@ -534,22 +565,36 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           layout:
             layout === "concentric"
               ? {
+                  // Channel hub at the center, page cards in concentric
+                  // rings ordered by importance: fixed-purpose pages
+                  // (Overview, FAQ, Decisions) close in, free-form
+                  // topics next, sub-topics on the outer ring,
+                  // entities on the periphery. Each ring stratifies
+                  // the wiki visually so the operator sees the
+                  // structure at a glance.
                   name: "concentric",
                   fit: true,
-                  padding: 60,
-                  minNodeSpacing: 80,
-                  spacingFactor: 1.4,
-                  // Channel hub at center, then top-level pages, then deeper.
+                  padding: 70,
+                  minNodeSpacing: 60,
+                  spacingFactor: 1.5,
+                  startAngle: (3 / 2) * Math.PI,
+                  sweep: 2 * Math.PI,
+                  clockwise: true,
                   concentric: (node: { data: (k: string) => unknown }) => {
                     const kind = node.data("kind");
                     if (kind === "channel") return 1000;
-                    const pageKind = node.data("page_kind") || "";
-                    if (pageKind === "fixed") return 100;
-                    if (pageKind === "sub-topic") return 10;
-                    return 50;
+                    if (kind === "entity") return 5;
+                    const pageKind = (node.data("page_kind") as string) || "";
+                    const slug = (node.data("slug") as string) || "";
+                    if (slug === "overview") return 500;
+                    if (pageKind === "fixed") return 300;
+                    if (pageKind === "sub-topic") return 30;
+                    return 100;
                   },
                   levelWidth: () => 1,
-                  animate: false,
+                  animate: true,
+                  animationDuration: 700,
+                  animationEasing: "ease-out-cubic",
                 }
               : layout === "dagre"
                 ? {
