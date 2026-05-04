@@ -203,24 +203,23 @@ function buildElements(filtered: WikiGraphPayload): unknown[] {
         kindKey,
         clusterKey,
         // Dimensions: bigger cards so titles are readable.
-        // Pill chips (Roam/Notion/Linear-style document graph). The
-        // round-disc + icon experiment failed because the icon ate
-        // most of the disc surface, leaving only a thin kind-color
-        // ring — every page looked identical. New design:
-        //   • round-rectangle pill with the title visible INSIDE
-        //   • a small kind-color dot on the left as the kind signal
-        //   • dark slate body so the title reads cleanly
-        //   • width = label-driven (cytoscape ``width: label``) so
-        //     short titles get short chips, long ones extend
-        //   • fixed height for a clean horizontal rhythm
-        // Channel hub: bigger pill with the channel name.
-        // Entity: keeps the small dot — peripheral.
+        // Pill chips (Roam/Notion/Linear-style document graph).
+        // Width is pre-computed from label length because cytoscape's
+        // ``width: "label"`` is only valid as a LITERAL style value,
+        // not as the result of a ``data()`` accessor — pushing
+        // "label" through data causes the parser to crash with
+        // "Cannot read properties of null (reading 'value')".
         nodeShape: isEntity ? "ellipse" : "round-rectangle",
-        nodeWidth: isEntity ? 14 : "label",
+        nodeWidth: isEntity
+          ? 14
+          : Math.min(
+              260,
+              // 7 px per char + 36 px chrome (border + padding +
+              // optional left-icon space). Channel hub gets +28 px
+              // for the leading folder glyph.
+              Math.max(96, buildLabel(node).length * 7 + 36 + (isChannel ? 28 : 0)),
+            ),
         nodeHeight: isChannel ? 36 : isWiki ? 30 : 14,
-        // Icon dropped entirely on the chip — title IS the affordance.
-        // Channel hub keeps a small home glyph as the only icon since
-        // it has no title text of its own to anchor.
         icon: isChannel ? HUB_ICON_URL : "",
         labelSize: isChannel ? 13 : isWiki ? 12 : 9,
         labelWeight: isChannel ? 700 : 500,
