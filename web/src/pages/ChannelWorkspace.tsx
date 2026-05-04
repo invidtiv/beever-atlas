@@ -44,7 +44,33 @@ const TAB_LABELS: Record<TabPath, string> = {
   memories: "Agent Memory",
   messages: "Source",
   "sync-history": "Sync History",
-  settings: "Settings",
+  // Renamed from "Settings" to disambiguate from the workspace-level
+  // Settings entry in the left rail — operators were clicking the
+  // wrong one and getting confused by the scope mismatch.
+  settings: "Channel Settings",
+};
+
+// Visual grouping for the desktop tab strip:
+//   AI surfaces · raw data · operations
+// A thin vertical divider sits between groups so the eye can tell
+// "things I read" from "the source" from "things I configure" at a
+// glance — without needing labels to call out the buckets.
+const TAB_GROUPS: TabPath[][] = [
+  ["wiki", "memories"],
+  ["messages"],
+  ["sync-history", "settings"],
+];
+
+// Platform → swatch color for the scope chip. Swatches keep the chip
+// readable at small sizes without pulling in brand SVGs (cuts bundle
+// weight). New platforms fall back to a neutral slate dot.
+const PLATFORM_DOT: Record<string, string> = {
+  slack: "bg-fuchsia-500",
+  mattermost: "bg-violet-500",
+  discord: "bg-indigo-500",
+  teams: "bg-sky-500",
+  telegram: "bg-cyan-500",
+  file: "bg-slate-500",
 };
 
 function getCurrentTab(pathname: string): TabPath {
@@ -277,20 +303,48 @@ export function ChannelWorkspace() {
                 </select>
               </div>
               <div className="hidden sm:block overflow-x-auto no-scrollbar">
-                <div className="flex gap-1 min-w-max">
-                  {TAB_PATHS.map((tab) => (
-                    <button
-                      key={tab}
-                      onClick={() => handleTabChange(tab)}
-                      className={cn(
-                        "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
-                        activeTab === tab
-                          ? "bg-primary/10 text-primary"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                <div className="flex items-center gap-2 min-w-max">
+                  {/* Scope chip — anchors the tab strip to "this channel"
+                      so operators don't have to read the breadcrumb to
+                      remember what scope they're in. Hidden when the
+                      channel hasn't loaded yet to avoid layout jump. */}
+                  {channel && (
+                    <div className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/30 pl-1.5 pr-2.5 py-1 text-xs font-medium text-foreground">
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "h-2 w-2 rounded-full shrink-0",
+                          PLATFORM_DOT[channel.platform] ?? "bg-slate-500",
+                        )}
+                        title={channel.platform}
+                      />
+                      <span className="truncate max-w-[180px]">
+                        #{channelDisplayName}
+                      </span>
+                    </div>
+                  )}
+                  <span aria-hidden className="h-5 w-px bg-border/60 mx-0.5" />
+                  {/* Tabs grouped by purpose — AI · raw · ops. */}
+                  {TAB_GROUPS.map((group, groupIdx) => (
+                    <div key={groupIdx} className="flex items-center gap-1">
+                      {group.map((tab) => (
+                        <button
+                          key={tab}
+                          onClick={() => handleTabChange(tab)}
+                          className={cn(
+                            "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
+                            activeTab === tab
+                              ? "bg-primary/10 text-primary"
+                              : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                          )}
+                        >
+                          {TAB_LABELS[tab]}
+                        </button>
+                      ))}
+                      {groupIdx < TAB_GROUPS.length - 1 && (
+                        <span aria-hidden className="h-4 w-px bg-border/50 mx-1" />
                       )}
-                    >
-                      {TAB_LABELS[tab]}
-                    </button>
+                    </div>
                   ))}
                 </div>
               </div>
