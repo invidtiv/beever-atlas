@@ -64,21 +64,31 @@ export function GraphCanvas({
     // Split into connected vs isolated. Cytoscape's cose places
     // 0-degree nodes wherever it has free space (typically the canvas
     // edge), which produced the "horizontal noise line" the user
-    // reported. Drop isolated nodes from the visible graph and surface
+    // reported. Hide isolated nodes from the visible graph and surface
     // their count as a small overlay pill so the information isn't
     // lost.
+    //
+    // Degenerate fallback: if EVERY entity is unconnected (e.g. fresh
+    // channel where relationships haven't been built yet), filtering
+    // them all out leaves a blank canvas — strictly worse than the
+    // noise-line. In that case, render all entities and skip the
+    // orphan pill.
     const connectedFiltered = filtered.filter(
       (e) => (connectionCount.get(e.id) ?? 0) > 0,
     );
     const isolatedNames = filtered
       .filter((e) => (connectionCount.get(e.id) ?? 0) === 0)
       .map((e) => e.name);
-    setOrphanNames(isolatedNames);
+    const renderableEntities =
+      connectedFiltered.length > 0 ? connectedFiltered : filtered;
+    // Only surface the pill when there's a meaningful core to anchor
+    // on — otherwise the operator sees the whole graph anyway.
+    setOrphanNames(connectedFiltered.length > 0 ? isolatedNames : []);
 
     // Check if we have cached positions for these nodes
-    const hasCachedPositions = connectedFiltered.some((e) => positionCache.has(e.id));
+    const hasCachedPositions = renderableEntities.some((e) => positionCache.has(e.id));
 
-    const nodes: ElementDefinition[] = connectedFiltered.map((e) => {
+    const nodes: ElementDefinition[] = renderableEntities.map((e) => {
       const colors = getTypeColors(e.type);
       const conns = connectionCount.get(e.id) ?? 0;
       const size = Math.min(116, 58 + conns * 9);
