@@ -312,45 +312,71 @@ export function GraphCanvas({
       layout: hasCachedPositions
         ? { name: "preset", fit: true, padding: 60 }
         : {
-            // cose with safe spread values. nodeRepulsion 80k–100k is the
-            // confirmed safe range. 200k caused blank canvas (cose fit zoomed
-            // past minZoom). idealEdgeLength 220 gives Obsidian-style generous
-            // spacing between connected clusters. gravity 0.15 keeps graph
-            // from collapsing without drifting off-canvas.
+            // cose tuned aggressively for a genuinely open Obsidian-
+            // style spread. Earlier passes felt collapsed because the
+            // relative ratio of nodeRepulsion to idealEdgeLength was
+            // too tight — fit:true scales the result to fit the
+            // viewport, so absolute values don't matter, only ratios.
+            // 300k repulsion + 500 idealEdgeLength gives a much more
+            // exploded layout. coolingFactor 0.99 + numIter 4500 lets
+            // cose converge slowly enough that the spread settles
+            // instead of collapsing back. componentSpacing 250 keeps
+            // disconnected components meaningfully separated.
             name: "cose",
             animate: "end",
-            animationDuration: 700,
+            animationDuration: 800,
             animationEasing: "ease-out-cubic" as cytoscape.Css.TransitionTimingFunction,
-            randomize: false,
-            // nodeDimensionsIncludeLabels=true is critical for Obsidian style:
-            // labels are BELOW nodes so they need layout clearance to avoid
-            // overlapping adjacent labels.
+            randomize: true,
             nodeDimensionsIncludeLabels: true,
-            // Pushed further than the previous 100k/220 pass — user
-            // reported the graph still felt collapsed/concentrated.
-            // Combined with minZoom 0.2 (set below) the graph stays
-            // visible without crushing back into a dot-cluster.
-            nodeRepulsion: () => 140000,
-            idealEdgeLength: () => 280,
-            edgeElasticity: () => 45,
-            gravity: 0.15,
-            padding: 100,
+            // 300k repulsion + 500 ideal edge gives ratio ~600 — much
+            // higher than the prior 140k/280=500 pass. Combined with
+            // gravity 0.05 the connected core actually breathes
+            // outward. coolingFactor 0.99 keeps the simulation from
+            // snapping back during the late-stage relaxation; numIter
+            // 4500 gives it time to actually settle into the open
+            // arrangement instead of stopping mid-spread.
+            nodeRepulsion: () => 300000,
+            idealEdgeLength: () => 500,
+            edgeElasticity: () => 30,
+            gravity: 0.05,
+            componentSpacing: 250,
+            coolingFactor: 0.99,
+            numIter: 4500,
+            padding: 80,
             fit: true,
           } as cytoscape.LayoutOptions,
-      minZoom: 0.2,
+      // Lower minZoom so the aggressively-spread layout doesn't get
+      // crushed back into a dot-cluster by ``fit:true``. 0.12 is the
+      // floor; below that nodes become single-pixel motes.
+      minZoom: 0.12,
       maxZoom: 3,
       wheelSensitivity: 0.3,
     });
 
-    // Save positions after layout
-    if (!hasCachedPositions) {
-      cy.one("layoutstop", () => {
+    // Save positions after layout. Also enforce a zoom floor so cose's
+    // aggressive spread + fit:true can't shrink the dots below
+    // readable size. The 0.55 threshold corresponds roughly to the
+    // 16-32 px dot range becoming 9-18 px — the lowest where labels
+    // are still scannable. Below that, force zoom to 0.65 and accept
+    // the resulting partial clip; the operator can still pan.
+    cy.one("layoutstop", () => {
+      if (!hasCachedPositions) {
         cy.nodes().forEach((node) => {
           const pos = node.position();
           positionCache.set(node.id(), { x: pos.x, y: pos.y });
         });
-      });
-    }
+      }
+      const z = cy.zoom();
+      if (z < 0.55) {
+        cy.zoom({
+          level: 0.65,
+          renderedPosition: {
+            x: cy.width() / 2,
+            y: cy.height() / 2,
+          },
+        });
+      }
+    });
 
     // ─── Physics: spring drag + momentum ─────────────────────────────
     let dragTarget: cytoscape.NodeSingular | null = null;
