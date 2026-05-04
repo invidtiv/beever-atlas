@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { useMemories } from "@/hooks/useMemories";
 import { useTopics } from "@/hooks/useTopics";
@@ -9,10 +9,73 @@ import { MemoryFilters } from "./MemoryFilters";
 import { FactCard } from "./FactCard";
 import { SummaryCard } from "./SummaryCard";
 import { ClusterCard } from "./ClusterCard";
+import { MemoryGraphView } from "./MemoryGraphView";
+
+type View = "memory" | "graph";
+
+interface ViewToggleProps {
+  view: View;
+  onChange: (next: View) => void;
+}
+
+function ViewToggle({ view, onChange }: ViewToggleProps) {
+  return (
+    <div
+      className="inline-flex items-center gap-1 rounded-md border border-border bg-card p-0.5"
+      role="tablist"
+      aria-label="Agent Memory view"
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === "memory"}
+        onClick={() => onChange("memory")}
+        className={
+          "rounded px-3 py-1 text-xs font-medium transition-colors " +
+          (view === "memory"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-muted")
+        }
+      >
+        Memory
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === "graph"}
+        onClick={() => onChange("graph")}
+        className={
+          "rounded px-3 py-1 text-xs font-medium transition-colors " +
+          (view === "graph"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-muted")
+        }
+      >
+        Graph
+      </button>
+    </div>
+  );
+}
 
 export function TierBrowser() {
   const { id } = useParams<{ id: string }>();
   const channelId = id ?? "";
+  const [searchParams, setSearchParams] = useSearchParams();
+  // URL-stateful view toggle so refreshing the page or sharing a link
+  // preserves the operator's chosen surface (memory tiers vs entity
+  // graph). The path stays ``/channels/:id/memories``; only ``?view``
+  // flips. Replace history so back-button doesn't accumulate noise.
+  const view: View = searchParams.get("view") === "graph" ? "graph" : "memory";
+  const setView = (next: View) => {
+    const updated = new URLSearchParams(searchParams);
+    if (next === "memory") {
+      updated.delete("view");
+    } else {
+      updated.set("view", next);
+    }
+    setSearchParams(updated, { replace: true });
+  };
+
   const { facts, filters, setFilters, isLoading } = useMemories(channelId);
   const { clusters, isLoading: clustersLoading, error: clustersError, refetch: refetchTopics } = useTopics(channelId);
   const { summary, isLoading: summaryLoading, error: summaryError, refetch: refetchSummary } = useChannelSummary(channelId);
@@ -43,18 +106,45 @@ export function TierBrowser() {
     setConsolidateMsg("");
   };
 
+  // Graph view is delegated entirely to MemoryGraphView — it owns its
+  // own loading / error / empty states. The toggle floats in a slim
+  // header so the operator can flip back to the memory tiers without
+  // a full tab change.
+  if (view === "graph") {
+    return (
+      <div className="flex flex-col h-full min-h-0">
+        <div className="flex items-center justify-end border-b border-border bg-card/60 px-5 py-2 shrink-0">
+          <ViewToggle view={view} onChange={setView} />
+        </div>
+        <div className="flex-1 min-h-0">
+          <MemoryGraphView channelId={channelId} />
+        </div>
+      </div>
+    );
+  }
+
   if (isLoading && summaryLoading && clustersLoading) {
     return (
-      <div className="p-6 text-center text-base text-muted-foreground">
-        Loading memories...
+      <div className="flex flex-col h-full min-h-0">
+        <div className="flex items-center justify-end border-b border-border bg-card/60 px-5 py-2 shrink-0">
+          <ViewToggle view={view} onChange={setView} />
+        </div>
+        <div className="p-6 text-center text-base text-muted-foreground">
+          Loading memories...
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-auto p-4 sm:p-6 space-y-5 animate-fade-in max-w-6xl mx-auto">
-      {/* Actions bar */}
-      <div className="flex items-center justify-end gap-2">
+    <div className="flex flex-col h-full min-h-0">
+      <div className="flex items-center justify-end border-b border-border bg-card/60 px-5 py-2 shrink-0">
+        <ViewToggle view={view} onChange={setView} />
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto p-4 sm:p-6 space-y-5 animate-fade-in">
+        <div className="max-w-6xl mx-auto space-y-5">
+        {/* Actions bar */}
+        <div className="flex items-center justify-end gap-2">
         {showRefresh && (
           <button
             onClick={handleRefresh}
@@ -177,6 +267,8 @@ export function TierBrowser() {
             ))}
           </div>
         )}
+      </div>
+        </div>
       </div>
     </div>
   );

@@ -85,7 +85,7 @@ function renderRoute(initialEntry = "/channels/c1/wiki/graph") {
           path="/channels/:id/wiki/pages/:slug"
           element={<div data-testid="wiki-page-route">page</div>}
         />
-        <Route path="/channels/:id/graph" element={<div data-testid="entity-graph">eg</div>} />
+        <Route path="/channels/:id/memories" element={<div data-testid="entity-graph">eg</div>} />
       </Routes>
     </MemoryRouter>,
   );

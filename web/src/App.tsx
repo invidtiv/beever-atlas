@@ -1,16 +1,13 @@
-import { useEffect, useState, Suspense, lazy } from "react";
+import { useEffect, useState } from "react";
 import {
   BrowserRouter,
   Routes,
   Route,
+  Navigate,
   useLocation,
   useNavigationType,
 } from "react-router-dom";
 
-// Lazy-load the wiki graph route so neither cytoscape (~200 KB) nor
-// the WikiGraph component appears in the wiki tab's main bundle.
-// (§6.6 + §6.13 — bundle-weight contract.)
-const WikiGraph = lazy(() => import("@/components/wiki/WikiGraph"));
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
@@ -29,7 +26,6 @@ import { AskSessionsProvider } from "@/contexts/AskSessionsContext";
 import { TierBrowser } from "@/components/memories/TierBrowser";
 import { WikiTab } from "@/components/channel/WikiTab";
 import { MessagesTab } from "@/components/channel/MessagesTab";
-import { GraphTab } from "@/components/graph/GraphTab";
 import { ChannelSettingsTab } from "@/components/channel/ChannelSettingsTab";
 import { SyncHistoryTab } from "@/components/channel/SyncHistoryTab";
 import { useTheme } from "@/hooks/useTheme";
@@ -84,26 +80,19 @@ function AppShell() {
               <Route path="/channels/:id" element={<ChannelWorkspace />}>
                 <Route index element={<ChannelDefaultRedirect />} />
                 <Route path="wiki" element={<WikiTab />} />
+                {/* Legacy redirects — the wiki + entity graphs now live
+                    inside their parent tabs via ?view=graph so existing
+                    deep-links and toolbar bookmarks keep working. */}
                 <Route
                   path="wiki/graph"
-                  element={
-                    <Suspense
-                      fallback={
-                        <div
-                          className="flex h-full items-center justify-center text-sm text-muted-foreground"
-                          data-testid="wiki-graph-suspense"
-                        >
-                          Loading graph view…
-                        </div>
-                      }
-                    >
-                      <WikiGraph />
-                    </Suspense>
-                  }
+                  element={<Navigate to="../wiki?view=graph" replace />}
+                />
+                <Route
+                  path="graph"
+                  element={<Navigate to="../memories?view=graph" replace />}
                 />
                 <Route path="messages" element={<MessagesTab />} />
                 <Route path="memories" element={<TierBrowser />} />
-                <Route path="graph" element={<GraphTab />} />
                 <Route path="sync-history" element={<SyncHistoryTab />} />
                 <Route path="settings" element={<ChannelSettingsTab />} />
               </Route>

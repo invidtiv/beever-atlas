@@ -253,13 +253,16 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
     const fakeNode: WikiGraphNode = { data: nodeData as WikiGraphNode["data"] };
     const sel = selectionFromNode(fakeNode);
     if (sel.isEntity) {
-      // Entity nodes still navigate to the existing entity-graph route
-      // since they reach beyond the wiki domain.
+      // Entity nodes navigate to the entity-graph view inside the
+      // Agent Memory tab — the standalone /graph route was removed
+      // when the IA collapsed graphs into their parent tabs. The
+      // ?view=graph param keeps the entity-graph surface; ?entity is
+      // forwarded for downstream deep-link handlers.
       if (channelId) {
         const entityName = sel.id.startsWith("entity:")
           ? sel.id.slice(7)
           : sel.label;
-        navigate(`/channels/${channelId}/graph?entity=${encodeURIComponent(entityName)}`);
+        navigate(`/channels/${channelId}/memories?view=graph&entity=${encodeURIComponent(entityName)}`);
       }
       return;
     }
