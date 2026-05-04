@@ -1,7 +1,13 @@
-import { useState, useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useMemo, Suspense, lazy, type ReactNode } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { wikiT } from "@/lib/wikiI18n";
 import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, ArrowRight, FolderSync, History as HistoryIcon } from "lucide-react";
+
+// Lazy-load the wiki graph so cytoscape (~200 KB) stays out of the
+// wiki tab's main bundle until the operator toggles ?view=graph.
+// Mirrors the pattern previously used in App.tsx (§6.6 + §6.13 —
+// bundle-weight contract).
+const WikiGraph = lazy(() => import("@/components/wiki/WikiGraph"));
 import { PipelineEmptyState } from "@/components/shared/PipelineEmptyState";
 import { useWiki } from "@/hooks/useWiki";
 import { useExtractionStatus } from "@/hooks/useExtractionStatus";
@@ -25,6 +31,58 @@ import type { WikiPage, WikiPageNode } from "@/lib/types";
 interface LanguageConfig {
   supported_languages: string[];
   default_target_language: string;
+}
+
+type WikiView = "pages" | "graph";
+
+interface ViewToggleProps {
+  view: WikiView;
+  onChange: (next: WikiView) => void;
+}
+
+/**
+ * Pages↔Graph view toggle for the wiki tab. Renders inside the
+ * ``headerExtra`` slot above the WikiHealthToolbar. The graph
+ * surface is the cross-link wiki graph (NOT the entity graph —
+ * that lives under Agent Memory now).
+ */
+function ViewToggle({ view, onChange }: ViewToggleProps) {
+  return (
+    <div
+      className="inline-flex items-center gap-1 rounded-md border border-border bg-card p-0.5"
+      role="tablist"
+      aria-label="Wiki view"
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === "pages"}
+        onClick={() => onChange("pages")}
+        className={
+          "rounded px-3 py-1 text-xs font-medium transition-colors " +
+          (view === "pages"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-muted")
+        }
+      >
+        Pages
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === "graph"}
+        onClick={() => onChange("graph")}
+        className={
+          "rounded px-3 py-1 text-xs font-medium transition-colors " +
+          (view === "graph"
+            ? "bg-primary text-primary-foreground"
+            : "text-muted-foreground hover:bg-muted")
+        }
+      >
+        Graph
+      </button>
+    </div>
+  );
 }
 
 function WikiLoadingSkeleton() {
@@ -421,6 +479,20 @@ export function WikiTab() {
   const [activePageId, setActivePageId] = useState<string>(
     initialPageParam || "overview",
   );
+  // ``?view=graph`` keeps the wiki cross-link graph mounted in-tab so
+  // a back-button or refresh restores what the operator was looking
+  // at. The toggle writes via ``replace: true`` so flipping doesn't
+  // pollute history.
+  const view: WikiView = searchParams.get("view") === "graph" ? "graph" : "pages";
+  const setView = useCallback((next: WikiView) => {
+    const updated = new URLSearchParams(searchParams);
+    if (next === "pages") {
+      updated.delete("view");
+    } else {
+      updated.set("view", next);
+    }
+    setSearchParams(updated, { replace: true });
+  }, [searchParams, setSearchParams]);
   // Strip ``?page=...`` from the URL on first paint so a subsequent
   // refresh doesn't re-jump the user back to the deep-link target
   // after they have navigated within the wiki tab.
@@ -711,7 +783,24 @@ export function WikiTab() {
   // returns 404 (page exists in sidebar structure but has no cached content)
   // so the pane does not spin forever.
   let pageContent: ReactNode;
-  if (showPageLoading) {
+  if (view === "graph") {
+    // Wiki cross-link graph view — lazy-loaded so cytoscape stays out
+    // of the wiki tab's main bundle until the operator toggles in.
+    pageContent = (
+      <Suspense
+        fallback={
+          <div
+            className="flex h-full items-center justify-center text-sm text-muted-foreground"
+            data-testid="wiki-graph-suspense"
+          >
+            Loading graph view…
+          </div>
+        }
+      >
+        <WikiGraph channelId={channelId} />
+      </Suspense>
+    );
+  } else if (showPageLoading) {
     pageContent = (
       <div className="flex items-center justify-center py-16">
         <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -762,16 +851,19 @@ export function WikiTab() {
       versionHistoryOpen={versionHistoryOpen}
       onVersionHistoryToggle={() => setVersionHistoryOpen((v) => !v)}
       headerExtra={
-        <WikiHealthToolbar
-          channelId={channelId!}
-          manualMode={manualMode}
-          onDownload={handleDownload}
-          onHistoryToggle={() => setVersionHistoryOpen((v) => !v)}
-          historyOpen={versionHistoryOpen}
-          versionCount={wiki?.version_count ?? 0}
-          onRegenerate={handleRefresh}
-          isRegenerating={isRefreshing}
-        />
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <ViewToggle view={view} onChange={setView} />
+          <WikiHealthToolbar
+            channelId={channelId!}
+            manualMode={manualMode}
+            onDownload={handleDownload}
+            onHistoryToggle={() => setVersionHistoryOpen((v) => !v)}
+            historyOpen={versionHistoryOpen}
+            versionCount={wiki?.version_count ?? 0}
+            onRegenerate={handleRefresh}
+            isRegenerating={isRefreshing}
+          />
+        </div>
       }
     >
       <>
