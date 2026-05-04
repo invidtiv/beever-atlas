@@ -173,10 +173,29 @@ function colorForNode(node: WikiGraphNode): string {
 // overlapping into an unreadable crush — the full title is on the
 // preview panel + tooltip on hover, so the truncation is purely
 // visual relief.
-function _truncateLabel(raw: string, max = 28): string {
+function _truncateLabel(raw: string, max = 36): string {
   const s = (raw || "").trim();
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + "…";
+}
+
+/**
+ * Wiki nodes wear their section number AS A PREFIX inside the label
+ * — visually communicates "this is a numbered document section" and
+ * gives the eye a stable anchor when scanning the tree. Entity nodes
+ * (e.g. "Person", "Project") and the channel hub use the raw label.
+ */
+function buildLabel(node: WikiGraphNode): string {
+  const d = node.data ?? {};
+  const dAny = d as Record<string, unknown>;
+  const section = typeof dAny.section_number === "string" ? dAny.section_number.trim() : "";
+  const raw = (typeof d.label === "string" ? d.label : String(d.id ?? "")).trim();
+  if (d.kind !== "wiki") return _truncateLabel(raw);
+  // Slug "overview" is the root — show as "Overview" without §
+  const slug = typeof dAny.slug === "string" ? dAny.slug : "";
+  if (slug === "overview") return _truncateLabel(raw, 36);
+  if (section) return _truncateLabel(`§${section} ${raw}`, 40);
+  return _truncateLabel(raw, 36);
 }
 
 function buildElements(filtered: WikiGraphPayload): unknown[] {
@@ -184,22 +203,30 @@ function buildElements(filtered: WikiGraphPayload): unknown[] {
   for (const node of filtered.nodes) {
     const isChannel = node.data.kind === "channel";
     const isEntity = node.data.kind === "entity";
-    const rawLabel = node.data.label || node.data.id;
+    const isWiki = node.data.kind === "wiki";
     out.push({
       data: {
         ...node.data,
-        // Display label is truncated; the full ``label`` stays on the
-        // panel + Obsidian-style hover tooltip (cytoscape's text-show
-        // styling is driven by the visible-on-hover class added in
-        // the mouseover handler).
-        displayLabel: _truncateLabel(rawLabel),
+        // Wiki + channel = document-shaped pillbox (label INSIDE),
+        // entities stay as the small dot+caption pattern so the
+        // visual contrast between the two graphs is immediately
+        // legible — wiki reads as a structured document tree, not
+        // a knowledge graph.
+        displayLabel: buildLabel(node),
         color: colorForNode(node),
-        // Larger nodes make click targets actually clickable on a
-        // dispersed cose layout. Hub remains the visually-dominant
-        // anchor at 72px.
-        nodeSize: isChannel ? 72 : isEntity ? 40 : 48,
-        labelSize: isChannel ? 18 : 13,
-        labelWeight: isChannel ? 700 : 500,
+        // Pill-shaped wiki cards: width = label-driven (cytoscape
+        // ``width: label``), height = generous so titles read at a
+        // glance. Channel hub is bigger + pill-prominent.
+        nodeShape: isChannel || isWiki ? "round-rectangle" : "ellipse",
+        nodeWidth: isChannel ? 180 : isWiki ? "label" : 36,
+        nodeHeight: isChannel ? 56 : isWiki ? 42 : 36,
+        labelSize: isChannel ? 16 : isWiki ? 12 : 11,
+        labelWeight: isChannel ? 700 : isWiki ? 600 : 500,
+        // Label position: inside for wiki documents (paper metaphor),
+        // below for entity dots (Obsidian metaphor — matches the
+        // sibling entity graph's design language).
+        labelValign: isEntity ? "bottom" : "center",
+        labelMarginY: isEntity ? 6 : 0,
       },
     });
   }
@@ -219,11 +246,13 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
     touchedWithin: "all",
     minCitations: 0,
   });
-  // Default to force-directed cose — Obsidian-style natural spacing
-  // distributes the outer-ring labels so they don't cram on top of
-  // each other. Operators who want the explicit hierarchy can switch
-  // to dagre or concentric from the dropdown.
-  const [layout, setLayout] = useState<LayoutKey>("cose");
+  // Default to dagre (top-down hierarchy) — wikis ARE structured
+  // document trees (Overview → Topics → Sub-topics + cross-links),
+  // and the hierarchical layout immediately telegraphs "this is a
+  // wiki, not an entity graph". The entity graph uses force-directed
+  // fcose; the visual contrast separates the two surfaces. Operators
+  // who want the radial view can switch via the dropdown.
+  const [layout, setLayout] = useState<LayoutKey>("dagre");
   const containerRef = useRef<HTMLDivElement | null>(null);
   // ``unknown`` because cytoscape's type surface (Core, ElementDefinition)
   // adds a non-trivial type-import; the runtime methods we touch
@@ -326,6 +355,16 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
         const module = await import("cytoscape");
         if (!alive) return;
         const cytoscape = (module as { default: unknown }).default ?? module;
+        // Register cytoscape-dagre once for hierarchical tree layout —
+        // wikis ARE structured document trees, dagre is the right tool.
+        // The package ships untyped; runtime registration is fine.
+        try {
+          // @ts-expect-error — cytoscape-dagre has no .d.ts
+          const dagre = (await import("cytoscape-dagre")).default;
+          (cytoscape as { use: (ext: unknown) => void }).use(dagre);
+        } catch {
+          /* already registered or import failed — dagre dropdown will silently fall back */
+        }
         const factory = cytoscape as (config: Record<string, unknown>) => CyInstance;
         cy = factory({
           container: containerRef.current,
@@ -333,35 +372,56 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           wheelSensitivity: 0.2,
           style: [
             {
+              // Default node — pillbox/dot driven by ``data(nodeShape)``.
+              // Wiki + channel = round-rectangle pill (document
+              // metaphor); entities = small ellipse with caption-below
+              // (Obsidian metaphor). The two surfaces read distinctly.
               selector: "node",
               style: {
+                shape: "data(nodeShape)" as unknown as "round-rectangle",
                 label: "data(displayLabel)",
-                "text-valign": "bottom",
+                "text-valign": "data(labelValign)" as unknown as "center",
                 "text-halign": "center",
-                "text-margin-y": 6,
-                color: "#e5e7eb",
+                "text-margin-y": "data(labelMarginY)" as unknown as number,
+                color: "#f8fafc",
                 "font-size": "data(labelSize)",
                 "font-weight": "data(labelWeight)",
                 "text-wrap": "wrap",
-                "text-max-width": "140px",
+                "text-max-width": "160px",
                 "text-outline-color": "#0f172a",
-                "text-outline-width": 2,
+                "text-outline-width": 1,
                 "background-color": "data(color)",
-                width: "data(nodeSize)",
-                height: "data(nodeSize)",
+                width: "data(nodeWidth)" as unknown as number,
+                height: "data(nodeHeight)" as unknown as number,
                 "border-width": 1.5,
-                "border-color": "rgba(255,255,255,0.15)",
+                "border-color": "rgba(255,255,255,0.18)",
+                "padding-left": 12,
+                "padding-right": 12,
+                "padding-top": 6,
+                "padding-bottom": 6,
                 "transition-property":
                   "background-color, border-color, width, height, opacity",
                 "transition-duration": 150,
+              } as unknown as cytoscape.Css.Node,
+            },
+            {
+              // Wiki cards: subtle inner shadow via background-opacity
+              // gradient + thicker pill border so they read as paper
+              // documents, not the raw colored disks of the entity graph.
+              selector: "node[kind = 'wiki']",
+              style: {
+                "background-opacity": 0.92,
+                "border-width": 1.5,
+                "border-color": "rgba(255,255,255,0.22)",
               },
             },
             {
               selector: "node[kind = 'channel']",
               style: {
                 "border-width": 3,
-                "border-color": "rgba(168,85,247,0.6)",
-                color: "#f3e8ff",
+                "border-color": "rgba(168,85,247,0.7)",
+                "background-opacity": 0.95,
+                color: "#faf5ff",
               },
             },
             {
@@ -425,36 +485,49 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
               },
             },
             {
+              // Hierarchy edges (channel-hub → page) — purple SOLID,
+              // medium width, prominent arrow. Reads as "belongs to
+              // this channel".
               selector: "edge[kind = 'belongs_to']",
               style: {
-                "line-color": "rgba(168,85,247,0.4)",
-                "target-arrow-color": "rgba(168,85,247,0.5)",
-                "line-style": "dotted",
-                width: 1,
-              },
-            },
-            {
-              selector: "edge[kind = 'child_of']",
-              style: {
-                "line-color": "rgba(96,165,250,0.6)",
-                "target-arrow-color": "rgba(96,165,250,0.7)",
+                "line-color": "rgba(168,85,247,0.5)",
+                "target-arrow-color": "rgba(168,85,247,0.7)",
+                "line-style": "solid",
                 width: 1.5,
               },
             },
             {
-              selector: "edge[kind = 'references_wiki']",
+              // Hierarchy edges (parent page → child page) — sky-blue
+              // SOLID, slightly thicker. Tree-trunk feel.
+              selector: "edge[kind = 'child_of']",
               style: {
-                "line-color": "#3b82f6",
-                "target-arrow-color": "#3b82f6",
+                "line-color": "rgba(96,165,250,0.7)",
+                "target-arrow-color": "rgba(96,165,250,0.8)",
+                "line-style": "solid",
                 width: 2,
               },
             },
             {
+              // Cross-references (wiki → wiki [[wikilink]]) — DASHED
+              // amber, light width. Reads as "see also", visually
+              // distinct from the hierarchy spine.
+              selector: "edge[kind = 'references_wiki']",
+              style: {
+                "line-color": "rgba(251,191,36,0.6)",
+                "target-arrow-color": "rgba(251,191,36,0.7)",
+                "line-style": "dashed",
+                width: 1.2,
+              },
+            },
+            {
+              // Cross-references to entities — DOTTED emerald, even
+              // lighter, hint of "extends to the knowledge graph".
               selector: "edge[kind = 'references_entity']",
               style: {
-                "line-style": "dashed",
-                "line-color": "rgba(16,185,129,0.6)",
-                "target-arrow-color": "rgba(16,185,129,0.7)",
+                "line-style": "dotted",
+                "line-color": "rgba(16,185,129,0.55)",
+                "target-arrow-color": "rgba(16,185,129,0.65)",
+                width: 1,
               },
             },
           ],
@@ -480,12 +553,21 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
                 }
               : layout === "dagre"
                 ? {
+                    // Top-down hierarchy with breathing room for the
+                    // new pill-shaped wiki cards (label-driven width
+                    // = ~120-200 px). Bumped nodeSep + rankSep so
+                    // sibling cards don't crowd, and tree levels
+                    // visibly stratify.
                     name: "dagre",
                     rankDir: "TB",
-                    animate: false,
-                    nodeSep: 70,
-                    edgeSep: 30,
-                    rankSep: 100,
+                    animate: true,
+                    animationDuration: 600,
+                    animationEasing: "ease-out-cubic",
+                    nodeSep: 110,
+                    edgeSep: 40,
+                    rankSep: 140,
+                    fit: true,
+                    padding: 50,
                   }
                 : layout === "grid"
                   ? { name: "grid", animate: false, padding: 40 }
