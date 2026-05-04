@@ -220,7 +220,10 @@ function buildElements(filtered: WikiGraphPayload): unknown[] {
               Math.max(96, buildLabel(node).length * 7 + 36 + (isChannel ? 28 : 0)),
             ),
         nodeHeight: isChannel ? 36 : isWiki ? 30 : 14,
-        icon: isChannel ? HUB_ICON_URL : "",
+        // Cytoscape's ``background-image`` requires a valid URL or the
+        // literal "none" — empty strings crash the style parser with
+        // the "Cannot read properties of null (reading 'value')" error.
+        icon: isChannel ? HUB_ICON_URL : "none",
         labelSize: isChannel ? 13 : isWiki ? 12 : 9,
         labelWeight: isChannel ? 700 : 500,
       },
