@@ -16,8 +16,10 @@
  */
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { X, ExternalLink } from "lucide-react";
+import { X, ExternalLink, Loader2 } from "lucide-react";
 import { useWikiGraph, type WikiGraphPayload, type WikiGraphNode } from "@/hooks/useWikiGraph";
+import { useWikiPage } from "@/hooks/useWikiPage";
+import { WikiMarkdown } from "@/components/wiki/WikiMarkdown";
 
 type LayoutKey = "concentric" | "cose" | "dagre" | "grid";
 type KindFilter = "all" | "topic" | "entity" | "decisions" | "faq" | "action_items";
@@ -261,6 +263,26 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
     // Wiki nodes + channel hub → open inline preview panel.
     setSelection(sel);
   }, [channelId, navigate]);
+
+  // Double-tap shortcut — same selection-derivation logic but routes
+  // straight to the wiki tab with the page selected, skipping the
+  // panel preview. Operators who already know which page they want
+  // don't have to single-click → "Open in Wiki tab".
+  const handleNodeDoubleTapRef = useRef<(nodeData: Record<string, unknown>) => void>(
+    () => undefined,
+  );
+  handleNodeDoubleTapRef.current = useCallback(
+    (nodeData: Record<string, unknown>) => {
+      if (!nodeData || !nodeData.id || !channelId) return;
+      const fakeNode: WikiGraphNode = { data: nodeData as WikiGraphNode["data"] };
+      const sel = selectionFromNode(fakeNode);
+      if (sel.isEntity || sel.isChannel || !sel.pageId) return;
+      navigate(
+        `/channels/${channelId}/wiki?page=${encodeURIComponent(sel.pageId)}`,
+      );
+    },
+    [channelId, navigate],
+  );
 
   const elements = useMemo(
     () => (filtered ? buildElements(filtered) : []),
@@ -516,6 +538,15 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
             handleNodeTapRef.current({});
           }
         });
+        // Double-tap on a node — skip the panel and navigate straight
+        // to the wiki tab with that page selected. Operators who know
+        // what they want shouldn't need a two-click flow.
+        cy.on("dbltap", "node", (e) => {
+          const data = (
+            e as unknown as { target: { data: () => Record<string, unknown> } }
+          ).target.data();
+          handleNodeDoubleTapRef.current(data);
+        });
         cyRef.current = cy;
         setCytoscapeReady(true);
       } catch (err) {
@@ -710,6 +741,19 @@ interface WikiGraphPanelProps {
 
 function WikiGraphPanel({ channelId, selection, onClose }: WikiGraphPanelProps) {
   const navigate = useNavigate();
+  // Fetch the full page content when a wiki node is selected so the
+  // panel renders the actual markdown — operators don't have to click
+  // through to read it. Channel hub + entities don't have backing
+  // wiki pages, so they get the lightweight summary view below.
+  const wantsPageFetch = !selection.isChannel && !selection.isEntity && !!selection.pageId;
+  const {
+    data: page,
+    isLoading: isPageLoading,
+    isRevalidating,
+  } = useWikiPage(
+    wantsPageFetch ? channelId : undefined,
+    wantsPageFetch ? selection.pageId : undefined,
+  );
   const goToWikiPage = () => {
     if (!channelId || !selection.pageId) return;
     // Navigate to the channel wiki tab with the selected page in the
@@ -720,14 +764,20 @@ function WikiGraphPanel({ channelId, selection, onClose }: WikiGraphPanelProps) 
     );
   };
 
+  // The panel widens when a full page renders so long-form markdown
+  // doesn't wrap awkwardly. Channel hub / entity / brief preview keep
+  // the narrow 320px form.
+  const wide = wantsPageFetch && (page || isPageLoading);
+  const widthClass = wide ? "w-[28rem] lg:w-[34rem]" : "w-80";
+
   return (
     <aside
-      className="w-80 shrink-0 border-l border-border bg-card/95 overflow-y-auto shadow-2xl backdrop-blur-sm"
+      className={`${widthClass} shrink-0 border-l border-border bg-card/95 overflow-y-auto shadow-2xl backdrop-blur-sm`}
       role="complementary"
       aria-label="Wiki graph node details"
       data-testid="wiki-graph-panel"
     >
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-card/95 px-4 py-3 backdrop-blur-sm">
         <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {selection.isChannel
             ? "Channel hub"
@@ -735,60 +785,94 @@ function WikiGraphPanel({ channelId, selection, onClose }: WikiGraphPanelProps) 
               ? "Entity"
               : "Wiki page"}
         </span>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-          aria-label="Close preview"
-        >
-          <X size={14} />
-        </button>
+        <div className="flex items-center gap-1">
+          {!selection.isChannel && !selection.isEntity && selection.pageId && (
+            <button
+              type="button"
+              onClick={goToWikiPage}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+              aria-label="Open in Wiki tab"
+              title="Open this page in the wiki tab (or double-click the node)"
+            >
+              <ExternalLink size={11} />
+              Open in Wiki
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+            aria-label="Close preview"
+          >
+            <X size={14} />
+          </button>
+        </div>
       </div>
       <div className="space-y-3 px-4 py-4">
         <div>
-          <h3 className="text-base font-semibold text-foreground leading-tight">
+          <h3 className="text-lg font-semibold text-foreground leading-tight">
             {selection.label}
           </h3>
-          {selection.sectionNumber && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Section {selection.sectionNumber}
-            </p>
-          )}
-          {selection.pageKind && !selection.isChannel && !selection.isEntity && (
-            <p className="mt-1 text-xs text-muted-foreground capitalize">
-              Kind: {selection.pageKind}
-            </p>
-          )}
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            {selection.sectionNumber && (
+              <span>§{selection.sectionNumber}</span>
+            )}
+            {selection.pageKind && !selection.isChannel && !selection.isEntity && (
+              <span className="capitalize">{selection.pageKind}</span>
+            )}
+            {typeof selection.memoryCount === "number" && selection.memoryCount > 0 && (
+              <span>{selection.memoryCount} memories</span>
+            )}
+            {selection.lastUpdated && (
+              <span title={selection.lastUpdated}>
+                Updated {new Date(selection.lastUpdated).toLocaleDateString()}
+              </span>
+            )}
+          </div>
         </div>
-        {selection.summary && (
+
+        {/* Full page render — fades during revalidation so the user
+            isn't startled by content disappearing on a poll. */}
+        {wantsPageFetch && (
+          <div
+            className={`transition-opacity duration-150 ${
+              isRevalidating ? "opacity-60" : "opacity-100"
+            }`}
+            data-testid="wiki-graph-panel-content"
+          >
+            {isPageLoading && (
+              <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+                <Loader2 size={14} className="animate-spin" />
+                Loading page…
+              </div>
+            )}
+            {!isPageLoading && page && page.content && (
+              <div className="prose prose-sm dark:prose-invert max-w-none [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-xs">
+                <WikiMarkdown
+                  content={page.content}
+                  citations={page.citations ?? []}
+                />
+              </div>
+            )}
+            {!isPageLoading && !page && selection.summary && (
+              <p className="text-sm text-foreground/80 leading-relaxed">
+                {selection.summary}
+              </p>
+            )}
+            {!isPageLoading && !page && !selection.summary && (
+              <p className="text-xs text-muted-foreground italic">
+                Page content unavailable. Try the Wiki tab for the latest
+                version.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Channel hub + entities — show summary only. */}
+        {!wantsPageFetch && selection.summary && (
           <p className="text-sm text-foreground/80 leading-relaxed">
             {selection.summary}
           </p>
-        )}
-        {!selection.summary && !selection.isChannel && !selection.isEntity && (
-          <p className="text-xs text-muted-foreground italic">
-            No summary cached yet. Open the page to read its content.
-          </p>
-        )}
-        {typeof selection.memoryCount === "number" && selection.memoryCount > 0 && (
-          <p className="text-xs text-muted-foreground">
-            {selection.memoryCount} memories
-          </p>
-        )}
-        {selection.lastUpdated && (
-          <p className="text-xs text-muted-foreground">
-            Updated {new Date(selection.lastUpdated).toLocaleString()}
-          </p>
-        )}
-        {!selection.isChannel && !selection.isEntity && selection.pageId && (
-          <button
-            type="button"
-            onClick={goToWikiPage}
-            className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            <ExternalLink size={12} />
-            Open in Wiki tab
-          </button>
         )}
       </div>
     </aside>
