@@ -657,38 +657,42 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
             layout === "fcose"
               ? {
                   name: "fcose",
-                  // fcose quality: "proof" is the best but slow for >100 nodes.
-                  // "default" hits ~350 ms at 70 nodes — comfortable.
                   quality: "default",
                   animate: true,
                   animationDuration: 800,
                   animationEasing: "ease-out-cubic",
                   fit: true,
-                  padding: 80,
-                  // Randomize starting positions for fresh layouts
+                  padding: 100,
                   randomize: true,
-                  // Node repulsion — higher = more spread, less blob
-                  nodeRepulsion: () => 8000,
-                  // Ideal edge length drives the inter-cluster spacing
-                  idealEdgeLength: () => 120,
-                  // Edge elasticity — lower = looser spring, allows clusters
-                  // to drift further apart
-                  edgeElasticity: () => 0.45,
-                  // Gravity pulls the whole graph back toward center —
-                  // prevents the outer clusters from flying off-screen
-                  gravity: 0.3,
+                  // 78×52 wiki cards are MUCH bigger than entity-graph
+                  // dots, so the same fcose params packed them into an
+                  // overlapping blob. Critical knobs to fix that:
+                  //   • nodeDimensionsIncludeLabels: true — fcose
+                  //     reserves space for the actual rendered card,
+                  //     not a point particle
+                  //   • nodeSeparation: 80 — minimum pixel gap between
+                  //     any two nodes
+                  //   • nodeRepulsion 8k → 15k — stronger push
+                  //   • idealEdgeLength 120 → 200 — longer edges =
+                  //     looser inter-cluster spread
+                  //   • clusterGravity 1.5 → 0.8 — clusters still pull
+                  //     same-kind together but don't squeeze cards on
+                  //     top of each other
+                  nodeDimensionsIncludeLabels: true,
+                  uniformNodeDimensions: false,
+                  packComponents: true,
+                  nodeSeparation: 80,
+                  nodeRepulsion: () => 15000,
+                  idealEdgeLength: () => 200,
+                  edgeElasticity: () => 0.4,
+                  gravity: 0.25,
                   gravityRange: 3.8,
-                  // Number of iterations: bump for better quality at this N
-                  numIter: 2500,
-                  // Tile unconnected (island) nodes neatly
+                  numIter: 3000,
                   tile: true,
-                  // The fcose "clusters" param pulls same-kind nodes together.
-                  // Each entry is an array of node ids; fcose applies an
-                  // attractive force between all members of the same array.
+                  tilingPaddingHorizontal: 30,
+                  tilingPaddingVertical: 30,
                   clusters: clusters.length > 0 ? clusters : undefined,
-                  // cluster gravity multiplier — how strongly cluster members
-                  // are attracted to each other vs. the global gravity
-                  clusterGravity: 1.5,
+                  clusterGravity: 0.8,
                   clusterGravityRange: 0.9,
                 }
               : layout === "dagre"
