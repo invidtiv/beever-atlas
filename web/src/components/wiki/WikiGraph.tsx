@@ -156,8 +156,20 @@ function buildLabel(node: WikiGraphNode): string {
 // Page icon: a simple corner-fold document shape, stroked white.
 // Hub icon:  a Notion-style "stack of pages" that reads as "workspace root".
 
-// Page icon dropped — chip layout puts the title INSIDE the node;
-// no glyph is rendered on wiki pages. Title is the affordance.
+// Page icon — symmetrically centered in 24×24 viewBox so cytoscape's
+// background-fit "contain" + 50%/50% positioning render dead-center
+// on a square node. Filled white paper body with a subtle fold-flap
+// shadow and two content bars.
+const PAGE_ICON_SVG = encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' +
+    '<path d="M6 4 a1.6 1.6 0 0 1 1.6 -1.6 h7.4 L19 8 V18.4 a1.6 1.6 0 0 1 -1.6 1.6 H7.6 a1.6 1.6 0 0 1 -1.6 -1.6 z" ' +
+    'fill="rgba(255,255,255,0.96)"/>' +
+    '<path d="M15 2.4 V8 H19 z" fill="rgba(0,0,0,0.18)"/>' +
+    '<rect x="8.5" y="11.5" width="8" height="1.3" rx="0.65" fill="rgba(15,23,42,0.42)"/>' +
+    '<rect x="8.5" y="14.5" width="6" height="1.3" rx="0.65" fill="rgba(15,23,42,0.42)"/>' +
+    '</svg>',
+);
+const PAGE_ICON_URL = `data:image/svg+xml;utf8,${PAGE_ICON_SVG}`;
 
 // Hub icon: a clean folder/binder glyph with the same fill language
 // as the page icon. Reads as "container of pages" rather than a
@@ -203,27 +215,18 @@ function buildElements(filtered: WikiGraphPayload): unknown[] {
         kindKey,
         clusterKey,
         // Dimensions: bigger cards so titles are readable.
-        // Pill chips (Roam/Notion/Linear-style document graph).
-        // Width is pre-computed from label length because cytoscape's
-        // ``width: "label"`` is only valid as a LITERAL style value,
-        // not as the result of a ``data()`` accessor — pushing
-        // "label" through data causes the parser to crash with
-        // "Cannot read properties of null (reading 'value')".
+        // Rounded-square nodes with centered icon + caption-below.
+        // (User-preferred design after testing chip pills + circles.)
+        // Equal width=height so the icon centers cleanly via
+        // background-position 50%/50%. Round-rectangle with high
+        // corner-radius gives the modern soft-square look, distinct
+        // from the entity-graph circles.
         nodeShape: isEntity ? "ellipse" : "round-rectangle",
-        nodeWidth: isEntity
-          ? 14
-          : Math.min(
-              260,
-              // 7 px per char + 36 px chrome (border + padding +
-              // optional left-icon space). Channel hub gets +28 px
-              // for the leading folder glyph.
-              Math.max(96, buildLabel(node).length * 7 + 36 + (isChannel ? 28 : 0)),
-            ),
-        nodeHeight: isChannel ? 36 : isWiki ? 30 : 14,
+        nodeWidth: isChannel ? 64 : isWiki ? 52 : 14,
+        nodeHeight: isChannel ? 64 : isWiki ? 52 : 14,
         // Cytoscape's ``background-image`` requires a valid URL or the
-        // literal "none" — empty strings crash the style parser with
-        // the "Cannot read properties of null (reading 'value')" error.
-        icon: isChannel ? HUB_ICON_URL : "none",
+        // literal "none" — empty strings crash the style parser.
+        icon: isChannel ? HUB_ICON_URL : isWiki ? PAGE_ICON_URL : "none",
         labelSize: isChannel ? 13 : isWiki ? 12 : 9,
         labelWeight: isChannel ? 700 : 500,
       },
@@ -482,57 +485,39 @@ export function WikiGraph({ channelId: channelIdOverride }: WikiGraphProps = {})
           elements,
           wheelSensitivity: 0.2,
           style: [
-            // ── Base node style — chip layout (title inside) ─────────────
-            // Title sits CENTERED inside the chip with proper padding.
-            // Dark slate body, kind-color border on the LEFT only
-            // (3 px ribbon) — the eye scans the row of left-edges to
-            // identify kinds at a glance. Icon-on-disc was abandoned
-            // because the icon ate the kind-color signal.
+            // ── Base node — rounded square + centered icon + caption below
+            // User-preferred design after testing chip-with-title and
+            // round-disc layouts. Kind-color body, white doc icon
+            // centered in the square, title rendered as caption below.
             {
               selector: "node",
               style: {
                 shape: "data(nodeShape)" as unknown as "round-rectangle",
                 label: "data(displayLabel)",
-                "text-valign": "center",
+                "text-valign": "bottom",
                 "text-halign": "center",
-                "text-margin-y": 0,
-                color: "#f1f5f9",
+                "text-margin-y": 8,
+                color: "#e2e8f0",
                 "font-size": "data(labelSize)",
                 "font-weight": "data(labelWeight)",
                 "text-wrap": "wrap",
-                "text-max-width": "180px",
+                "text-max-width": "120px",
                 "text-outline-color": "#0f172a",
-                "text-outline-width": 0,
-                // Solid kind-color body. The previous attempt at a
-                // gradient-ribbon (linear-gradient + data(color) stops)
-                // crashed cytoscape's parser ("Cannot read properties
-                // of null reading 'value'") because data() accessors
-                // can't be interleaved with literal hex inside the
-                // gradient stop arrays. Solid color reads just as
-                // distinctly with the white-stroked icon on top.
-                // Dark slate body. Kind color shifts to the border
-                // so the title text reads cleanly without fighting
-                // the kind hue. Operators learn the border color
-                // → kind mapping immediately from the legend.
-                "background-color": "#1e293b",
-                "background-opacity": 0.95,
+                "text-outline-width": 1.5,
+                "background-color": "data(color)",
+                "background-opacity": 0.92,
                 "background-image": "data(icon)",
                 "background-fit": "contain",
-                "background-image-opacity": 0.9,
-                "background-width": "20%",
-                "background-height": "70%",
-                "background-position-x": "8%",
+                "background-image-opacity": 0.95,
+                "background-width": "60%",
+                "background-height": "60%",
+                "background-position-x": "50%",
                 "background-position-y": "50%",
-                "padding-left": 14,
-                "padding-right": 14,
-                "padding-top": 4,
-                "padding-bottom": 4,
                 width: "data(nodeWidth)" as unknown as number,
                 height: "data(nodeHeight)" as unknown as number,
-                // Kind color as the border — visible kind signal that
-                // doesn't compete with the title text on top.
-                "border-width": 2,
-                "border-color": "data(color)",
+                "border-width": 1,
+                "border-color": "rgba(255,255,255,0.12)",
+                "corner-radius": 12,
                 "transition-property": "opacity, border-color, border-width",
                 "transition-duration": 150,
               } as unknown as cytoscape.Css.Node,
