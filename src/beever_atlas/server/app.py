@@ -196,7 +196,16 @@ async def lifespan(app: FastAPI):
 
         page_store = WikiPageStore(db=stores.mongodb.db)
         await page_store.ensure_indexes()
-        maintainer = WikiMaintainer(page_store=page_store)
+        # Pass the Neo4j-backed graph store to the maintainer so the
+        # ``wiki-llm-native-redesign`` cross-link upsert path can write
+        # ``WikiPage`` nodes + ``REFERENCES`` edges. NullGraphStore /
+        # NebulaStore (no parity yet) hit a hasattr-gated no-op inside
+        # ``WikiMaintainer._upsert_wiki_graph`` so this is safe regardless
+        # of ``GRAPH_BACKEND``.
+        maintainer = WikiMaintainer(
+            page_store=page_store,
+            graph_store=stores.graph,
+        )
         init_wiki_maintainer(maintainer)
 
         worker = get_extraction_worker()

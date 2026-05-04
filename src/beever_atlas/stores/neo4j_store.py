@@ -1239,3 +1239,87 @@ class Neo4jStore:
             async for record in result:
                 found.add(record["found"])
             return found
+
+    # ------------------------------------------------------------------
+    # wiki-llm-native-redesign — WikiPage nodes + REFERENCES edges
+    # ------------------------------------------------------------------
+
+    async def upsert_wiki_page_node(
+        self,
+        *,
+        channel_id: str,
+        slug: str,
+        kind: str,
+        title: str,
+        version: int,
+        last_updated: datetime,
+    ) -> str:
+        """MERGE a WikiPage node keyed by ``(channel_id, slug)``.
+
+        Returns the node element ID. Idempotent — the maintainer calls
+        this on every successful ``apply_update`` so existing nodes
+        update their ``kind``/``title``/``version``/``last_updated``
+        in place.
+        """
+        now_iso = datetime.now(tz=UTC).isoformat()
+        last_updated_iso = (
+            last_updated.isoformat()
+            if isinstance(last_updated, datetime)
+            else str(last_updated)
+        )
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MERGE (w:WikiPage {channel_id: $channel_id, slug: $slug})
+                ON CREATE SET
+                    w.kind         = $kind,
+                    w.title        = $title,
+                    w.version      = $version,
+                    w.last_updated = $last_updated,
+                    w.created_at   = $now,
+                    w.updated_at   = $now
+                ON MATCH SET
+                    w.kind         = $kind,
+                    w.title        = $title,
+                    w.version      = $version,
+                    w.last_updated = $last_updated,
+                    w.updated_at   = $now
+                RETURN elementId(w) AS eid
+                """,
+                channel_id=channel_id,
+                slug=slug,
+                kind=kind,
+                title=title,
+                version=version,
+                last_updated=last_updated_iso,
+                now=now_iso,
+            )
+            record = await result.single()
+            return record["eid"] if record else ""
+
+    async def upsert_wiki_reference_edge(
+        self,
+        *,
+        channel_id: str,
+        src_slug: str,
+        dst_slug: str,
+    ) -> None:
+        """MERGE a (:WikiPage)-[:REFERENCES]->(:WikiPage) edge.
+
+        Idempotent. Both endpoints are MERGEd by ``(channel_id, slug)``
+        so calling this with a destination slug whose node does not yet
+        exist still succeeds — Neo4j creates a placeholder node that
+        ``upsert_wiki_page_node`` will subsequently enrich on the next
+        apply_update against that page.
+        """
+        async with self._driver.session() as session:
+            await session.run(
+                """
+                MERGE (src:WikiPage {channel_id: $channel_id, slug: $src_slug})
+                MERGE (dst:WikiPage {channel_id: $channel_id, slug: $dst_slug})
+                MERGE (src)-[:REFERENCES]->(dst)
+                """,
+                channel_id=channel_id,
+                src_slug=src_slug,
+                dst_slug=dst_slug,
+            )

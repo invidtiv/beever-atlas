@@ -28,8 +28,10 @@ Spec: ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/wiki-maintainer/``
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -251,6 +253,133 @@ def _render_kind_prompt(
         )
     out += "\n\n--- OUTPUT (JSON only) ---\n"
     return out
+
+
+# ---------------------------------------------------------------------------
+# wiki-llm-native-redesign — `[[wikilink]]` parser + resolver
+# ---------------------------------------------------------------------------
+# The redesign instructs LLM prompts to emit `[[Page Title]]` references
+# inline in markdown. After ``apply_update`` saves the page, a post-processor:
+#   1. Parses titles from the rewritten content (this regex);
+#   2. Resolves each title to a slug via exact / case-insensitive /
+#      plural-aware / fuzzy match (≤0.15 Levenshtein, expressed as
+#      difflib ratio ≥0.85);
+#   3. Persists ``cross_links`` / ``cross_links_broken`` on the page
+#      document and (best-effort) writes a ``REFERENCES`` edge in Neo4j.
+
+# Bracketed-title regex — matches ``[[Title]]`` where Title contains no
+# embedded brackets or newlines. ``[[[bad]]]`` and ``[[a [b] c]]`` fall
+# through cleanly because the inner content rejects ``[`` and ``]``.
+_WIKILINK_PATTERN = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
+
+# Difflib ratio threshold for fuzzy title matching. The change spec
+# specifies "≤0.15 Levenshtein"; difflib's ``SequenceMatcher.ratio()``
+# is approximately ``1 - (edit_distance / total_chars)`` for sequences
+# of similar length, so the equivalent threshold is ≥0.85.
+_WIKILINK_FUZZY_THRESHOLD = 0.85
+
+
+def _parse_wikilinks(content_md: str) -> list[str]:
+    """Extract bracketed titles from a markdown body.
+
+    Returns titles in document order. Whitespace is stripped from each
+    match; empty matches are dropped. Duplicates are NOT deduped here —
+    callers running across multiple sections may want to dedupe globally.
+    """
+    if not content_md:
+        return []
+    out: list[str] = []
+    for match in _WIKILINK_PATTERN.finditer(content_md):
+        title = match.group(1).strip()
+        if title:
+            out.append(title)
+    return out
+
+
+def _normalize_title_for_match(title: str) -> str:
+    """Lowercase + trim + drop a trailing ``s``.
+
+    The trailing-``s`` rule is a deliberately small plural-stemmer so
+    ``[[Decision]]`` resolves to a ``Decisions`` page without dragging
+    in the full nltk surface area. False positives ('boss' → 'bos') are
+    accepted because they are shorter than the fuzzy-match cutoff and
+    will fall through to the next rule.
+    """
+    n = title.strip().lower()
+    if len(n) > 1 and n.endswith("s"):
+        n = n[:-1]
+    return n
+
+
+def _build_page_index(
+    pages: list["WikiPage"],
+    *,
+    exclude_self_page_id: str | None = None,
+) -> dict[str, str]:
+    """Build a {key: slug} resolver index from a list of WikiPage.
+
+    Pages are sorted by ``updated_at`` DESC so ties on a normalized key
+    resolve to the most-recently-edited target — matches the spec's
+    fuzzy-match tie-break rule.
+    """
+
+    def _slug_of(page: "WikiPage") -> str:
+        return page.slug or page.page_id.replace(":", "-")
+
+    sorted_pages = sorted(
+        pages,
+        key=lambda p: getattr(p, "updated_at", None) or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+    index: dict[str, str] = {}
+    for page in sorted_pages:
+        if exclude_self_page_id is not None and page.page_id == exclude_self_page_id:
+            continue
+        slug = _slug_of(page)
+        if not slug:
+            continue
+        candidates = {
+            slug,
+            slug.lower(),
+            page.title,
+            page.title.lower() if page.title else "",
+            _normalize_title_for_match(page.title) if page.title else "",
+        }
+        for key in candidates:
+            if key and key not in index:
+                index[key] = slug
+    return index
+
+
+def _resolve_wikilink_against_index(
+    title: str, page_index: dict[str, str]
+) -> str | None:
+    """Resolve a wikilink title against a pre-built index.
+
+    Match precedence: exact → lowercased → plural-stripped → fuzzy
+    (difflib ratio ≥ 0.85). Returns None when no candidate clears the
+    fuzzy threshold; the caller surfaces it in ``cross_links_broken``.
+    """
+    raw = title.strip()
+    if not raw or not page_index:
+        return None
+    if raw in page_index:
+        return page_index[raw]
+    lowered = raw.lower()
+    if lowered in page_index:
+        return page_index[lowered]
+    norm = _normalize_title_for_match(raw)
+    if norm in page_index:
+        return page_index[norm]
+    matches = difflib.get_close_matches(
+        norm,
+        list(page_index.keys()),
+        n=1,
+        cutoff=_WIKILINK_FUZZY_THRESHOLD,
+    )
+    if matches:
+        return page_index[matches[0]]
+    return None
 
 
 def _slug_for_topic(cluster_id: str) -> str:
@@ -490,12 +619,19 @@ class WikiMaintainer:
         self,
         page_store: WikiPageStore,
         llm_provider: Any | None = None,
+        graph_store: Any | None = None,
     ) -> None:
         self._page_store = page_store
         # ``llm_provider`` is only required for ``apply_update`` —
         # routing (``plan_updates``) MUST NOT call any LLM. Tests
         # leave it None to lock in that invariant.
         self._llm_provider = llm_provider
+        # ``graph_store`` is the optional cross-link target. The
+        # ``wiki-llm-native-redesign`` change uses this to persist
+        # ``WikiPage`` nodes + ``REFERENCES`` edges. None / non-Neo4j
+        # backends are tolerated (cross-links resolve and persist to
+        # Mongo regardless; the graph upsert no-ops via a hasattr check).
+        self._graph_store = graph_store
         # Per-(channel, page) timestamps of the most recent drift comparator
         # invocation. Trimmed of entries older than 5 min on each insert so
         # this never grows unbounded — the rate limiter only needs the most
@@ -862,8 +998,34 @@ class WikiMaintainer:
         # the LLM contract returns ONLY affected sections, and the merge
         # path only rewrites sections by id. Voice preservation is a
         # structural invariant.
+
+        # Cross-link resolution runs ONLY on the redesign path. The
+        # legacy single-prompt does not instruct ``[[wikilink]]`` syntax,
+        # so resolving on the legacy path would write empty arrays and
+        # be a no-op anyway — but byte-identical behaviour for flag-OFF
+        # installs is a hard guarantee, so the call is gated explicitly.
+        resolved_slugs: list[str] = []
+        if use_kind_dispatch:
+            try:
+                resolved_slugs, _broken = await self._persist_cross_links(
+                    page, target_lang=target_lang
+                )
+            except Exception:  # noqa: BLE001 — never destabilise apply_update
+                logger.exception(
+                    "event=wiki_persist_cross_links_failed channel_id=%s page_id=%s",
+                    channel_id,
+                    page_id,
+                )
+
         await self._page_store.save_page(page)
         self._record_apply_update_success(page_id)
+        # Persist the cross-link graph (best-effort). Runs synchronously
+        # so the next ``GET /api/channels/{id}/wiki/graph`` reflects the
+        # rewrite immediately, but wrapped in try/except inside
+        # ``_upsert_wiki_graph`` itself so a Neo4j hiccup never crashes
+        # the maintainer's primary path.
+        if use_kind_dispatch:
+            await self._upsert_wiki_graph(page, resolved_slugs)
         # Drift A/B comparator (gated by ``Settings.wiki_drift_ab``). MUST run
         # AFTER ``save_page`` succeeds so the comparator sees the canonical
         # incremental output the user will read. The schedule helper is
@@ -878,6 +1040,123 @@ class WikiMaintainer:
                 page_id,
             )
         return True
+
+    # ------------------------------------------------------------------
+    # wiki-llm-native-redesign §4 — cross-link resolver + Neo4j upsert
+    # ------------------------------------------------------------------
+
+    async def _resolve_wikilink(
+        self,
+        channel_id: str,
+        target_lang: str,
+        title: str,
+    ) -> str | None:
+        """Resolve a single ``[[Title]]`` reference to a slug.
+
+        Convenience wrapper for ad-hoc lookups (e.g. from tests or the
+        broken-link create-page flow). Loads every page in the channel —
+        for batch resolution inside ``apply_update`` use
+        ``_persist_cross_links`` which builds the index once.
+        """
+        pages = await self._page_store.list_pages(channel_id, target_lang=target_lang)
+        index = _build_page_index(pages)
+        return _resolve_wikilink_against_index(title, index)
+
+    async def _persist_cross_links(
+        self,
+        page: "WikiPage",
+        target_lang: str,
+    ) -> tuple[list[str], list[str]]:
+        """Parse and resolve every wikilink in ``page.sections``.
+
+        Mutates ``page.cross_links`` and ``page.cross_links_broken`` in
+        place; the caller is responsible for the subsequent ``save_page``
+        so resolution + persistence land in a single Mongo write. Returns
+        ``(resolved_slugs, broken_titles)`` for the Neo4j upsert call site.
+        Self-references are excluded from the index so a page never
+        cross-links to itself.
+        """
+        seen: set[str] = set()
+        ordered_titles: list[str] = []
+        for section in page.sections:
+            for title in _parse_wikilinks(section.content_md):
+                if title not in seen:
+                    seen.add(title)
+                    ordered_titles.append(title)
+        if not ordered_titles:
+            page.cross_links = []
+            page.cross_links_broken = []
+            return [], []
+
+        all_pages = await self._page_store.list_pages(
+            page.channel_id, target_lang=target_lang
+        )
+        index = _build_page_index(
+            all_pages, exclude_self_page_id=page.page_id
+        )
+
+        resolved: list[str] = []
+        broken: list[str] = []
+        seen_resolved: set[str] = set()
+        seen_broken: set[str] = set()
+        for title in ordered_titles:
+            slug = _resolve_wikilink_against_index(title, index)
+            if slug is None:
+                if title not in seen_broken:
+                    seen_broken.add(title)
+                    broken.append(title)
+            elif slug not in seen_resolved:
+                seen_resolved.add(slug)
+                resolved.append(slug)
+
+        page.cross_links = resolved
+        page.cross_links_broken = broken
+        return resolved, broken
+
+    async def _upsert_wiki_graph(
+        self,
+        page: "WikiPage",
+        resolved_slugs: list[str],
+    ) -> None:
+        """Best-effort Neo4j upsert for the page node + REFERENCES edges.
+
+        Tolerates a missing graph store, a graph backend that doesn't
+        expose the wiki helpers (NullGraphStore, NebulaStore until they
+        gain parity), and any runtime Neo4j failure. The maintainer's
+        primary path stays unaffected — page content is already saved
+        to Mongo before this call.
+        """
+        store = self._graph_store
+        if store is None:
+            return
+        if not hasattr(store, "upsert_wiki_page_node"):
+            return
+        if not hasattr(store, "upsert_wiki_reference_edge"):
+            return
+        try:
+            self_slug = page.slug or page.page_id.replace(":", "-")
+            await store.upsert_wiki_page_node(
+                channel_id=page.channel_id,
+                slug=self_slug,
+                kind=page.kind,
+                title=page.title,
+                version=page.version,
+                last_updated=page.updated_at,
+            )
+            for dst_slug in resolved_slugs:
+                if not dst_slug or dst_slug == self_slug:
+                    continue
+                await store.upsert_wiki_reference_edge(
+                    channel_id=page.channel_id,
+                    src_slug=self_slug,
+                    dst_slug=dst_slug,
+                )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.exception(
+                "event=wiki_graph_upsert_failed channel_id=%s page_id=%s",
+                page.channel_id,
+                page.page_id,
+            )
 
     async def _invoke_kind_dispatch_with_retry(
         self,
