@@ -553,6 +553,21 @@ if _mcp_asgi is not None:
 register_health_checks()
 
 
+@app.get("/health", include_in_schema=False)
+async def liveness() -> dict[str, str]:
+    """Lightweight liveness probe — no auth, no DB checks.
+
+    Conventional k8s / Docker / monitoring-tool default endpoint. Pairs
+    with the deep ``/api/health`` (which dials every store and is
+    auth-rate-limited). Returning 200 here silences the relentless 404
+    noise that browser extensions and monitoring agents generate when
+    they probe ``/health`` against any backend on localhost. Use this
+    for "is the process alive" checks; use ``/api/health`` when you
+    need component-level status.
+    """
+    return {"status": "ok"}
+
+
 @app.get("/api/health", response_model=HealthResponse)
 @limiter.limit("60/minute")
 async def health_check(request: Request) -> HealthResponse:
