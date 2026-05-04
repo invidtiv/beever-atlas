@@ -7,6 +7,10 @@ interface Props {
   label?: string;
   /** Optional className applied to the inline (non-fullscreen) wrapper. */
   className?: string;
+  /** Where to place the Enlarge button when not fullscreen. */
+  buttonPlacement?: "overlay" | "inline";
+  /** Horizontal alignment for the non-fullscreen control. */
+  buttonAlign?: "left" | "right";
 }
 
 /**
@@ -21,7 +25,13 @@ interface Props {
  * own container via ResizeObserver (cytoscape already does this in
  * GraphCanvas / WikiGraph).
  */
-export function FullscreenWrapper({ children, label = "Enlarge", className }: Props) {
+export function FullscreenWrapper({
+  children,
+  label = "Enlarge",
+  className,
+  buttonPlacement = "inline",
+  buttonAlign = "right",
+}: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
@@ -73,6 +83,25 @@ export function FullscreenWrapper({ children, label = "Enlarge", className }: Pr
     );
   }
 
+  if (buttonPlacement === "inline") {
+    return (
+      <div className={`flex h-full w-full min-h-0 flex-col ${className ?? ""}`}>
+        <div className={`flex px-4 py-2 ${buttonAlign === "left" ? "justify-start" : "justify-end"}`}>
+          <button
+            type="button"
+            onClick={() => setIsFullscreen(true)}
+            aria-label={label}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs font-medium hover:bg-muted transition-colors shadow-sm"
+          >
+            <Maximize2 size={12} />
+            {label}
+          </button>
+        </div>
+        <div className="min-h-0 flex-1">{children}</div>
+      </div>
+    );
+  }
+
   return (
     <div className={`relative h-full w-full ${className ?? ""}`}>
       {children}
@@ -80,7 +109,7 @@ export function FullscreenWrapper({ children, label = "Enlarge", className }: Pr
         type="button"
         onClick={() => setIsFullscreen(true)}
         aria-label={label}
-        className="absolute right-4 top-4 z-10 inline-flex items-center gap-1.5 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs font-medium hover:bg-muted transition-colors shadow-sm"
+        className={`absolute top-4 z-10 inline-flex items-center gap-1.5 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs font-medium hover:bg-muted transition-colors shadow-sm ${buttonAlign === "left" ? "left-4" : "right-4"}`}
       >
         <Maximize2 size={12} />
         {label}
