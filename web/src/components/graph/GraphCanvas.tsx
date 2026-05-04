@@ -7,12 +7,15 @@ interface GraphCanvasProps {
   entities: GraphEntity[];
   relationships: GraphRelationship[];
   visibleTypes: string[];
-  /** When true, orphan (unconnected) nodes are injected into the canvas */
-  showOrphans: boolean;
+  /** When true, orphan (unconnected) nodes are injected into the canvas.
+   *  Optional — consumers that don't expose an orphan toggle can omit
+   *  this and orphans stay hidden, matching pre-redesign behaviour. */
+  showOrphans?: boolean;
   onSelectEntity: (id: string | null) => void;
   selectedEntityId: string | null;
-  /** Callback so parent can read the current orphan count for the pill */
-  onOrphanCount: (count: number) => void;
+  /** Callback so parent can read the current orphan count for the
+   *  pill. Optional for the same reason as ``showOrphans``. */
+  onOrphanCount?: (count: number) => void;
 }
 
 /** Cache of node positions keyed by entity ID for deterministic layout */
@@ -59,11 +62,15 @@ export function GraphCanvas({
   entities,
   relationships,
   visibleTypes,
-  showOrphans,
+  showOrphans = false,
   onSelectEntity,
   selectedEntityId,
   onOrphanCount,
 }: GraphCanvasProps) {
+  // Stable no-op so the count callback is always callable without
+  // a per-render undefined check. Consumers that DO pass a real
+  // callback get the count; consumers that omit it silently drop it.
+  const safeOnOrphanCount = onOrphanCount ?? (() => undefined);
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
 
@@ -76,9 +83,9 @@ export function GraphCanvas({
     onSelectRef.current = onSelectEntity;
   });
 
-  const onOrphanCountRef = useRef(onOrphanCount);
+  const onOrphanCountRef = useRef<(count: number) => void>(safeOnOrphanCount);
   useLayoutEffect(() => {
-    onOrphanCountRef.current = onOrphanCount;
+    onOrphanCountRef.current = safeOnOrphanCount;
   });
 
   // Main build effect — fires when data or type filter changes.
