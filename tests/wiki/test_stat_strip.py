@@ -285,3 +285,163 @@ def test_compute_signals_glossary_zero_when_not_passed() -> None:
         cluster={"title": "T", "member_facts": [{"memory_text": "MFA used"}]}
     )
     assert signals["glossary_terms_used"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — structured-first numeric_values path
+# ---------------------------------------------------------------------------
+
+
+def test_build_prefers_structured_numeric_values_over_regex() -> None:
+    """When a fact carries structured ``numeric_values``, the builder
+    surfaces them directly without re-running the regex over
+    memory_text. This avoids label-extraction misses on awkwardly-
+    phrased text."""
+    facts = [
+        {
+            "fact_id": "f1",
+            "memory_text": "Numbers are buried in awkward phrasing.",
+            "importance": 9,
+            "message_ts": "2026-04-26T10:00:00Z",
+            "numeric_values": [
+                {
+                    "label": "stars",
+                    "value": "2,396",
+                    "raw_value": 2396,
+                    "unit": "stars",
+                },
+                {
+                    "label": "paid-media equivalent",
+                    "value": "HK$130k",
+                    "raw_value": 130000,
+                    "unit": "HKD",
+                },
+            ],
+        }
+    ]
+    data = build_stat_strip_data(facts)
+    assert len(data["stats"]) == 2
+    assert data["stats"][0]["value"] == "2,396"
+    assert data["stats"][0]["label"] == "stars"
+    assert data["stats"][0]["raw_value"] == 2396
+    assert data["stats"][0]["unit"] == "stars"
+    assert data["stats"][1]["value"] == "HK$130k"
+    assert data["stats"][1]["unit"] == "HKD"
+
+
+def test_build_falls_back_to_regex_when_no_structured_values() -> None:
+    """Pre-Phase-3 facts (no ``numeric_values`` key, or empty list)
+    fall through to the legacy regex path. Verifies the structured-
+    first short-circuit doesn't skip cases with regex-only data."""
+    facts = [
+        {
+            "fact_id": "f1",
+            "memory_text": "Generated 2,396 actions in week 1.",
+            "importance": 9,
+            "message_ts": "2026-04-26T10:00:00Z",
+            # Note: no `numeric_values` key — pre-Phase-3 doc.
+        },
+        {
+            "fact_id": "f2",
+            "memory_text": "Reached 534k impressions in week 2.",
+            "importance": 9,
+            "message_ts": "2026-05-02T10:00:00Z",
+            "numeric_values": [],  # explicit empty — also fall through
+        },
+    ]
+    data = build_stat_strip_data(facts)
+    # Regex path produces 2 stats from the two messages.
+    assert len(data["stats"]) == 2
+    values = {s["value"] for s in data["stats"]}
+    assert values == {"2,396", "534k"}
+
+
+def test_build_structured_dedups_by_value_and_label() -> None:
+    """When two facts emit the same ``(value, label)`` structured
+    pair, only one card surfaces — same dedup contract as the
+    regex path."""
+    facts = [
+        {
+            "fact_id": "f1",
+            "memory_text": "Repo grew.",
+            "numeric_values": [
+                {"label": "stars", "value": "2,396", "raw_value": 2396, "unit": None}
+            ],
+        },
+        {
+            "fact_id": "f2",
+            "memory_text": "Same repo, different fact.",
+            "numeric_values": [
+                {"label": "Stars", "value": "2,396", "raw_value": 2396, "unit": None}
+            ],
+        },
+    ]
+    data = build_stat_strip_data(facts)
+    assert len(data["stats"]) == 1
+
+
+def test_build_structured_caps_at_5() -> None:
+    """The ``_MAX_STATS = 5`` cap applies to the structured path too."""
+    facts = [
+        {
+            "fact_id": "f1",
+            "memory_text": "Many metrics.",
+            "numeric_values": [
+                {
+                    "label": f"metric{i}",
+                    "value": f"{1000 + i}",
+                    "raw_value": 1000 + i,
+                    "unit": None,
+                }
+                for i in range(10)
+            ],
+        }
+    ]
+    data = build_stat_strip_data(facts)
+    assert len(data["stats"]) == 5
+
+
+def test_build_structured_skips_malformed_entries() -> None:
+    """Defensive: missing ``value`` or ``label`` fields are skipped
+    rather than crashing the builder."""
+    facts = [
+        {
+            "fact_id": "f1",
+            "memory_text": "Test.",
+            "numeric_values": [
+                {"value": "2,396"},  # no label
+                {"label": "stars"},  # no value
+                {"label": "actions", "value": "1,200", "raw_value": 1200, "unit": None},
+                "not a dict",  # wrong type
+            ],
+        }
+    ]
+    data = build_stat_strip_data(facts)
+    assert len(data["stats"]) == 1
+    assert data["stats"][0]["label"] == "actions"
+
+
+def test_build_structured_period_from_contributing_facts() -> None:
+    """The ``period`` field uses contributing facts' message_ts for
+    the structured path too — same as regex path."""
+    facts = [
+        {
+            "fact_id": "f1",
+            "memory_text": "Week 1.",
+            "message_ts": "2026-04-26T10:00:00Z",
+            "numeric_values": [
+                {"label": "actions", "value": "2,396", "raw_value": 2396, "unit": None}
+            ],
+        },
+        {
+            "fact_id": "f2",
+            "memory_text": "Week 2.",
+            "message_ts": "2026-05-02T10:00:00Z",
+            "numeric_values": [
+                {"label": "impressions", "value": "534k", "raw_value": 534000, "unit": None}
+            ],
+        },
+    ]
+    data = build_stat_strip_data(facts)
+    assert data["period"]["from"] == "2026-04-26"
+    assert data["period"]["to"] == "2026-05-02"

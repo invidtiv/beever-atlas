@@ -243,13 +243,60 @@ def _date_range_from_facts(facts: list[dict]) -> dict[str, str]:
     return {"from": dates[0], "to": dates[-1]}
 
 
+def _collect_structured_numerics(facts: list[dict]) -> list[dict[str, Any]]:
+    """Phase 3 — pull structured ``numeric_values`` off each fact.
+
+    The fact extractor populates ``numeric_values`` as a list of dicts
+    with keys ``label`` / ``value`` / ``raw_value`` / ``unit``.
+    Returns a flat list of stat-strip-shaped dicts, preserving the
+    fact-order the LLM emitted (which approximates author intent
+    better than regex source order). Items missing ``value`` or
+    ``label`` are skipped so a malformed extraction can't break the
+    builder.
+    """
+    out: list[dict[str, Any]] = []
+    for f in facts:
+        if not isinstance(f, dict):
+            continue
+        nvs = f.get("numeric_values")
+        if not isinstance(nvs, list):
+            continue
+        fact_id = str(f.get("fact_id") or f.get("id") or "")
+        for nv in nvs:
+            if not isinstance(nv, dict):
+                continue
+            raw_value = nv.get("value")
+            raw_label = nv.get("label")
+            if not isinstance(raw_value, str) or not isinstance(raw_label, str):
+                continue
+            value = _strip_safety_markers(raw_value).strip()
+            label = _strip_safety_markers(raw_label).strip()
+            if not value or not label:
+                continue
+            out.append(
+                {
+                    "value": value,
+                    "label": label,
+                    "fact_id": fact_id,
+                    "raw_value": nv.get("raw_value"),
+                    "unit": nv.get("unit"),
+                    "_source_fact": f,
+                }
+            )
+    return out
+
+
 def build_stat_strip_data(facts: list[dict] | None) -> dict[str, Any]:
     """Build the payload the React StatStripModule consumes.
 
-    Walks each fact's text once, extracts every stat-shaped numeric
-    + the noun phrase that follows, dedups by ``(value, label)``,
-    caps at 5 entries (highest-importance facts win the seats), and
-    attaches a ``period`` derived from the contributing facts' dates.
+    Phase 3 — prefers structured ``numeric_values`` from the extractor
+    when any are present; falls back to regex detection on
+    ``memory_text`` when the structured path produces nothing (covers
+    pre-Phase-3 documents and facts where the extractor didn't classify
+    the number).
+
+    The structured-first path dedups by ``(value, label)``, caps at 5
+    entries, and attaches a ``period`` derived from contributing facts.
 
     Returns:
         {
@@ -260,7 +307,8 @@ def build_stat_strip_data(facts: list[dict] | None) -> dict[str, Any]:
               "value": "2,396",
               "label": "actions",
               "fact_id": "f_xyz",
-              "raw_value": 2396.0
+              "raw_value": 2396.0,
+              "unit": "USD" | null
             },
             ...
           ],
@@ -273,6 +321,35 @@ def build_stat_strip_data(facts: list[dict] | None) -> dict[str, Any]:
             "renderer_kind": "frontend",
             "stats": [],
             "period": {"from": "", "to": ""},
+        }
+
+    # ---- Phase 3 structured-first path -------------------------------
+    structured = _collect_structured_numerics(
+        [f for f in facts if isinstance(f, dict)]
+    )
+    if structured:
+        seen: set[tuple[str, str]] = set()
+        deduped: list[dict[str, Any]] = []
+        contributing: list[dict] = []
+        for s in structured:
+            key = (s["value"], s["label"].lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            src = s.pop("_source_fact", None)
+            deduped.append(s)
+            if isinstance(src, dict) and src not in contributing:
+                contributing.append(src)
+            if len(deduped) >= _MAX_STATS:
+                break
+        period = _date_range_from_facts(contributing) if contributing else {
+            "from": "", "to": "",
+        }
+        return {
+            "label": "Stats",
+            "renderer_kind": "frontend",
+            "stats": deduped,
+            "period": period,
         }
 
     # Sort facts by importance DESC so the highest-importance facts

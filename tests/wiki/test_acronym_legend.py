@@ -169,3 +169,104 @@ def test_build_caps_at_30_items() -> None:
     facts = [{"memory_text": " ".join(f"TERM{i}" for i in range(40))}]
     data = build_acronym_legend_data(glossary, facts)
     assert len(data["items"]) == 30
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — structured-first glossary_terms path
+# ---------------------------------------------------------------------------
+
+
+def test_build_prefers_structured_glossary_terms() -> None:
+    """When facts carry structured ``glossary_terms``, the builder
+    filters the channel glossary against THAT set rather than
+    re-scanning fact bodies. Avoids regex misses on awkward casing
+    or substring conflicts."""
+    glossary = [
+        {"term": "MFA", "definition": "Multi-Factor Authentication"},
+        {"term": "OIDC", "definition": "OpenID Connect"},
+        {"term": "SAML", "definition": "Security Assertion Markup Language"},
+    ]
+    # The fact body does NOT mention MFA / OIDC at all (e.g. paraphrased
+    # downstream), but the extractor recorded them in glossary_terms.
+    # The structured path should still surface them.
+    facts = [
+        {
+            "memory_text": "Auth migration story (no terms in body).",
+            "glossary_terms": ["MFA", "OIDC"],
+        },
+    ]
+    data = build_acronym_legend_data(glossary, facts)
+    terms = [it["term"] for it in data["items"]]
+    assert "MFA" in terms
+    assert "OIDC" in terms
+    assert "SAML" not in terms
+
+
+def test_build_structured_path_case_sensitive_for_acronyms() -> None:
+    """ALL-CAPS structured terms match case-sensitively against the
+    glossary so ``mfa`` (lowercase) doesn't cross-match ``MFA``."""
+    glossary = [{"term": "MFA", "definition": "Multi-Factor Authentication"}]
+    facts = [{"memory_text": "irrelevant", "glossary_terms": ["mfa"]}]
+    data = build_acronym_legend_data(glossary, facts)
+    # Lowercase structured term doesn't match the all-caps glossary
+    # entry — preserves the regex path's case-sensitivity contract.
+    assert data["items"] == []
+
+
+def test_build_structured_path_phrases_case_insensitive() -> None:
+    """Multi-word / non-acronym structured terms match
+    case-insensitively (matches the regex path's ``flags=IGNORECASE``
+    branch)."""
+    glossary = [{"term": "wiki compiler", "definition": "..."}]
+    facts = [{"memory_text": "x", "glossary_terms": ["Wiki Compiler"]}]
+    data = build_acronym_legend_data(glossary, facts)
+    assert len(data["items"]) == 1
+    assert data["items"][0]["term"] == "wiki compiler"
+
+
+def test_build_falls_back_to_regex_when_no_structured_terms() -> None:
+    """Pre-Phase-3 facts (no ``glossary_terms`` key, or empty list)
+    fall through to the regex word-boundary path."""
+    glossary = [
+        {"term": "MFA", "definition": "Multi-Factor Authentication"},
+        {"term": "SAML", "definition": "unused"},
+    ]
+    facts = [
+        # No glossary_terms key — pre-Phase-3 doc.
+        {"memory_text": "Rolled out MFA org-wide."},
+    ]
+    data = build_acronym_legend_data(glossary, facts)
+    terms = [it["term"] for it in data["items"]]
+    assert terms == ["MFA"]
+
+
+def test_build_falls_back_when_glossary_terms_is_empty_list() -> None:
+    """Explicit empty list means the extractor scanned but found no
+    candidates — still triggers the regex fallback so we don't miss
+    terms the extractor couldn't classify."""
+    glossary = [{"term": "MFA"}]
+    facts = [{"memory_text": "MFA rolled out", "glossary_terms": []}]
+    data = build_acronym_legend_data(glossary, facts)
+    # Empty structured list → fall through to regex path → finds MFA.
+    assert len(data["items"]) == 1
+    assert data["items"][0]["term"] == "MFA"
+
+
+def test_build_structured_filters_glossary_to_structured_subset() -> None:
+    """Defensive: the structured set acts as a strict filter — terms
+    in the channel glossary that AREN'T in the per-fact set are
+    dropped, even if they'd match by regex."""
+    glossary = [
+        {"term": "MFA", "definition": "Multi-Factor Authentication"},
+        {"term": "OIDC", "definition": "OpenID Connect"},
+    ]
+    # Body mentions both, but extractor only flagged OIDC.
+    facts = [
+        {
+            "memory_text": "We use MFA + OIDC together.",
+            "glossary_terms": ["OIDC"],
+        }
+    ]
+    data = build_acronym_legend_data(glossary, facts)
+    terms = [it["term"] for it in data["items"]]
+    assert terms == ["OIDC"]

@@ -104,16 +104,44 @@ def count_glossary_terms_used(
     return hits
 
 
+def _collect_structured_terms(facts: list[dict]) -> set[str]:
+    """Phase 3 — pull structured ``glossary_terms`` off each fact.
+
+    The fact extractor populates ``glossary_terms`` with candidate
+    acronyms / domain terms appearing in the fact body. Returns a
+    set of stripped term strings; empty when no fact carries any.
+    Used by ``build_acronym_legend_data`` as the structured-first
+    path before falling back to regex scanning.
+    """
+    out: set[str] = set()
+    for f in facts:
+        if not isinstance(f, dict):
+            continue
+        terms = f.get("glossary_terms")
+        if not isinstance(terms, list):
+            continue
+        for t in terms:
+            if isinstance(t, str):
+                cleaned = t.strip()
+                if cleaned:
+                    out.add(cleaned)
+    return out
+
+
 def build_acronym_legend_data(
     glossary: list[dict] | None,
     facts: list[dict] | None,
 ) -> dict[str, Any]:
     """Build the payload the React AcronymLegendModule consumes.
 
-    Filters the glossary to terms that ACTUALLY appear on this page
-    (matched against fact bodies via ``\\bTERM\\b``). Cap returned
-    items at 30 — beyond that the legend stops being a reading aid
-    and starts competing with the glossary page.
+    Phase 3 — when any fact carries structured ``glossary_terms``,
+    filter the channel glossary against THAT set (case-sensitive for
+    acronyms, case-insensitive for phrases — same ALL-CAPS heuristic
+    as the regex path). When no fact carries structured terms, fall
+    back to regex word-boundary scanning of fact bodies.
+
+    Cap returned items at 30 — beyond that the legend stops being a
+    reading aid and starts competing with the glossary page.
 
     Returns:
         {
@@ -134,6 +162,63 @@ def build_acronym_legend_data(
 
     from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
 
+    # ---- Phase 3 structured-first path -----------------------------
+    structured_terms = _collect_structured_terms(
+        [f for f in facts if isinstance(f, dict)]
+    )
+
+    items: list[dict[str, Any]] = []
+    seen_terms: set[str] = set()
+
+    if structured_terms:
+        # Build a normalized lookup: ALL-CAPS acronyms match case-
+        # sensitively; other terms case-insensitively. This mirrors
+        # the regex path's ``_term_pattern`` policy so structured
+        # vs fallback yield the same legend for the same content.
+        structured_acronyms = {t for t in structured_terms if t.isupper()}
+        structured_lc = {t.lower() for t in structured_terms if not t.isupper()}
+        for entry in glossary:
+            if isinstance(entry, dict):
+                term = _normalize_term(entry.get("term"))
+                definition = str(entry.get("definition") or "").strip()
+                first_mentioned = str(
+                    entry.get("first_mentioned_by")
+                    or entry.get("author")
+                    or ""
+                ).strip()
+            elif isinstance(entry, str):
+                term = _normalize_term(entry)
+                definition = ""
+                first_mentioned = ""
+            else:
+                continue
+            if not term or term.lower() in seen_terms:
+                continue
+            is_acronym = term.isupper() and term.replace(" ", "").isalnum() and len(term) >= 2
+            matched = (
+                term in structured_acronyms
+                if is_acronym
+                else term.lower() in structured_lc
+            )
+            if not matched:
+                continue
+            seen_terms.add(term.lower())
+            items.append(
+                {
+                    "term": term,
+                    "definition": definition,
+                    "first_mentioned_by": first_mentioned,
+                }
+            )
+            if len(items) >= 30:
+                break
+        return {
+            "label": "Terms used on this page",
+            "renderer_kind": "frontend",
+            "items": items,
+        }
+
+    # ---- Legacy regex fallback -------------------------------------
     bodies: list[str] = []
     for f in facts:
         if not isinstance(f, dict):
@@ -147,8 +232,6 @@ def build_acronym_legend_data(
         if body:
             bodies.append(body)
 
-    items: list[dict[str, Any]] = []
-    seen_terms: set[str] = set()
     for entry in glossary:
         if isinstance(entry, dict):
             term = _normalize_term(entry.get("term"))

@@ -227,6 +227,35 @@ def build_decision_banner_data(
         or ""
     )
 
+    # Phase 3 fields — read from structured extraction. The fields
+    # default to None / [] for pre-Phase-3 documents so the renderer
+    # hides empty rows automatically. We strip safety markers and
+    # whitespace defensively because the LLM output traverses the
+    # same prompt-safety chain as memory_text.
+    raw_rationale = decision_fact.get("rationale")
+    rationale: str | None = None
+    if isinstance(raw_rationale, str):
+        cleaned_rationale = _strip_safety_markers(raw_rationale).strip()
+        rationale = cleaned_rationale or None
+
+    alternatives_rejected: list[str] = []
+    raw_alts = decision_fact.get("alternatives_considered")
+    if isinstance(raw_alts, list):
+        for alt in raw_alts:
+            if isinstance(alt, str):
+                cleaned = _strip_safety_markers(alt).strip()
+                if cleaned:
+                    alternatives_rejected.append(cleaned)
+
+    consequences_open: list[str] = []
+    raw_cons = decision_fact.get("consequences_open")
+    if isinstance(raw_cons, list):
+        for cons in raw_cons:
+            if isinstance(cons, str):
+                cleaned = _strip_safety_markers(cons).strip()
+                if cleaned:
+                    consequences_open.append(cleaned)
+
     return {
         "label": "Decision",
         "renderer_kind": "frontend",
@@ -234,9 +263,9 @@ def build_decision_banner_data(
         "body": rest,
         "decided_by": {"name": author_name, "fact_id": fact_id},
         "decided_at": decided_at,
-        "rationale": None,                # Phase 3 will populate
-        "alternatives_rejected": [],      # Phase 3 will populate
-        "consequences_open": [],          # Phase 3 will populate
+        "rationale": rationale,
+        "alternatives_rejected": alternatives_rejected,
+        "consequences_open": consequences_open,
         "fact_id": fact_id,
         "source_url": permalink,
     }

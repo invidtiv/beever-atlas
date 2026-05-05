@@ -194,6 +194,71 @@ For each fact, copy from the source message:
 
 ---
 
+## Phase 3 — enrichment fields (OPTIONAL — populate when applicable)
+
+For each extracted fact, if it makes sense given the source message,
+also populate these structured fields. Skip them entirely (do NOT
+emit empty strings or fabrications) when the source doesn't support
+the field.
+
+### When `fact_type == "decision"`:
+
+- `rationale`: the SINGLE-sentence justification — what the
+  decision is FOR. Look for "because", "since", "to ensure",
+  "in order to" clauses. Examples:
+    Source: "Adopt CLA — provides relicensing flexibility for
+            commercial forks."
+    rationale: "Provides relicensing flexibility for commercial forks."
+
+- `alternatives_considered`: a list of options that were
+  considered and rejected. Look for "vs", "rather than", "rejected",
+  "instead of", "considered". Each item is 1-3 words naming the
+  alternative. Examples:
+    Source: "Adopt Copyright-assignment CLA. DCO and License-grant
+            CLA were considered but rejected."
+    alternatives_considered: ["DCO", "License-grant CLA"]
+
+- `consequences_open`: open questions raised in the SAME thread
+  about downstream effects. Each item is a 1-sentence question.
+  Examples:
+    Source: "Adopt CLA. But will contributors hesitate to sign?
+            Need a CLA bot before public PRs."
+    consequences_open: [
+      "Will contributors hesitate to sign?",
+      "Need CLA bot before public PRs"
+    ]
+
+### When `fact_type in {{"opinion", "recommendation"}}`:
+
+- `sentiment`: one of:
+    "neutral" — descriptive, no value judgment.
+    "concerning" — raises a concern or warning.
+    "positive" — endorsement or favorable view.
+    "recommendation" — explicit suggestion to do something.
+  Default to `null` if uncertain — do NOT guess.
+
+### For ANY `fact_type`:
+
+- `numeric_values`: list of significant numbers (≥ 100 OR currency
+  values OR percentages with explicit context). Each item:
+    {{
+      "label": "noun describing what's being counted (e.g. 'stars',
+                'impressions', 'paid-media equivalent')",
+      "value": "display form (e.g. '2,396', '534k', 'HK$130k')",
+      "raw_value": 2396,
+      "unit": "USD" | "HKD" | "stars" | etc. — null when no unit
+    }}
+  Skip throwaway numbers (years, version numbers like "v0.2",
+  page numbers). Cap at 5 items per fact.
+
+- `glossary_terms`: list of acronyms (3+ uppercase letters)
+  or domain-specific terms used in this fact's text. The wiki
+  layer filters this against the channel glossary; you don't
+  need to know which terms ARE in the glossary — just list
+  candidates. Examples: ["CLA", "DCO", "MFA", "RAG", "SAML"]
+
+---
+
 ### Output format
 Return a single JSON object:
 ```json
@@ -211,12 +276,25 @@ Return a single JSON object:
       "source_message_id": "<msg_id, e.g. msg-0>",
       "author_id": "<user id>",
       "author_name": "<display name>",
-      "message_ts": "<timestamp>"
+      "message_ts": "<timestamp>",
+      "rationale": "<optional — decisions only>",
+      "alternatives_considered": ["<optional — decisions only>"],
+      "consequences_open": ["<optional — decisions only>"],
+      "numeric_values": [
+        {{"label": "<noun>", "value": "<display>", "raw_value": <number>, "unit": "<unit or null>"}}
+      ],
+      "sentiment": "<optional — opinions/recommendations only>",
+      "glossary_terms": ["<optional — acronyms/domain terms>"]
     }}
   ],
   "skip_reason": null
 }}
 ```
+
+The Phase 3 enrichment fields (`rationale`, `alternatives_considered`,
+`consequences_open`, `numeric_values`, `sentiment`, `glossary_terms`)
+are ALL OPTIONAL — omit them entirely when they don't apply. Never emit
+empty placeholder strings or fabricated values just to populate the field.
 
 If the entire batch contains no extractable facts (only greetings, noise, or off-topic content),
 return `{{"facts": [], "skip_reason": "<brief reason>"}}`.

@@ -80,12 +80,99 @@ def test_no_terminator_falls_back_to_whole_text_as_headline() -> None:
 
 def test_phase_3_placeholders_default_to_null_and_empty() -> None:
     """``rationale`` is ``None``; ``alternatives_rejected`` and
-    ``consequences_open`` are empty lists. Phase 3 will populate them
-    without changing the contract."""
+    ``consequences_open`` are empty lists when the fact carries no
+    Phase 3 enrichment — backward compatibility for pre-Phase-3
+    documents."""
     out = build_decision_banner_data([_decision_fact()])
     assert out["rationale"] is None
     assert out["alternatives_rejected"] == []
     assert out["consequences_open"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — populated rationale / alternatives / consequences
+# ---------------------------------------------------------------------------
+
+
+def test_phase_3_populates_rationale_from_structured_field() -> None:
+    """When the extractor populates ``rationale``, the banner surfaces
+    it on the ``rationale`` payload key (frontend renders the
+    'Because:' row)."""
+    fact = _decision_fact()
+    fact["rationale"] = "Provides relicensing flexibility for commercial forks."
+    out = build_decision_banner_data([fact])
+    assert out["rationale"] == "Provides relicensing flexibility for commercial forks."
+
+
+def test_phase_3_populates_alternatives_from_structured_field() -> None:
+    """``alternatives_considered`` (extractor field) flows to
+    ``alternatives_rejected`` (banner payload key, frontend-facing
+    name) preserving order and content."""
+    fact = _decision_fact()
+    fact["alternatives_considered"] = ["DCO", "License-grant CLA"]
+    out = build_decision_banner_data([fact])
+    assert out["alternatives_rejected"] == ["DCO", "License-grant CLA"]
+
+
+def test_phase_3_populates_consequences_open_from_structured_field() -> None:
+    """``consequences_open`` flows through unchanged."""
+    fact = _decision_fact()
+    fact["consequences_open"] = [
+        "Will external contributors hesitate to sign?",
+        "Need CLA bot before public PRs",
+    ]
+    out = build_decision_banner_data([fact])
+    assert out["consequences_open"] == [
+        "Will external contributors hesitate to sign?",
+        "Need CLA bot before public PRs",
+    ]
+
+
+def test_phase_3_filters_empty_string_items_from_lists() -> None:
+    """Defensive: malformed extraction may emit empty / whitespace
+    items. The builder strips and skips them rather than rendering a
+    blank chip."""
+    fact = _decision_fact()
+    fact["alternatives_considered"] = ["DCO", "  ", "", "License-grant CLA"]
+    fact["consequences_open"] = ["", "Will it work?", "   "]
+    out = build_decision_banner_data([fact])
+    assert out["alternatives_rejected"] == ["DCO", "License-grant CLA"]
+    assert out["consequences_open"] == ["Will it work?"]
+
+
+def test_phase_3_handles_non_list_alternatives_defensively() -> None:
+    """If the extractor accidentally emits a string instead of a list
+    for ``alternatives_considered``, the builder returns ``[]``
+    rather than crashing — same defensive pattern used elsewhere."""
+    fact = _decision_fact()
+    fact["alternatives_considered"] = "DCO, License-grant CLA"  # wrong type
+    fact["consequences_open"] = None
+    out = build_decision_banner_data([fact])
+    assert out["alternatives_rejected"] == []
+    assert out["consequences_open"] == []
+
+
+def test_phase_3_rationale_empty_string_becomes_null() -> None:
+    """An explicit empty / whitespace ``rationale`` collapses to
+    ``None`` so the frontend hides the row consistently."""
+    fact = _decision_fact()
+    fact["rationale"] = "   "
+    out = build_decision_banner_data([fact])
+    assert out["rationale"] is None
+
+
+def test_phase_3_full_payload_renders_all_three_rows() -> None:
+    """End-to-end: a decision fact with every Phase 3 field populated
+    surfaces all three rows on the banner payload."""
+    fact = _decision_fact(text="Adopt CLA. Use Copyright-assignment.")
+    fact["rationale"] = "Provides relicensing flexibility."
+    fact["alternatives_considered"] = ["DCO", "License-grant CLA"]
+    fact["consequences_open"] = ["Will contributors hesitate?"]
+    out = build_decision_banner_data([fact])
+    assert out["decision"] == "Adopt CLA."
+    assert out["rationale"] == "Provides relicensing flexibility."
+    assert out["alternatives_rejected"] == ["DCO", "License-grant CLA"]
+    assert out["consequences_open"] == ["Will contributors hesitate?"]
 
 
 # ---------------------------------------------------------------------------

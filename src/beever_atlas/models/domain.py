@@ -50,6 +50,43 @@ class AtomicFact(BaseModel):
         ""  # Provenance marker, e.g. "heuristic_word_overlap" for low-confidence attribution
     )
 
+    # Phase 3 extraction enrichment — additive, all optional with safe
+    # defaults so pre-Phase-3 documents deserialize cleanly without
+    # migration. The fact extractor prompt populates these fields when
+    # applicable; consumers (decision_banner, stat_strip, acronym_legend)
+    # fall back to legacy behavior when fields are empty/null.
+    rationale: str | None = None
+    """For ``fact_type == "decision"``: the 'because' justification —
+    a single sentence explaining WHY the decision was made. Null when
+    the source message did not include explicit justification."""
+
+    alternatives_considered: list[str] = Field(default_factory=list)
+    """For ``fact_type == "decision"``: alternative options that were
+    weighed and rejected. Each item is a 1-line description.
+    Empty list when no alternatives were discussed in the source."""
+
+    consequences_open: list[str] = Field(default_factory=list)
+    """For ``fact_type == "decision"``: open questions raised about
+    downstream effects of this decision. Each item is a 1-line
+    question. Empty list when no consequences surfaced."""
+
+    numeric_values: list[dict] = Field(default_factory=list)
+    """Structured numeric extractions: each item is a dict with
+    keys: ``label`` (str), ``value`` (str — display form, e.g. "2,396"),
+    ``raw_value`` (int|float — for sorting/trends), ``unit`` (str|None).
+    Surfaced via ``stat_strip``; falls back to regex when empty."""
+
+    sentiment: str | None = None
+    """For ``fact_type in {"opinion", "recommendation"}``: one of
+    ``"neutral" | "concerning" | "positive" | "recommendation"``.
+    Null for non-opinion facts. Surfaced via ``quote_highlights`` color."""
+
+    glossary_terms: list[str] = Field(default_factory=list)
+    """Acronyms (≥3 uppercase letters) or known domain terms that
+    appear in this fact's body. Used by ``acronym_legend`` to filter
+    the channel glossary to terms actually used. Empty list when no
+    terms detected."""
+
     @staticmethod
     def deterministic_id(memory_text: str, entity_names: list[str]) -> str:
         """Generate a content-derived deterministic UUID for idempotent upserts.
