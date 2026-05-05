@@ -822,6 +822,524 @@ def register_retrieval_tools(mcp: FastMCP) -> None:
             )
             return {"channel_id": channel_id, "nodes": [], "edges": []}
 
+    # ----------------------------------------------------------------------
+    # Round 6 — targeted LLM-agent retrieval (per-module + cross-page facts)
+    # ----------------------------------------------------------------------
+    # ``read_wiki_page`` returns the entire page document. For agents that
+    # only need a slice (e.g. one module's structured data, all decisions
+    # made by a particular author, or the source message backing a fact),
+    # downloading the whole page wastes tokens. The five tools below offer
+    # targeted handles:
+    #   - ``read_wiki_module`` — one module's data payload
+    #   - ``find_decisions``  — cross-page decision query
+    #   - ``get_tensions``    — cross-page tension query (forward-compat)
+    #   - ``find_facts``      — text-search facts with type filter
+    #   - ``read_provenance`` — original source message for one fact
+    # All five are read-only and apply the same channel ACL gate as
+    # ``read_wiki_page``.
+
+    @mcp.tool(name="read_wiki_module")
+    async def read_wiki_module(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        page_slug: Annotated[
+            str,
+            "The slug of the wiki page that hosts the module",
+        ],
+        anchor: Annotated[
+            str,
+            "The module anchor — stable in-page id, e.g. 'key-facts', "
+            "'decision-banner', 'tension-callout'",
+        ],
+        ctx: Context,
+        target_lang: Annotated[str, "Target language tag (BCP-47)"] = "en",
+    ) -> dict:
+        """Fetch a single module's structured payload from a wiki page.
+
+        Returns the module's ``data`` dict (e.g. for ``key_facts``, the
+        items list; for ``decision_banner``, the rationale + alternatives
+        rejected). Use this when an agent only needs one slice of a page
+        and reading the entire page via ``read_wiki_page`` would waste
+        tokens.
+
+        Returns ``{error: "wiki_page_not_found"}`` when the page does not
+        exist, ``{error: "module_not_found"}`` when the page exists but
+        does not contain the named anchor, or
+        ``{error: "channel_access_denied"}`` on ACL denial.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return {"error": "authentication_missing"}
+        err = (
+            _validate_id(channel_id, "channel_id")
+            or _validate_id(page_slug, "page_slug")
+            or _validate_id(anchor, "anchor")
+        )
+        if err:
+            return err
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return {"error": "channel_access_denied", "channel_id": channel_id}
+
+        try:
+            from beever_atlas.stores import get_stores
+            from beever_atlas.wiki.page_store import WikiPageStore
+
+            stores = get_stores()
+            page_store = WikiPageStore(db=stores.mongodb.db)
+            page = await page_store.get_page_by_slug(
+                channel_id, page_slug, target_lang=target_lang
+            )
+            if page is None:
+                return {"error": "wiki_page_not_found", "slug": page_slug}
+            for module in page.modules or []:
+                if not isinstance(module, dict):
+                    continue
+                if module.get("anchor") == anchor:
+                    return {
+                        "channel_id": channel_id,
+                        "page_slug": page_slug,
+                        "anchor": anchor,
+                        "module_id": module.get("id", ""),
+                        "data": module.get("data") or {},
+                    }
+            return {"error": "module_not_found", "slug": page_slug, "anchor": anchor}
+        except Exception:
+            logger.exception(
+                "read_wiki_module: failed principal=%s channel=%s slug=%s anchor=%s",
+                principal_id,
+                channel_id,
+                page_slug,
+                anchor,
+            )
+            return {"error": "wiki_module_read_failed"}
+
+    @mcp.tool(name="find_decisions")
+    async def find_decisions(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        ctx: Context,
+        since: Annotated[
+            str | None,
+            "Optional ISO-8601 date prefix (e.g. '2026-04-01'); only "
+            "decisions on or after this date are returned",
+        ] = None,
+        author: Annotated[
+            str | None,
+            "Optional exact-match author_name filter",
+        ] = None,
+        limit: Annotated[int, "Maximum number of decisions to return (1–100)"] = 50,
+    ) -> list[dict]:
+        """Find every decision recorded in a channel's wiki / fact store.
+
+        Returns a list of decisions sorted by ``decided_at`` descending.
+        Each entry includes ``fact_id``, ``decision`` (first sentence of
+        the fact's memory_text), ``decided_by`` (author_name),
+        ``decided_at`` (YYYY-MM-DD prefix of message_ts), ``rationale``
+        (Phase 3 enrichment — null when not yet extracted),
+        ``alternatives_rejected``, and ``page_slug`` (the wiki page where
+        this decision lives, when known — empty string when no host page
+        has integrated this decision yet).
+
+        Filters:
+        - ``since="2026-04-01"`` returns decisions whose ``message_ts``
+          starts on or after that date.
+        - ``author="Alice Chen"`` returns decisions with exact-match
+          ``author_name``.
+
+        Use this instead of ``find_facts(fact_type="decision")`` when you
+        also need rationale / alternatives_rejected on each result.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return []
+        err = _validate_id(channel_id, "channel_id")
+        if err:
+            return []
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return []
+
+        # Clamp limit so a misbehaving caller cannot drain the entire
+        # channel's decision history through one call. None-check rather
+        # than ``or`` so ``limit=0`` clamps up to 1 instead of falling
+        # back to the default.
+        raw_limit = 50 if limit is None else int(limit)
+        limit = max(1, min(raw_limit, 100))
+
+        try:
+            from beever_atlas.models import MemoryFilters
+            from beever_atlas.stores import get_stores
+            from beever_atlas.wiki.page_store import WikiPageStore
+
+            stores = get_stores()
+
+            # 1) Pull decision-typed facts from the Weaviate store.
+            #    ``list_facts`` does NOT support fact_type filtering today,
+            #    so we over-fetch and filter in-memory. With limit ≤ 100
+            #    this is bounded.
+            facts_page = await stores.weaviate.list_facts(
+                channel_id=channel_id,
+                filters=MemoryFilters(),
+                page=1,
+                limit=max(limit * 4, 200),  # over-fetch headroom for the type filter
+            )
+            decisions = [f for f in facts_page.memories if f.fact_type == "decision"]
+
+            # 2) Apply optional ``since`` / ``author`` filters.
+            if since:
+                decisions = [f for f in decisions if (f.message_ts or "") >= since]
+            if author:
+                decisions = [f for f in decisions if f.author_name == author]
+
+            # 3) Sort by message_ts DESC, truncate to limit.
+            decisions.sort(key=lambda f: f.message_ts or "", reverse=True)
+            decisions = decisions[:limit]
+
+            # 4) Build a fact_id → page_slug index from the wiki pages so
+            #    each decision points back to its host page. Built once
+            #    per call rather than per-fact so this stays cheap on
+            #    larger channels.
+            page_store = WikiPageStore(db=stores.mongodb.db)
+            try:
+                pages = await page_store.list_pages(channel_id, target_lang="en")
+            except Exception:
+                pages = []
+            fact_to_slug: dict[str, str] = {}
+            for page in pages:
+                slug = page.slug or ""
+                if not slug:
+                    continue
+                for fid in page.last_facts_seen or []:
+                    fact_to_slug.setdefault(fid, slug)
+
+            results: list[dict] = []
+            for fact in decisions:
+                memory_text = fact.memory_text or ""
+                first_sentence = memory_text.split(".", 1)[0].strip()
+                decided_at = ""
+                if fact.message_ts:
+                    decided_at = str(fact.message_ts)[:10]
+                results.append(
+                    {
+                        "fact_id": fact.id,
+                        "decision": first_sentence or memory_text,
+                        "decided_by": fact.author_name or "",
+                        "decided_at": decided_at,
+                        "rationale": fact.rationale,
+                        "alternatives_rejected": list(fact.alternatives_considered or []),
+                        "page_slug": fact_to_slug.get(fact.id, ""),
+                    }
+                )
+            return results
+        except Exception:
+            logger.exception(
+                "find_decisions: failed principal=%s channel=%s",
+                principal_id,
+                channel_id,
+            )
+            return []
+
+    @mcp.tool(name="get_tensions")
+    async def get_tensions(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        ctx: Context,
+        status: Annotated[
+            str | None,
+            "Optional status filter — 'open' | 'blocked' | 'deferred'",
+        ] = None,
+    ) -> list[dict]:
+        """List unresolved tensions across the channel's wiki.
+
+        Walks every wiki page for the channel and surfaces ``tension_callout``
+        modules. Each result carries ``tension_id``, ``title``, ``status``,
+        ``since`` (YYYY-MM-DD), ``positions`` (list of ``{author, stance,
+        fact_id}``), and ``page_slug`` (the page where the tension lives).
+
+        Forward-compatible: tension detection is not yet shipped on this
+        track, so this tool returns ``[]`` for most channels today. The
+        wiring is in place so the same call starts returning real data
+        once tension detection lands without an API change.
+
+        Filters: ``status="open"`` keeps only tensions whose status field
+        equals the requested value. With no filter, every tension on
+        every page is returned.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return []
+        err = _validate_id(channel_id, "channel_id")
+        if err:
+            return []
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return []
+
+        try:
+            from beever_atlas.stores import get_stores
+            from beever_atlas.wiki.page_store import WikiPageStore
+
+            stores = get_stores()
+            page_store = WikiPageStore(db=stores.mongodb.db)
+            pages = await page_store.list_pages(channel_id, target_lang="en")
+
+            tensions: list[dict] = []
+            for page in pages:
+                slug = page.slug or ""
+                for module in page.modules or []:
+                    if not isinstance(module, dict):
+                        continue
+                    if module.get("id") != "tension_callout":
+                        continue
+                    data = module.get("data") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    # ``data`` may carry a single tension or a ``tensions``
+                    # list — accept both shapes so the same wire format
+                    # works whichever the renderer settles on.
+                    raw_items = data.get("tensions")
+                    if isinstance(raw_items, list):
+                        items = raw_items
+                    else:
+                        items = [data]
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        tension_status = item.get("status") or "open"
+                        if status and tension_status != status:
+                            continue
+                        since = item.get("since") or ""
+                        if since and len(since) > 10:
+                            since = since[:10]
+                        tensions.append(
+                            {
+                                "tension_id": item.get("tension_id")
+                                or item.get("id")
+                                or "",
+                                "title": item.get("title") or item.get("summary") or "",
+                                "status": tension_status,
+                                "since": since,
+                                "positions": list(item.get("positions") or []),
+                                "page_slug": slug,
+                            }
+                        )
+            return tensions
+        except Exception:
+            logger.exception(
+                "get_tensions: failed principal=%s channel=%s",
+                principal_id,
+                channel_id,
+            )
+            return []
+
+    @mcp.tool(name="find_facts")
+    async def find_facts(
+        channel_id: Annotated[str, "The channel id (from list_channels)"],
+        query: Annotated[str, "Case-insensitive substring to match in memory_text"],
+        ctx: Context,
+        fact_type: Annotated[
+            str | None,
+            "Optional type filter — 'decision' | 'observation' | 'opinion' | "
+            "'question' | 'action_item'",
+        ] = None,
+        limit: Annotated[int, "Maximum number of facts to return (1–100)"] = 20,
+    ) -> list[dict]:
+        """Search facts by text query within a channel.
+
+        Returns up to ``limit`` facts whose ``memory_text`` contains
+        ``query`` (case-insensitive substring), optionally filtered by
+        ``fact_type``. Each result carries ``fact_id``, ``memory_text``,
+        ``fact_type``, ``importance``, ``author_name``, ``message_ts``,
+        and ``page_slug`` (the wiki page where this fact lives, or empty
+        when not yet integrated).
+
+        Use this when ``ask_channel`` would over-synthesize and you just
+        want raw fact rows that mention a keyword. For semantic / vector
+        search use ``search_channel_facts`` instead — this tool is a
+        deterministic substring filter, not a ranked retriever.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return []
+        err = _validate_id(channel_id, "channel_id")
+        if err:
+            return []
+        if not query:
+            return []
+        try:
+            from beever_atlas.infra.channel_access import assert_channel_access
+
+            await assert_channel_access(principal_id, channel_id)
+        except Exception:
+            return []
+
+        # Clamp limit (documented 1–100). Use a None-check rather than
+        # ``or`` so an explicit ``limit=0`` clamps up to 1 instead of
+        # silently inheriting the default 20.
+        raw_limit = 20 if limit is None else int(limit)
+        limit = max(1, min(raw_limit, 100))
+        needle = query.lower()
+        importance_rank = {"critical": 3, "high": 2, "medium": 1, "low": 0}
+
+        try:
+            from beever_atlas.models import MemoryFilters
+            from beever_atlas.stores import get_stores
+            from beever_atlas.wiki.page_store import WikiPageStore
+
+            stores = get_stores()
+            facts_page = await stores.weaviate.list_facts(
+                channel_id=channel_id,
+                filters=MemoryFilters(),
+                page=1,
+                # Over-fetch so the in-memory substring filter has enough
+                # candidates after the optional fact_type prune. Bounded
+                # at ~500 so a misbehaving caller cannot stream the entire
+                # channel through one tool call.
+                limit=min(500, max(limit * 5, 100)),
+            )
+            matches = []
+            for fact in facts_page.memories:
+                if fact_type and fact.fact_type != fact_type:
+                    continue
+                if needle not in (fact.memory_text or "").lower():
+                    continue
+                matches.append(fact)
+
+            # Sort: importance DESC then message_ts DESC.
+            matches.sort(
+                key=lambda f: (
+                    importance_rank.get((f.importance or "").lower(), 0),
+                    f.message_ts or "",
+                ),
+                reverse=True,
+            )
+            matches = matches[:limit]
+
+            page_store = WikiPageStore(db=stores.mongodb.db)
+            try:
+                pages = await page_store.list_pages(channel_id, target_lang="en")
+            except Exception:
+                pages = []
+            fact_to_slug: dict[str, str] = {}
+            for page in pages:
+                slug = page.slug or ""
+                if not slug:
+                    continue
+                for fid in page.last_facts_seen or []:
+                    fact_to_slug.setdefault(fid, slug)
+
+            return [
+                {
+                    "fact_id": fact.id,
+                    "memory_text": fact.memory_text or "",
+                    "fact_type": fact.fact_type or "",
+                    "importance": fact.importance or "",
+                    "author_name": fact.author_name or "",
+                    "message_ts": fact.message_ts or "",
+                    "page_slug": fact_to_slug.get(fact.id, ""),
+                }
+                for fact in matches
+            ]
+        except Exception:
+            logger.exception(
+                "find_facts: failed principal=%s channel=%s",
+                principal_id,
+                channel_id,
+            )
+            return []
+
+    @mcp.tool(name="read_provenance")
+    async def read_provenance(
+        fact_id: Annotated[str, "The fact id whose source message to return"],
+        ctx: Context,
+    ) -> dict:
+        """Fetch the original source message for a fact.
+
+        Closes the audit loop — given a fact_id surfaced by another tool
+        (``find_decisions``, ``find_facts``, ``ask_channel``...), this
+        returns the platform / message_id / author / timestamp it was
+        extracted from, plus the raw chat message body when reachable.
+
+        Returns:
+        ``{fact_id, memory_text, source: {platform, message_id, url,
+        author, ts}, raw_message}``.
+
+        Returns ``{error: "fact_not_found"}`` when the fact_id is unknown.
+        Does NOT fail hard if the source message itself is unreachable —
+        the ``raw_message`` field is empty in that case but every other
+        field is still populated.
+        """
+        principal_id = _get_principal_id(ctx)
+        if not principal_id:
+            return {"error": "authentication_missing"}
+        err = _validate_id(fact_id, "fact_id")
+        if err:
+            return err
+
+        try:
+            from beever_atlas.stores import get_stores
+
+            stores = get_stores()
+            fact = await stores.weaviate.get_fact(fact_id)
+            if fact is None:
+                return {"error": "fact_not_found", "fact_id": fact_id}
+
+            # Best-effort channel ACL — the fact carries the channel it
+            # was extracted from, so only its principal-authorized owners
+            # can resolve provenance. If the auth check fails treat the
+            # fact as not found to avoid leaking existence across tenants.
+            try:
+                from beever_atlas.infra.channel_access import assert_channel_access
+
+                if fact.channel_id:
+                    await assert_channel_access(principal_id, fact.channel_id)
+            except Exception:
+                return {"error": "fact_not_found", "fact_id": fact_id}
+
+            # Pull the raw chat message body if we can find it. Missing
+            # raw text is non-fatal — return the structured citation
+            # block regardless so the caller still has author / ts / url.
+            raw_message = ""
+            if fact.source_message_id and fact.channel_id:
+                try:
+                    msg = await stores.mongodb.find_channel_message_by_message_id(
+                        channel_id=fact.channel_id,
+                        message_id=fact.source_message_id,
+                    )
+                    if msg:
+                        raw_message = msg.get("content") or ""
+                except Exception:
+                    raw_message = ""
+
+            return {
+                "fact_id": fact.id,
+                "memory_text": fact.memory_text or "",
+                "source": {
+                    "platform": fact.platform or "",
+                    "message_id": fact.source_message_id or "",
+                    "url": (fact.source_link_urls or [""])[0]
+                    if fact.source_link_urls
+                    else "",
+                    "author": fact.author_name or "",
+                    "ts": fact.message_ts or "",
+                },
+                "raw_message": raw_message,
+            }
+        except Exception:
+            logger.exception(
+                "read_provenance: failed principal=%s fact_id=%s",
+                principal_id,
+                fact_id,
+            )
+            return {"error": "provenance_read_failed", "fact_id": fact_id}
+
 
 def _principal_scopes(ctx: Context) -> set[str]:
     """Return the MCP token scopes for the request principal.

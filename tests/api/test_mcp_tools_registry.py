@@ -1,8 +1,10 @@
 """Phase 3/5b task 3.8/3.9/5.2-5.4: verify the tool registry has exactly the right set.
 
 `tools/list` (via build_mcp()) returns the catalog. The set extends as
-new tools ship — bumped to 22 by the wiki-llm-native-redesign §7.6
-ship (read_wiki_page, list_wiki_pages, get_wiki_graph).
+new tools ship — bumped to 27 by the Round-6 ship of targeted LLM-agent
+retrieval tools (read_wiki_module, find_decisions, get_tensions,
+find_facts, read_provenance) on top of the wiki-llm-native-redesign
+§7.6 trio (read_wiki_page, list_wiki_pages, get_wiki_graph).
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ from beever_atlas.api.mcp_server import build_mcp
 #   search_channel_knowledge                           (shim           ×1)
 #   trigger_sync, refresh_wiki, get_job_status         (orchestration  ×3)
 #   read_wiki_page, list_wiki_pages, get_wiki_graph    (wiki-redesign  ×3)
-# Total: 22.
+#   read_wiki_module, find_decisions, get_tensions,
+#   find_facts, read_provenance                        (Round-6 retrieval ×5)
+# Total: 27.
 
 EXPECTED_TOOLS = frozenset(
     {
@@ -54,6 +58,12 @@ EXPECTED_TOOLS = frozenset(
         "read_wiki_page",
         "list_wiki_pages",
         "get_wiki_graph",
+        # Round-6 LLM-agent retrieval surface
+        "read_wiki_module",
+        "find_decisions",
+        "get_tensions",
+        "find_facts",
+        "read_provenance",
     }
 )
 
