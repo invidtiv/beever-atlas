@@ -578,11 +578,14 @@ Produce a JSON object with this exact shape:
 6. **Use the candidate groups as a strong prior.** Confirm them, rename them, expand them, or split them — but don't invent radically different groupings unless the candidates clearly miss a pattern.
 7. **Output JSON ONLY.** No markdown code fences. No leading or trailing prose. Just the JSON object.
 
-## Quality bar
+## Quality bar — be assertive about grouping
 
-- A folder is worth creating only when it has 3+ children OR the children form a self-contained domain a reader would explore together.
-- Folder titles should read like Notion section names: short, scannable, capitalized normally ("Security", "Growth Campaigns", "Beever Atlas").
-- Singletons stay in `leaves` — never wrap a single cluster in a folder.
+- **AIM TO PUT EVERY TOPIC IN A FOLDER.** A topic should only land in `leaves` (root-level) when it truly fits no group — not when it's merely the only one in a small bucket.
+- A folder of **2** topics is fine. A folder of 1 is not (singletons stay loose).
+- Loose, broad categories are valid and encouraged: `admin`, `tooling`, `external-partnerships`, `events`, `engineering-misc`, `meeting-notes`, `legal-and-licensing`, `funding-and-grants`. Don't be afraid to invent these — operators prefer "everything has a home" over "20 unassigned topics at root."
+- Folder titles read like Notion section names: short, scannable, normally capitalized ("Security", "Growth Campaigns", "Admin").
+- Prefer **2-level depth** (root folder containing topics) for the bulk of the tree. Nest a 3rd level (folder → folder → topic) only when an inner sub-domain is clearly distinct.
+- A wiki with **5-8 folders covering 80%+ of topics** is the target. A wiki with 3 folders + 12 unassigned root topics is too sparse — be more assertive.
 
 Return the JSON now.
 """
