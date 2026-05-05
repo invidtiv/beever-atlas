@@ -722,6 +722,126 @@ def build_module_compile_prompt(
     )
 
 
+MODULE_COMPILE_FOLDER_PROMPT = """You are an adaptive wiki page compiler. The page is a FOLDER INDEX — a wayfinding + dashboard layer over the descendant pages. In ONE response, decide which folder modules to render AND author the bold TL;DR + 2-3 sentence summary that frame the folder.
+
+## Module catalog (folder-archetype subset — selection rules)
+
+{module_catalog_block}
+
+## Folder signals (use these to decide module eligibility)
+
+{signals_json}
+
+## Folder data (for prose context — DO NOT re-emit the children list; the renderer handles it)
+
+Folder title: {folder_title}
+Direct children (in display order): {children_json}
+Top contributors across descendants (pre-aggregated): {top_contributors_json}
+Top decisions across descendants (pre-aggregated): {top_decisions_json}
+
+## Output
+
+Return JSON ONLY with this exact shape:
+
+{{
+  "archetype": "folder",
+  "plan": {{
+    "modules": [
+      {{ "id": "<module_id>", "anchor": "<short alphanumeric>" }},
+      ...
+    ]
+  }},
+  "hero": {{
+    "tldr": "<single bold sentence — what this folder is about>",
+    "summary": "<2-3 sentence prose framing scope, key contributors, and any unresolved tension>"
+  }},
+  "body_connectors": {{}}
+}}
+
+## Module-selection rules
+
+- **HARD RULE — Module #1 in your plan MUST be `hero_summary`.** It reads your `hero.tldr` and `hero.summary` to render the page header.
+- **HARD RULE — Module #2 MUST be `subpage_cards`** when at least one child exists. Subpage cards are the primary wayfinding device on a folder page.
+- **HARD RULE — Module #3 MUST be `folder_stats`** when `child_count` ≥ 2. The 4-card big-number strip is the at-a-glance dashboard that replaces the legacy 'Themes & threads' prose.
+- **HARD RULE — Module #4 SHOULD be `top_contributors`** when `distinct_contributor_count` ≥ 2.
+- **HARD RULE — Module #5 SHOULD be `cross_cutting_decisions`** when `descendant_decision_count` ≥ 2.
+- **HARD RULE — Penultimate module SHOULD be `open_questions`** when `open_question_count` ≥ 1.
+- **HARD RULE — The LAST module MUST be `provenance_drawer`** when `fact_count` ≥ 1.
+- A module is ELIGIBLE only when its catalog rule is satisfied — the validator will drop ineligible picks.
+- Anchors are lowercase + alphanumeric + dashes, ≤ 24 chars.
+
+## Hero authoring rules
+
+- TL;DR is exactly ONE bold sentence (`**…**`) that names the folder's domain in concrete terms — no generic "this folder contains topics" filler.
+- Summary is 2-3 sentences. Cover: (a) the throughline connecting the children, (b) who's most active, (c) any unresolved tension. Be specific — reference actual child topics by name when it sharpens the framing.
+- DO NOT write a separate body — the modules render the dashboard. Hero is the only prose surface on the page.
+
+## Hard rules
+
+- Output JSON ONLY. No markdown fences around the outer JSON. No prose before or after.
+- DO NOT emit the literal string "Themes & threads" — the prose blob is GONE; the dashboard replaces it.
+- DO NOT use @ / # / $ entity prefixes — write names normally.
+"""
+
+
+def build_module_compile_folder_prompt(
+    *,
+    signals: dict,
+    module_catalog: list[dict],
+    folder_title: str,
+    children: list[dict],
+    top_contributors: list[dict],
+    top_decisions: list[dict],
+) -> str:
+    """Render ``MODULE_COMPILE_FOLDER_PROMPT`` with the folder data.
+
+    Single-call: planner + writer collapsed into one prompt so cost
+    stays at 1 LLM call per folder page (same as the legacy
+    ``FOLDER_INDEX_PROMPT`` flow).
+    """
+    import json as _json
+
+    catalog_lines: list[str] = []
+    for entry in module_catalog:
+        catalog_lines.append(
+            f"- **{entry['id']}** ({entry['label']}) — {entry['description']} "
+            f"_Rule:_ {entry['rule']}"
+        )
+    catalog_block = "\n".join(catalog_lines)
+
+    children_payload = [
+        {
+            "title": (c.get("title") or "")[:80],
+            "summary": (c.get("summary") or "")[:160],
+            "slug": c.get("slug") or "",
+        }
+        for c in children
+    ]
+    contributors_payload = [
+        {
+            "name": c.get("name") or "",
+            "contribution_count": int(c.get("contribution_count") or 0),
+        }
+        for c in (top_contributors or [])[:5]
+    ]
+    decisions_payload = [
+        {
+            "title": (d.get("title") or "")[:120],
+            "decided_by": d.get("decided_by") or "",
+            "importance": d.get("importance") or "medium",
+        }
+        for d in (top_decisions or [])[:5]
+    ]
+    return MODULE_COMPILE_FOLDER_PROMPT.format(
+        module_catalog_block=catalog_block,
+        signals_json=_json.dumps(signals, indent=2, default=str),
+        folder_title=folder_title,
+        children_json=_json.dumps(children_payload, indent=2),
+        top_contributors_json=_json.dumps(contributors_payload, indent=2),
+        top_decisions_json=_json.dumps(decisions_payload, indent=2),
+    )
+
+
 FOLDER_INDEX_PROMPT = """You are a knowledge wiki compiler. Create a **Folder Index** page that explains what's inside this folder and helps the reader navigate to the right sub-page.
 
 ## Inputs

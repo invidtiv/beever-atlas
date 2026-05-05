@@ -77,6 +77,7 @@ def compute_signals(
     alternatives: list[str] | None = None,
     pros_cons_confidence: float = 0.0,
     glossary: list[dict] | None = None,
+    descendants: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Aggregate cluster signals the planner consults.
 
@@ -237,6 +238,41 @@ def compute_signals(
     else:
         numeric_fact_count = 0
 
+    # Folder-archetype descendant aggregates — feed the folder-specific
+    # modules (``folder_stats``, ``top_contributors``,
+    # ``cross_cutting_decisions``). When ``descendants`` is empty (i.e.,
+    # this is a topic page, not a folder), all three counts collapse to
+    # 0 and the predicates fail naturally.
+    descendant_fact_count = 0
+    descendant_decision_count = 0
+    descendant_question_count = 0
+    distinct_contributor_set: set[str] = set()
+    descendants_list = descendants or []
+    for d in descendants_list:
+        if not isinstance(d, dict):
+            continue
+        d_facts = d.get("facts") or []
+        if not isinstance(d_facts, list):
+            continue
+        descendant_fact_count += len(d_facts)
+        for df in d_facts:
+            if not isinstance(df, dict):
+                continue
+            ft = str(df.get("fact_type") or "").strip().lower()
+            if ft == "decision":
+                descendant_decision_count += 1
+            elif ft == "question":
+                descendant_question_count += 1
+            name = str(
+                df.get("author_name")
+                or df.get("user_name")
+                or df.get("author")
+                or ""
+            ).strip()
+            if name:
+                distinct_contributor_set.add(name)
+    distinct_contributor_count = len(distinct_contributor_set)
+
     # Archetype-detection placeholders — Phase 3 (extraction enrichment)
     # will populate ``tension_count`` (conflict-typed facts) and
     # ``person_fact_count`` (facts about a single person). For Phase 4
@@ -293,6 +329,13 @@ def compute_signals(
         "tension_count": tension_count,
         "person_fact_count": person_fact_count,
         "archetype": archetype,
+        # Folder-archetype descendant aggregates — feed
+        # ``folder_stats`` / ``top_contributors`` /
+        # ``cross_cutting_decisions``. Zero on non-folder pages.
+        "descendant_fact_count": descendant_fact_count,
+        "descendant_decision_count": descendant_decision_count,
+        "descendant_question_count": descendant_question_count,
+        "distinct_contributor_count": distinct_contributor_count,
     }
 
 
@@ -480,4 +523,7 @@ _HUMAN_RULES: dict[str, str] = {
     "stat_strip": "Pick when numeric_fact_count ≥ 3. Place it directly after `hero_summary` (top of page) — the numbers ARE the headline.",
     "acronym_legend": "Pick when glossary_terms_used ≥ 2. Place near the bottom of the page so readers resolve unfamiliar acronyms after the main content.",
     "provenance_drawer": "ALWAYS pick when fact_count ≥ 1. MUST be the LAST module in your plan — gives readers (and LLM agents) a drill-down to the original conversation.",
+    "folder_stats": "Pick when archetype == 'folder' AND child_count ≥ 2. MUST be module #3 on folder index pages (right after hero_summary + subpage_cards) — the at-a-glance numbers replace the legacy 'Themes & threads' prose.",
+    "top_contributors": "Pick when archetype == 'folder' AND distinct_contributor_count ≥ 2. Renders a chip strip of who's most active across the folder descendants.",
+    "cross_cutting_decisions": "Pick when archetype == 'folder' AND descendant_decision_count ≥ 2. Surfaces the most important decisions across the folder with deep-links to the source pages.",
 }

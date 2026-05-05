@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { ArrowRight, Clock, FileText, FolderOpen } from "lucide-react";
 import { WikiMarkdown } from "./WikiMarkdown";
 import { CitationPanel } from "./CitationPanel";
+import { ModuleRenderer } from "./modules";
 import type { WikiPage, WikiPageRef } from "@/lib/types";
 import { wikiT } from "@/lib/wikiI18n";
 
@@ -150,9 +151,16 @@ function ChildCard({ child, summary, onNavigate, lang }: ChildCardProps) {
 
 export function FolderPage({ page, onNavigate, lang }: FolderPageProps) {
   const content = page.content.replace(/^#\s+[^\n]+\n*/, "");
+  // The modular folder pipeline persists structured modules on
+  // ``page.modules`` (hero_summary + subpage_cards + folder_stats +
+  // top_contributors + cross_cutting_decisions + provenance_drawer).
+  // When present, the React dispatcher renders the dashboard directly
+  // and the legacy "Themes & threads" prose path is bypassed entirely.
+  const hasModularPlan = (page.modules ?? []).length > 0;
+
   const { intro, bulletMap, outro } = useMemo(
-    () => parseFolderBody(content),
-    [content],
+    () => (hasModularPlan ? { intro: "", bulletMap: new Map<string, string>(), outro: "" } : parseFolderBody(content)),
+    [content, hasModularPlan],
   );
 
   const childCount = page.children?.length ?? 0;
@@ -191,42 +199,81 @@ export function FolderPage({ page, onNavigate, lang }: FolderPageProps) {
         </div>
       </div>
 
-      {/* ── Intro (LLM-generated framing for the folder) ────────────── */}
-      {intro && (
-        <div className="mt-5 max-w-none">
-          <WikiMarkdown content={intro} citations={page.citations} onNavigate={onNavigate} />
-        </div>
-      )}
-
-      {/* ── Children cards ──────────────────────────────────────────── */}
-      {childCount > 0 && (
-        <div className="mt-6" data-toc-skip>
-          <h2 className="text-lg font-semibold text-foreground mb-3 flex items-center gap-2">
-            Pages in this folder
-            <span className="text-[11px] font-normal text-muted-foreground">
-              ({childCount})
-            </span>
-          </h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
-            {(page.children ?? []).map((child) => (
-              <ChildCard
-                key={child.id}
-                child={child}
-                summary={bulletMap.get(child.slug) ?? ""}
-                onNavigate={onNavigate}
-                lang={lang}
-              />
-            ))}
+      {hasModularPlan ? (
+        // ── Modular dashboard path ─────────────────────────────────
+        // The module dispatcher renders the folder dashboard:
+        // hero_summary (TL;DR + summary), subpage_cards (rendered as
+        // child cards below), folder_stats (4-card big-number strip),
+        // top_contributors (chip strip), cross_cutting_decisions
+        // (decision list), open_questions, provenance_drawer.
+        <>
+          <div className="mt-5">
+            <ModuleRenderer
+              modules={(page.modules ?? []).filter(
+                (m) => m.id !== "subpage_cards",
+              )}
+              citations={page.citations}
+              onNavigate={onNavigate}
+            />
           </div>
-        </div>
-      )}
-
-      {/* ── Outro / synthesis (key threads, tensions, contributors) ── */}
-      {outro && (
-        <div className="mt-8 max-w-none">
-          <h2 className="text-lg font-semibold text-foreground mb-3">Themes & threads</h2>
-          <WikiMarkdown content={outro} citations={page.citations} onNavigate={onNavigate} />
-        </div>
+          {childCount > 0 && (
+            <div className="mt-6" data-toc-skip>
+              <h2 className="text-lg font-semibold text-foreground mb-3 flex items-center gap-2">
+                Pages in this folder
+                <span className="text-[11px] font-normal text-muted-foreground">
+                  ({childCount})
+                </span>
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
+                {(page.children ?? []).map((child) => (
+                  <ChildCard
+                    key={child.id}
+                    child={child}
+                    summary=""
+                    onNavigate={onNavigate}
+                    lang={lang}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        // ── Legacy prose path (kept for non-modular fallback pages) ─
+        <>
+          {intro && (
+            <div className="mt-5 max-w-none">
+              <WikiMarkdown content={intro} citations={page.citations} onNavigate={onNavigate} />
+            </div>
+          )}
+          {childCount > 0 && (
+            <div className="mt-6" data-toc-skip>
+              <h2 className="text-lg font-semibold text-foreground mb-3 flex items-center gap-2">
+                Pages in this folder
+                <span className="text-[11px] font-normal text-muted-foreground">
+                  ({childCount})
+                </span>
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4">
+                {(page.children ?? []).map((child) => (
+                  <ChildCard
+                    key={child.id}
+                    child={child}
+                    summary={bulletMap.get(child.slug) ?? ""}
+                    onNavigate={onNavigate}
+                    lang={lang}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+          {outro && (
+            <div className="mt-8 max-w-none">
+              <h2 className="text-lg font-semibold text-foreground mb-3">Themes & threads</h2>
+              <WikiMarkdown content={outro} citations={page.citations} onNavigate={onNavigate} />
+            </div>
+          )}
+        </>
       )}
 
       <CitationPanel citations={page.citations} />

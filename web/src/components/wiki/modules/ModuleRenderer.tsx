@@ -43,6 +43,9 @@ import { ProvenanceDrawerModule } from "./ProvenanceDrawerModule";
 import { AcronymLegendModule } from "./AcronymLegendModule";
 import { StatStripModule } from "./StatStripModule";
 import { DecisionBannerModule } from "./DecisionBannerModule";
+import { FolderStatsModule } from "./FolderStatsModule";
+import { TopContributorsModule } from "./TopContributorsModule";
+import { CrossCuttingDecisionsModule } from "./CrossCuttingDecisionsModule";
 
 export interface ModuleProps {
   module: WikiPageModule;
@@ -120,6 +123,16 @@ export function ModuleRenderer({
             return <AcronymLegendModule key={module.anchor} {...props} />;
           case "provenance_drawer":
             return <ProvenanceDrawerModule key={module.anchor} {...props} />;
+          // Folder-archetype dashboard modules — replace the legacy
+          // "Themes & threads" prose blob with at-a-glance modules.
+          // Only fire on folder index pages (planner predicates gate
+          // archetype == 'folder').
+          case "folder_stats":
+            return <FolderStatsModule key={module.anchor} {...props} />;
+          case "top_contributors":
+            return <TopContributorsModule key={module.anchor} {...props} />;
+          case "cross_cutting_decisions":
+            return <CrossCuttingDecisionsModule key={module.anchor} {...props} />;
           default:
             // Unknown module ID — silently drop. The backend's
             // validator should have rejected it before persistence;

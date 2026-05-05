@@ -4515,19 +4515,166 @@ class WikiCompiler:
     ) -> WikiPage:
         """Synthesize a folder index page from its already-compiled children.
 
-        Calls the FOLDER_INDEX_PROMPT once per folder and replaces the
-        ``<<CHILDREN_TOC>>`` marker with a deterministic auto-TOC of
-        the children. Returns a ``WikiPage`` with ``page_type="folder"``,
+        Routing:
+          1. Modular path (``compile_folder_page_modular``) is the
+             DEFAULT. The planner picks 5-7 dashboard modules from the
+             folder-archetype catalog (hero_summary, subpage_cards,
+             folder_stats, top_contributors, cross_cutting_decisions,
+             open_questions, provenance_drawer) — replacing the legacy
+             "Themes & threads" prose with at-a-glance modules.
+          2. Legacy ``FOLDER_INDEX_PROMPT`` path remains as the
+             fallback for catastrophic modular failures (LLM crash,
+             parse error, plan validates to empty). The legacy path
+             still substitutes ``<<CHILDREN_TOC>>`` so the markdown
+             render lane keeps working.
+
+        Returns a ``WikiPage`` with ``page_type="folder"``,
         ``children_fingerprint`` set to a stable SHA-256 of sorted child
         slugs, and ``is_synthetic=True``.
 
         ``children_pages`` MUST be the leaves (or sub-folders) the
         planner placed in this folder. Order is preserved on output.
         """
+        from beever_atlas.wiki.modules.orchestrator import (
+            compile_folder_page_modular,
+        )
         from beever_atlas.wiki.prompts import build_folder_index_prompt
         from beever_atlas.wiki.render import apply_children_toc_marker
         import hashlib
 
+        # ── Modular folder dashboard path (default) ────────────────────
+        # Build the descendant aggregate from each child's citations.
+        # Citations carry the (author, text_excerpt) shape we need for
+        # contributor + decision aggregation. This is best-effort: when
+        # a child page lacks structured fact_type metadata (legacy
+        # pages, thin topics), the citation's text still feeds
+        # ``folder_stats.memories`` and ``top_contributors`` even
+        # though it cannot reach the decision/question buckets.
+        descendants_payload: list[dict[str, Any]] = []
+        for c in children_pages:
+            d_facts: list[dict[str, Any]] = []
+            for cit in (c.citations or []):
+                d_facts.append(
+                    {
+                        "fact_id": cit.id or "",
+                        "memory_text": cit.text_excerpt or "",
+                        "author_name": cit.author or "",
+                        # Citations don't carry fact_type — leave blank
+                        # so neither decision nor question buckets fire.
+                        # The ``modules`` field on the child page (when
+                        # present) carries the structured decision data
+                        # the cross_cutting_decisions module needs.
+                        "fact_type": "",
+                        "message_ts": cit.timestamp or "",
+                        "platform": "",
+                        "permalink": cit.permalink or "",
+                    }
+                )
+            # Promote decision facts from each child's persisted
+            # ``modules`` (if the child was compiled via the modular
+            # topic path, decision_log entries live there).
+            for mod in (c.modules or []):
+                if not isinstance(mod, dict):
+                    continue
+                if mod.get("id") != "decision_log":
+                    continue
+                inner = mod.get("data") or {}
+                if isinstance(inner, dict):
+                    for dec in (inner.get("decisions") or []):
+                        if not isinstance(dec, dict):
+                            continue
+                        d_facts.append(
+                            {
+                                "fact_id": str(dec.get("fact_id") or ""),
+                                "memory_text": str(dec.get("decision") or dec.get("text") or ""),
+                                "author_name": str(dec.get("made_by") or dec.get("author") or ""),
+                                "fact_type": "decision",
+                                "importance": dec.get("importance") or "high",
+                                "message_ts": str(dec.get("date") or ""),
+                            }
+                        )
+            descendants_payload.append(
+                {
+                    "title": c.title,
+                    "slug": c.slug,
+                    "facts": d_facts,
+                }
+            )
+
+        children_payload_modular = [
+            {
+                "title": c.title,
+                "slug": c.slug,
+                "summary": (c.summary or "")[:200],
+            }
+            for c in children_pages
+        ]
+
+        async def _modular_llm(prompt: str) -> str:
+            return await self._llm_generate_json(prompt, page_kind="topic")
+
+        try:
+            modular_out = await compile_folder_page_modular(
+                folder_title=folder_title,
+                folder_slug=folder_slug,
+                descendants=descendants_payload,
+                children=children_payload_modular,
+                llm=_modular_llm,
+            )
+        except Exception as exc:  # noqa: BLE001 — modular path is best-effort
+            logger.warning(
+                "wiki_compiler_folder_modular_failed slug=%s exc=%s",
+                folder_slug,
+                type(exc).__name__,
+            )
+            modular_out = None
+
+        # Use the modular output unless it fell back catastrophically.
+        # On a fall-back outcome we drop into the legacy prompt path
+        # below so we don't ship a half-rendered dashboard.
+        if modular_out is not None and not modular_out.fell_back:
+            sorted_slugs = sorted(c.slug for c in children_pages if c.slug)
+            fingerprint = hashlib.sha256(
+                "\n".join(sorted_slugs).encode("utf-8")
+            ).hexdigest()
+            from datetime import UTC as _UTC, datetime as _dt
+
+            children_refs = [
+                WikiPageRef(
+                    id=f"topic-{c.slug}" if not c.id.startswith("topic-") else c.id,
+                    title=c.title,
+                    slug=c.slug,
+                    section_number="",
+                    memory_count=c.memory_count,
+                )
+                for c in children_pages
+            ]
+            logger.info(
+                "modular_folder_page_compiled folder=%s modules=%d rendered=%d",
+                folder_slug,
+                modular_out.planner_module_count,
+                modular_out.rendered_module_count,
+            )
+            return WikiPage(
+                id=f"folder-{folder_slug}",
+                slug=folder_slug,
+                title=folder_title,
+                page_type="folder",
+                parent_id=None,
+                section_number="",
+                content=modular_out.content,
+                summary=modular_out.summary
+                or f"{folder_title} — folder containing {len(children_pages)} pages.",
+                memory_count=sum(c.memory_count for c in children_pages),
+                last_updated=_dt.now(tz=_UTC),
+                citations=[],
+                children=children_refs,
+                children_fingerprint=fingerprint,
+                is_synthetic=True,
+                modules=modular_out.modules,
+            )
+
+        # ── Legacy fallback path — preserved verbatim below ────────────
         # Build the prompt inputs from the children's existing summaries.
         # No facts loaded here — folder synthesis runs after leaf compile,
         # and the leaves already distilled the facts. Aggregating top

@@ -183,6 +183,41 @@ def _has_min_numeric_facts(n: int) -> SelectionPredicate:
     return lambda s: int(s.get("numeric_fact_count", 0)) >= n
 
 
+def _is_folder_with_min_children(n: int) -> SelectionPredicate:
+    """Eligible only when ``compute_signals`` derived ``archetype`` ==
+    "folder" AND the folder has at least ``n`` direct children. Used by
+    the folder-specific dashboard modules (``folder_stats``,
+    ``top_contributors``, ``cross_cutting_decisions``)."""
+    def pred(s: dict[str, Any]) -> bool:
+        return (
+            str(s.get("archetype") or "").lower() == "folder"
+            and int(s.get("child_count", 0)) >= n
+        )
+    return pred
+
+
+def _is_folder_with_min_contributors(n: int) -> SelectionPredicate:
+    """Eligible only when archetype is ``folder`` AND the descendant
+    aggregate has at least ``n`` distinct contributors."""
+    def pred(s: dict[str, Any]) -> bool:
+        return (
+            str(s.get("archetype") or "").lower() == "folder"
+            and int(s.get("distinct_contributor_count", 0)) >= n
+        )
+    return pred
+
+
+def _is_folder_with_min_decisions(n: int) -> SelectionPredicate:
+    """Eligible only when archetype is ``folder`` AND the descendant
+    aggregate has at least ``n`` decision-typed facts."""
+    def pred(s: dict[str, Any]) -> bool:
+        return (
+            str(s.get("archetype") or "").lower() == "folder"
+            and int(s.get("descendant_decision_count", 0)) >= n
+        )
+    return pred
+
+
 # ---------------------------------------------------------------------------
 # The catalog — single source of truth.
 # ---------------------------------------------------------------------------
@@ -343,6 +378,28 @@ MODULE_CATALOG: dict[str, ModuleSpec] = {
         label="Source messages",
         description="Always-eligible (≥1 fact) collapsed accordion exposing the source messages each fact came from, with platform deep-links — both humans and LLM agents reading the wiki get a drill-down to the original conversation.",
         eligible=_always_eligible_with_min_facts(1),
+        renderer_kind="frontend",
+    ),
+    # ---- Folder-archetype modules (replace prose 'Themes & threads') ----
+    "folder_stats": ModuleSpec(
+        id="folder_stats",
+        label="Folder stats",
+        description="4-card big-number strip aggregating descendant pages: total memories, decisions, open questions, and distinct contributors. Replaces the legacy 'Themes & threads' prose with at-a-glance numbers on folder index pages.",
+        eligible=_is_folder_with_min_children(2),
+        renderer_kind="frontend",
+    ),
+    "top_contributors": ModuleSpec(
+        id="top_contributors",
+        label="Top contributors",
+        description="Horizontal strip of contributor chips (avatar/initials, name, contribution count, top page) summarising who's most active across folder descendants. Folder pages only.",
+        eligible=_is_folder_with_min_contributors(2),
+        renderer_kind="frontend",
+    ),
+    "cross_cutting_decisions": ModuleSpec(
+        id="cross_cutting_decisions",
+        label="Cross-cutting decisions",
+        description="Vertical list of the highest-importance decisions across descendant pages, each with severity colour, decided_by, decided_at, and a deep-link to the source page. Folder pages only.",
+        eligible=_is_folder_with_min_decisions(2),
         renderer_kind="frontend",
     ),
 }

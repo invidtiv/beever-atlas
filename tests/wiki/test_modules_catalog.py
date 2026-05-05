@@ -14,7 +14,7 @@ from beever_atlas.wiki.modules import (
 
 
 def test_catalog_has_all_documented_modules() -> None:
-    """The 22 module IDs declared in the spec MUST all exist in the
+    """The 25 module IDs declared in the spec MUST all exist in the
     catalog. Adding/removing modules requires updating the spec — this
     guard catches code-only drift."""
     expected = {
@@ -43,6 +43,10 @@ def test_catalog_has_all_documented_modules() -> None:
         "stat_strip",
         "acronym_legend",
         "provenance_drawer",
+        # Folder-archetype dashboard modules (folder redesign)
+        "folder_stats",
+        "top_contributors",
+        "cross_cutting_decisions",
     }
     assert set(MODULE_CATALOG.keys()) == expected
 
@@ -79,8 +83,13 @@ def test_list_module_ids_stable_order() -> None:
     assert ids[0] == "hero_summary"  # first in catalog (always module #1)
     assert ids[1] == "decision_banner"  # archetype-aware spotlight (module #2 on Decision pages)
     assert ids[2] == "key_facts"  # third in catalog
-    assert ids[-1] == "provenance_drawer"  # last in catalog (always last on the page)
-    assert len(ids) == 22
+    # Folder-archetype modules sit at the END of the catalog (after
+    # ``provenance_drawer``); they only fire on folder index pages.
+    assert ids[-1] == "cross_cutting_decisions"
+    assert "provenance_drawer" in ids
+    assert "folder_stats" in ids
+    assert "top_contributors" in ids
+    assert len(ids) == 25
 
 
 def test_eligible_predicates_handle_missing_signals() -> None:

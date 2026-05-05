@@ -149,6 +149,28 @@ def _extract_media_for_module(
             render_inputs.get("facts") or [],
             render_inputs.get("member_facts") or [],
         )
+    if module_id == "folder_stats":
+        from beever_atlas.wiki.modules.folder_stats import (
+            build_folder_stats_data,
+        )
+
+        return build_folder_stats_data(render_inputs.get("descendants") or [])
+    if module_id == "top_contributors":
+        from beever_atlas.wiki.modules.top_contributors import (
+            build_top_contributors_data,
+        )
+
+        return build_top_contributors_data(
+            render_inputs.get("descendants") or []
+        )
+    if module_id == "cross_cutting_decisions":
+        from beever_atlas.wiki.modules.cross_cutting_decisions import (
+            build_cross_cutting_decisions_data,
+        )
+
+        return build_cross_cutting_decisions_data(
+            render_inputs.get("descendants") or []
+        )
 
     media = render_inputs.get("media") or []
     if not isinstance(media, list):
@@ -781,4 +803,316 @@ async def compile_topic_page_modular(
         planner_module_count=len(plan.modules),
         rendered_module_count=rendered_count,
         fell_back=fell_back,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Folder-archetype orchestrator
+# ---------------------------------------------------------------------------
+#
+# Folder index pages are MODULE-ONLY dashboards. The legacy
+# ``FOLDER_INDEX_PROMPT`` produced three dense paragraphs of "Themes &
+# threads" prose; this function replaces that with a 5-7 module
+# dashboard (hero_summary + subpage_cards + folder_stats +
+# top_contributors + cross_cutting_decisions + open_questions +
+# provenance_drawer). The body has no marker substitution surface —
+# the React dispatcher renders each module from ``page.modules`` data,
+# and ``page.content`` carries only the bold TL;DR + summary so the
+# legacy markdown-render path still has SOMETHING readable.
+
+
+def _fallback_folder_output(
+    folder_title: str,
+    descendants: list[dict],
+    signals: dict[str, Any],
+) -> ModularPageOutput:
+    """Catastrophic fallback for folder pages.
+
+    When the LLM crashes / parse fails / plan validates to empty, we
+    emit a minimal but useful dashboard: hero_summary (with a
+    boilerplate TL;DR) + subpage_cards + folder_stats. This keeps the
+    page renderable; the maintainer's next regen can try the LLM path
+    again.
+    """
+    from beever_atlas.wiki.modules.folder_stats import build_folder_stats_data
+    from beever_atlas.wiki.modules.hero_summary import build_hero_summary_data
+
+    fallback_tldr = (
+        f"**{folder_title} — folder containing {len(descendants)} pages.**"
+    )
+    fallback_summary = (
+        f"Wayfinding index for the {len(descendants)} descendant pages "
+        f"under {folder_title}."
+    )
+    modules: list[dict[str, Any]] = [
+        {
+            "id": "hero_summary",
+            "anchor": "summary",
+            "data": build_hero_summary_data(
+                tldr=fallback_tldr,
+                overview=fallback_summary,
+                signals=signals,
+                facts=[],
+            ),
+        },
+        {
+            "id": "subpage_cards",
+            "anchor": "subpages",
+            "data": {
+                "label": "Pages in this section",
+                "renderer_kind": "python",
+                "markdown": "",
+            },
+        },
+    ]
+    if int(signals.get("child_count") or 0) >= 2:
+        modules.append({
+            "id": "folder_stats",
+            "anchor": "folder-stats",
+            "data": build_folder_stats_data(descendants),
+        })
+    return ModularPageOutput(
+        content=f"{fallback_tldr}\n\n{fallback_summary}",
+        summary=fallback_summary,
+        modules=modules,
+        planner_module_count=len(modules),
+        rendered_module_count=len(modules),
+        fell_back=True,
+    )
+
+
+def _folder_catalog_view() -> list[dict[str, Any]]:
+    """Build the catalog view for the folder prompt — only the modules
+    that can actually fire on a folder page (saves tokens + steers the
+    LLM away from picking topic-only modules whose predicates would
+    fail the validator)."""
+    folder_module_ids = {
+        "hero_summary",
+        "subpage_cards",
+        "folder_stats",
+        "top_contributors",
+        "cross_cutting_decisions",
+        "open_questions",
+        "provenance_drawer",
+    }
+    return [
+        {
+            "id": spec.id,
+            "label": spec.label,
+            "description": spec.description,
+            "rule": _HUMAN_RULES.get(spec.id, "Pick at planner's discretion."),
+        }
+        for spec in MODULE_CATALOG.values()
+        if spec.id in folder_module_ids
+    ]
+
+
+async def compile_folder_page_modular(
+    *,
+    folder_title: str,
+    folder_slug: str,
+    descendants: list[dict],
+    children: list[dict],
+    llm: LLMCallable,
+) -> ModularPageOutput:
+    """Single-call folder index compilation.
+
+    Builds one prompt containing the folder-module catalog + signals +
+    folder data, invokes the LLM once, parses the unified response,
+    validates the plan, and renders each module's data payload.
+    Returns a renderable ``ModularPageOutput`` even on failure
+    (fall-back is hero_summary + subpage_cards + folder_stats).
+
+    ``descendants`` is the full list of descendant pages, each shaped
+    as ``{title, slug, facts: [...]}``. ``children`` is the
+    direct-child subset (used by ``subpage_cards``).
+    """
+    from beever_atlas.wiki.modules.cross_cutting_decisions import (
+        build_cross_cutting_decisions_data,
+    )
+    from beever_atlas.wiki.modules.folder_stats import build_folder_stats_data
+    from beever_atlas.wiki.modules.hero_summary import build_hero_summary_data
+    from beever_atlas.wiki.modules.planner import compute_signals
+    from beever_atlas.wiki.modules.provenance_drawer import (
+        build_provenance_drawer_data,
+    )
+    from beever_atlas.wiki.modules.top_contributors import (
+        build_top_contributors_data,
+    )
+    from beever_atlas.wiki.prompts import build_module_compile_folder_prompt
+
+    # ── Stage 0 — compute signals from the descendant aggregate.
+    # The cluster shape feeds the topic-archetype branches with empty
+    # values so the topic predicates fail naturally; we override
+    # archetype + child_count after to guarantee the folder predicates
+    # see the correct values regardless of the topic-side derivation.
+    cluster_for_signals = {
+        "title": folder_title,
+        "member_facts": [],
+        "child_count": len(children),
+    }
+    # Aggregate descendant facts into a flat list so the topic-side
+    # signal computations (open_question_count, etc.) see the union of
+    # descendants — needed for ``open_questions`` to fire on folders.
+    aggregated_facts: list[dict] = []
+    aggregated_open_questions: list[dict] = []
+    for d in descendants:
+        if not isinstance(d, dict):
+            continue
+        d_facts = d.get("facts") or []
+        if isinstance(d_facts, list):
+            aggregated_facts.extend(f for f in d_facts if isinstance(f, dict))
+        d_oq = d.get("open_questions") or []
+        if isinstance(d_oq, list):
+            for q in d_oq:
+                if isinstance(q, dict):
+                    aggregated_open_questions.append(q)
+                elif isinstance(q, str) and q.strip():
+                    aggregated_open_questions.append({"question": q.strip(), "raised": ""})
+    cluster_for_signals["member_facts"] = aggregated_facts
+
+    signals = compute_signals(
+        cluster=cluster_for_signals,
+        open_questions=aggregated_open_questions,
+        descendants=descendants,
+    )
+    # Force archetype to ``folder`` — the descendant aggregates are
+    # what the folder predicates check, and we don't want the
+    # topic-archetype derivation (which prioritises ``decision``) to
+    # fire on a folder index page.
+    signals["archetype"] = "folder"
+
+    # ── Stage 1 — build pre-aggregated payloads for hero context.
+    contributors_data = build_top_contributors_data(descendants)
+    top_contributors_for_prompt = contributors_data.get("items", [])
+    decisions_data = build_cross_cutting_decisions_data(descendants)
+    top_decisions_for_prompt = decisions_data.get("items", [])
+
+    # ── Stage 2 — single LLM call.
+    catalog_view = _folder_catalog_view()
+    prompt = build_module_compile_folder_prompt(
+        signals=signals,
+        module_catalog=catalog_view,
+        folder_title=folder_title,
+        children=children,
+        top_contributors=top_contributors_for_prompt,
+        top_decisions=top_decisions_for_prompt,
+    )
+
+    try:
+        result = llm(prompt)
+        raw = await result if inspect.isawaitable(result) else result  # type: ignore[assignment]
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("module_compile_folder_llm_failed exc=%s", exc)
+        return _fallback_folder_output(folder_title, descendants, signals)
+
+    # ── Stage 3 — parse JSON.
+    try:
+        parsed = _parse_compile_json(str(raw))
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "module_compile_folder_parse_failed exc=%s raw_len=%d",
+            exc,
+            len(str(raw)),
+        )
+        return _fallback_folder_output(folder_title, descendants, signals)
+
+    # ── Stage 4 — validate the plan + parse the hero TL;DR + summary.
+    plan_dict = parsed.get("plan") or {}
+    if not isinstance(plan_dict, dict):
+        plan_dict = {}
+    plan = _validate_plan(plan_dict, signals)
+    if plan.is_empty():
+        logger.info("module_compile_folder_plan_empty_fallback")
+        return _fallback_folder_output(folder_title, descendants, signals)
+
+    hero = parsed.get("hero") or {}
+    if not isinstance(hero, dict):
+        hero = {}
+    tldr = str(hero.get("tldr") or "").strip()
+    overview = str(hero.get("summary") or hero.get("overview") or "").strip()
+
+    # ── Stage 5 — build per-module data payloads. Folder modules are
+    # all frontend renderers (no marker substitution); we attach data
+    # to each module entry so the React dispatcher can render directly.
+    rendered_count = 0
+    for entry in plan.modules:
+        mid = entry["id"]
+        spec = MODULE_CATALOG.get(mid)
+        if spec is None:
+            continue
+        if mid == "hero_summary":
+            entry["data"] = build_hero_summary_data(
+                tldr=tldr,
+                overview=overview,
+                signals=signals,
+                facts=aggregated_facts,
+            )
+        elif mid == "subpage_cards":
+            # subpage_cards uses the python renderer (children TOC
+            # markdown). Folder pages render children as cards through
+            # FolderPage.tsx already — the markdown is a fallback for
+            # markdown-render readers.
+            from beever_atlas.wiki.modules.subpage_cards import (
+                render as render_subpages,
+            )
+
+            children_payload = [
+                {
+                    "title": c.get("title") or "",
+                    "slug": c.get("slug") or "",
+                    "summary": (c.get("summary") or "")[:160],
+                }
+                for c in children
+            ]
+            md = render_subpages({"children": children_payload})
+            entry["data"] = {
+                "label": spec.label,
+                "renderer_kind": "python",
+                "markdown": md,
+            }
+        elif mid == "folder_stats":
+            entry["data"] = build_folder_stats_data(descendants)
+        elif mid == "top_contributors":
+            entry["data"] = build_top_contributors_data(descendants)
+        elif mid == "cross_cutting_decisions":
+            entry["data"] = build_cross_cutting_decisions_data(descendants)
+        elif mid == "open_questions":
+            from beever_atlas.wiki.modules.open_questions import (
+                render as render_questions,
+            )
+
+            md = render_questions({"questions": aggregated_open_questions})
+            entry["data"] = {
+                "label": spec.label,
+                "renderer_kind": "python",
+                "markdown": md,
+            }
+        elif mid == "provenance_drawer":
+            entry["data"] = build_provenance_drawer_data(aggregated_facts)
+        else:
+            entry["data"] = {
+                "label": spec.label,
+                "renderer_kind": spec.renderer_kind,
+            }
+        rendered_count += 1
+
+    # ── Stage 6 — assemble content. Folder pages are module-only;
+    # ``content`` carries only TL;DR + summary so the legacy markdown
+    # render path still shows SOMETHING. The dashboard lives in
+    # ``modules`` for the React dispatcher.
+    parts: list[str] = []
+    if tldr:
+        parts.append(tldr if "**" in tldr else f"**{tldr.strip()}**")
+    if overview:
+        parts.append(overview.strip())
+    content = "\n\n".join(parts) or f"**{folder_title}**"
+
+    return ModularPageOutput(
+        content=content,
+        summary=overview or f"{folder_title} — folder index.",
+        modules=list(plan.modules),
+        planner_module_count=len(plan.modules),
+        rendered_module_count=rendered_count,
+        fell_back=False,
     )
