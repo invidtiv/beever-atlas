@@ -353,6 +353,11 @@ function escapeRegExp(s: string): string {
 
 export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSidebarProps) {
   const [topicsExpanded, setTopicsExpanded] = useState(true);
+  // Folder pages (planner-produced) are first-class root nodes — they
+  // render at the TOP of the Topics section, ahead of any loose topics.
+  // Loose topics still get prefix-grouping; folders bypass it because
+  // they already represent a real backend grouping.
+  const folderPages = pages.filter((p) => p.page_type === "folder");
   const topicPages = pages.filter((p) => p.page_type === "topic");
   const fixedPages = pages.filter((p) => p.page_type === "fixed");
 
@@ -360,7 +365,9 @@ export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSideb
   const afterTopicPages = fixedPages.filter((p) => p.id !== "overview");
 
   // Compute prefix-groups once per topicPages reference. The grouping
-  // is heuristic and stable: same input → same row layout.
+  // is heuristic and stable: same input → same row layout. Folder
+  // pages are intentionally excluded — they're already a structural
+  // grouping and shouldn't get re-grouped by prefix.
   const grouped = useMemo(() => groupByPrefix(topicPages), [topicPages]);
 
   return (
@@ -373,7 +380,7 @@ export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSideb
         />
       )}
 
-      {topicPages.length > 0 && (
+      {(folderPages.length > 0 || topicPages.length > 0) && (
         <div className="mt-1">
           <button
             onClick={() => setTopicsExpanded(!topicsExpanded)}
@@ -386,9 +393,18 @@ export function WikiSidebar({ pages, activePageId, onNavigate, lang }: WikiSideb
             )}
             {wikiT(lang, "topics")}
             <span className="ml-auto text-muted-foreground/70 normal-case font-normal">
-              ({topicPages.length})
+              ({folderPages.length + topicPages.length})
             </span>
           </button>
+          {topicsExpanded && folderPages.map((folder) => (
+            <TopicItemWithChildren
+              key={folder.id}
+              node={folder}
+              activePageId={activePageId}
+              onNavigate={onNavigate}
+              indent={1}
+            />
+          ))}
           {topicsExpanded &&
             grouped.map((row) => {
               if (row.kind === "group") {
