@@ -267,6 +267,9 @@ class WikiCitation(BaseModel):
     """A source citation for a wiki page fact."""
 
     id: str  # "[1]", "[2]", etc.
+    fact_id: str = ""  # The underlying AtomicFact.id (e.g., "f_abc123") so
+    # narrative inline-citation chips can resolve hover-popover content by
+    # the fact_id markers the v3 prompt embeds in paragraph text.
     author: str = ""
     channel: str = ""
     timestamp: str = ""

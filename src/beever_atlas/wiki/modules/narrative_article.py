@@ -23,9 +23,82 @@ never appear in user-facing card text.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
+# ---------------------------------------------------------------------------
+# Mermaid content sanitizer
+# ---------------------------------------------------------------------------
+
+# Matches a node token: identifier optionally followed by a bracket shape.
+_MERMAID_NODE_TOKEN = r"[A-Za-z0-9_]+(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\})?"
+# Matches an arrow token: pipe-style (-->|label|) or plain (-->).
+_MERMAID_ARROW_TOKEN = r"-->?\|[^|]*\||-->"
+# Combined chain pattern: three-or-more hop expression on a single line.
+_MERMAID_CHAIN_RE = re.compile(
+    rf"({_MERMAID_NODE_TOKEN})"
+    rf"((?:\s*(?:{_MERMAID_ARROW_TOKEN})\s*{_MERMAID_NODE_TOKEN}){{2,}})"
+)
+_MERMAID_TOKEN_RE = re.compile(
+    rf"({_MERMAID_NODE_TOKEN})|({_MERMAID_ARROW_TOKEN})"
+)
+
+
+def _clean_mermaid_content(content: str) -> str:
+    """Sanitize raw LLM-generated mermaid source before it reaches the frontend.
+
+    Fixes applied:
+    - Unicode → ASCII: ``…`` → ``...``, smart quotes, en/em dashes.
+    - Chained arrows on one line (``A --> B --> C``) split into per-edge lines.
+    - Parens inside ``[label]`` shapes removed.
+    - Forbidden chars (``; ` " <>``) inside ``[label]`` and ``(label)`` cleaned.
+    - Trailing whitespace stripped per line.
+    """
+    # --- 1. Unicode normalisation (before any regex that inspects labels) ---
+    content = content.replace("…", "...")  # … → ...
+    content = content.replace("“", '"').replace("”", '"')  # "" → "
+    content = content.replace("‘", "'").replace("’", "'")  # '' → '
+    content = content.replace("–", "-").replace("—", "-")  # – — → -
+
+    # --- 2. Split chained arrows ---
+    def _split_chain(m: re.Match[str]) -> str:
+        # findall returns (node_group, arrow_group) tuples; pick whichever matched.
+        tokens: list[str] = [node or arrow for node, arrow in _MERMAID_TOKEN_RE.findall(m.group(0)) if node or arrow]
+        if len(tokens) < 5:
+            return m.group(0)
+        lines: list[str] = []
+        for i in range(0, len(tokens) - 2, 2):
+            lines.append(f"{tokens[i]} {tokens[i + 1]} {tokens[i + 2]}")
+        return "\n    ".join(lines)
+
+    content = _MERMAID_CHAIN_RE.sub(_split_chain, content)
+
+    # --- 3. Per-line label cleanup ---
+    cleaned_lines: list[str] = []
+    for line in content.split("\n"):
+        # Remove parens inside [] labels: [foo(bar)baz] → [foobarbaz]
+        line = re.sub(
+            r"\[([^\]]*)\(([^)]*)\)([^\]]*)\]",
+            lambda mo: f"[{mo.group(1)}{mo.group(2)}{mo.group(3)}]",
+            line,
+        )
+        # Clean forbidden chars inside [] labels
+        line = re.sub(
+            r"\[([^\]]*)\]",
+            lambda mo: "[" + re.sub(r'["`\';<>]', " ", mo.group(1)) + "]",
+            line,
+        )
+        # Clean forbidden chars inside () shapes (only after an identifier)
+        line = re.sub(
+            r"\b([A-Za-z_]\w*)\(([^)]*)\)",
+            lambda mo: mo.group(1) + "(" + re.sub(r'["`\';<>]', " ", mo.group(2)) + ")",
+            line,
+        )
+        cleaned_lines.append(line.rstrip())
+
+    return "\n".join(cleaned_lines)
 
 
 def _clean_paragraph(paragraph: Any) -> dict[str, Any] | None:
@@ -72,6 +145,8 @@ def _clean_visual(visual: Any) -> dict[str, Any] | None:
     # render time, not at build time, to keep this O(1) per visual).
     if isinstance(content, str):
         content = _strip_safety_markers(content)
+        if kind == "mermaid":
+            content = _clean_mermaid_content(content)
     return {"kind": kind, "content": content}
 
 

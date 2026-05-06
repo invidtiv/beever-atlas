@@ -35,6 +35,10 @@ export interface AskResponse {
 
 export interface WikiCitation {
   id: string;
+  /** Underlying AtomicFact.id (e.g., "f_abc123"). Narrative inline
+   *  citation chips look up popover content by this field, since the
+   *  v3 prompt emits `[f_xxx]` markers in paragraph text. */
+  fact_id?: string;
   author: string;
   channel: string;
   timestamp: string;

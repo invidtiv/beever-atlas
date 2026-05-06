@@ -163,6 +163,7 @@ def _build_citations(facts: list[AtomicFact]) -> list[WikiCitation]:
         citations.append(
             WikiCitation(
                 id=f"[{i}]",
+                fact_id=fact.id or "",
                 author=fact.author_name,
                 timestamp=fact.message_ts,
                 text_excerpt=fact.memory_text[:100],

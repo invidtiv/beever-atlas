@@ -749,10 +749,18 @@ export function NarrativeArticleModule({ module, citations }: ModuleProps) {
 
   // Build the fact_id → 1-indexed display number map and the
   // fact_id → WikiCitation lookup.
+  //
+  // The backend WikiCitation.id is "[1]", "[2]", … (a display marker),
+  // while paragraph citations carry the underlying AtomicFact.id
+  // (``f_xxx``). The lookup is keyed on ``fact_id`` so chip popovers
+  // resolve. We tolerate older payloads that lack ``fact_id`` by also
+  // indexing on ``id`` (no-op when ``id`` is the bracketed display
+  // marker — which never matches a real fact_id query).
   const factIdIndex = buildFactIdIndex(sections);
   const citationLookup = new Map<string, WikiCitation>();
   for (const c of citations) {
-    if (c?.id) citationLookup.set(c.id, c);
+    if (c?.fact_id) citationLookup.set(c.fact_id, c);
+    else if (c?.id) citationLookup.set(c.id, c);
   }
 
   const words = totalWordCount(sections);

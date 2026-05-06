@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -14,6 +15,53 @@ from beever_atlas.infra.channel_access import assert_channel_access
 from beever_atlas.infra.config import get_settings
 from beever_atlas.stores import get_stores
 from beever_atlas.wiki.cache import WikiCache
+
+
+def _render_citations_markdown(citations: list[dict]) -> list[str]:
+    """Render a citation list to markdown lines (Sources section).
+
+    Skips the trailing ``[](permalink)`` tail when ``permalink`` is
+    empty so the export doesn't show an ugly ``[]()`` artifact for
+    extractions that lacked thread URLs (#10 in post-export wiki review).
+    Returns an empty list when ``citations`` is empty so callers can
+    branch on truthiness without conditional formatting.
+    """
+    if not citations:
+        return []
+    lines: list[str] = ["\n\n### Sources\n"]
+    for cit in citations:
+        author = cit.get("author", "")
+        ts = cit.get("timestamp", "")
+        excerpt = cit.get("text_excerpt", "")
+        link = (cit.get("permalink") or "").strip()
+        cit_id = cit.get("id", "")
+        head = f"- {cit_id} @{author} · {ts} — {excerpt}".rstrip()
+        if link:
+            lines.append(f"{head} [{link}]({link})")
+        else:
+            lines.append(head)
+    return lines
+
+
+def _build_download_headers(filename: str, fallback: str) -> dict[str, str]:
+    """Build the Content-Disposition + nosniff headers for a markdown
+    download response. Strips CRLF / quotes from the ASCII fallback to
+    prevent header-injection. ``fallback`` is used when the filename
+    drops to empty after ASCII coercion."""
+    safe_ascii = (
+        filename.encode("ascii", "ignore")
+        .decode()
+        .replace('"', "")
+        .replace("\r", "")
+        .replace("\n", "")
+    ) or fallback
+    encoded = quote(filename, safe="")
+    return {
+        "Content-Disposition": (
+            f"attachment; filename=\"{safe_ascii}\"; filename*=UTF-8''{encoded}"
+        ),
+        "X-Content-Type-Options": "nosniff",
+    }
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +233,7 @@ async def download_wiki_markdown(
     from beever_atlas.wiki.modules.narrative_markdown import (
         narrative_sections_to_markdown,
     )
+    from beever_atlas.wiki.modules.modules_markdown import modules_to_markdown
 
     parts: list[str] = [f"# {channel_name} — Wiki\n"]
     for page_id in page_order:
@@ -209,50 +258,83 @@ async def download_wiki_markdown(
             # Separator between the narrative article and the Reference
             # & Evidence (legacy modules) section, mirroring the live UI.
             parts.append("\n---\n")
+        # Serialize ``page.modules[]`` — the structured Reference & Evidence
+        # appendix (key_facts, decision_log, timeline, etc.). Previously
+        # silently dropped; now emitted between the narrative body and the
+        # legacy ``content`` blob so the export mirrors the rendered page.
+        modules_md = modules_to_markdown(page.get("modules") or [])
+        if modules_md:
+            parts.append(modules_md)
+            parts.append("\n---\n")
         parts.append(page.get("content", ""))
-        # Append citations. Each citation may or may not have a
-        # permalink — earlier extractions sometimes lacked thread
-        # URLs. Skip the trailing markdown link entirely when the
-        # permalink is empty so the export doesn't show an ugly
-        # ``[]()`` tail (#10 in the post-export wiki review).
-        citations = page.get("citations", [])
-        if citations:
-            parts.append("\n\n### Sources\n")
-            for cit in citations:
-                author = cit.get("author", "")
-                ts = cit.get("timestamp", "")
-                excerpt = cit.get("text_excerpt", "")
-                link = (cit.get("permalink") or "").strip()
-                cit_id = cit.get("id", "")
-                head = f"- {cit_id} @{author} · {ts} — {excerpt}".rstrip()
-                if link:
-                    parts.append(f"{head} [{link}]({link})")
-                else:
-                    parts.append(head)
+        parts.extend(_render_citations_markdown(page.get("citations", [])))
         parts.append("\n")
 
     md_content = "\n".join(parts)
     filename = f"{channel_name.replace(' ', '-').lower()}-wiki.md"
-    from urllib.parse import quote
-
-    safe_ascii = (
-        filename.encode("ascii", "ignore")
-        .decode()
-        .replace('"', "")
-        .replace("\r", "")
-        .replace("\n", "")
-    ) or "wiki.md"
-    encoded = quote(filename, safe="")
 
     return PlainTextResponse(
         content=md_content,
         media_type="text/markdown",
-        headers={
-            "Content-Disposition": (
-                f"attachment; filename=\"{safe_ascii}\"; filename*=UTF-8''{encoded}"
-            ),
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=_build_download_headers(filename, fallback="wiki.md"),
+    )
+
+
+@router.get("/pages/{page_id}/download")
+async def download_wiki_page_markdown(
+    channel_id: str,
+    page_id: str,
+    target_lang: str | None = Query(default=None),
+    principal: Principal = Depends(require_user),
+) -> PlainTextResponse:
+    """Export a single wiki page as a Markdown file.
+
+    Serializes narrative_sections, modules (Reference & Evidence), the
+    legacy content blob, and citations — the same content the full-wiki
+    download uses for each page, scoped to the requested page_id.
+    """
+    await assert_channel_access(principal, channel_id)
+    cache = _get_cache()
+    lang = await _resolve_target_lang(channel_id, target_lang)
+    page = await cache.get_page(channel_id, page_id, target_lang=lang)
+    if page is None:
+        raise HTTPException(status_code=404, detail=f"Page {page_id!r} not found")
+
+    from beever_atlas.wiki.modules.narrative_markdown import (
+        narrative_sections_to_markdown,
+    )
+    from beever_atlas.wiki.modules.modules_markdown import modules_to_markdown
+
+    title = page.get("title", page_id)
+    section = page.get("section_number", "")
+    prefix = f"{section} " if section else ""
+
+    parts: list[str] = [f"# {prefix}{title}\n"]
+
+    narrative_md = narrative_sections_to_markdown(
+        page.get("narrative_sections") or []
+    )
+    if narrative_md:
+        parts.append(narrative_md)
+        parts.append("\n---\n")
+
+    modules_md = modules_to_markdown(page.get("modules") or [])
+    if modules_md:
+        parts.append(modules_md)
+        parts.append("\n---\n")
+
+    parts.append(page.get("content", ""))
+    parts.extend(_render_citations_markdown(page.get("citations", [])))
+
+    md_content = "\n".join(parts)
+
+    slug = page.get("slug") or page_id
+    filename = f"{slug}-wiki.md"
+
+    return PlainTextResponse(
+        content=md_content,
+        media_type="text/markdown",
+        headers=_build_download_headers(filename, fallback="wiki-page.md"),
     )
 
 
@@ -845,6 +927,8 @@ async def get_wiki_graph(
             {
                 "data": {
                     "id": slug,
+                    "page_id": page.page_id,
+                    "slug": slug,
                     "label": page.title or slug,
                     "kind": "wiki",
                     "page_kind": page.kind or "topic",

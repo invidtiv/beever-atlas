@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useMemo, Suspense, lazy, type ReactNode } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useOutletContext, useParams, useSearchParams } from "react-router-dom";
 import { wikiT } from "@/lib/wikiI18n";
-import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, ArrowRight, FolderSync, History as HistoryIcon } from "lucide-react";
+import { RefreshCw, BookOpen, AlertTriangle, Sparkles, Network, FileText, Loader2, CheckCircle2, Circle, ArrowRight, FolderSync, History as HistoryIcon, Download } from "lucide-react";
 
 // Lazy-load the wiki graph so cytoscape (~200 KB) stays out of the
 // wiki tab's main bundle until the operator toggles ?view=graph.
@@ -33,6 +33,7 @@ import { WikiRegenerateButton } from "@/components/channel/WikiRegenerateButton"
 import { Button } from "@/components/ui/button";
 import { api, authFetch, API_BASE } from "@/lib/api";
 import type { WikiPage, WikiPageNode } from "@/lib/types";
+import type { SyncState } from "@/hooks/useSync";
 
 interface LanguageConfig {
   supported_languages: string[];
@@ -497,6 +498,11 @@ function renderPage(
 export function WikiTab() {
   const { id: channelId } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { triggerSync, isSyncing, syncState } = useOutletContext<{
+    triggerSync?: () => Promise<void>;
+    isSyncing?: boolean;
+    syncState?: SyncState;
+  }>();
   // ``?page={pageId}`` deep-link — seeded on mount, supports the
   // "Open in Wiki tab" button on the wiki graph view's preview panel.
   // The state-setter below clears the param when the user navigates
@@ -556,7 +562,7 @@ export function WikiTab() {
   }, [channelId]);
 
   const { data: wiki, isLoading, error, isNotFound, refetch } = useWiki(channelId, targetLang);
-  const { hasMemories, isLoading: isMemoryCountLoading } = useChannelMemoryCount(channelId);
+  const { hasMemories, isLoading: isMemoryCountLoading, refetch: refetchMemoryCount } = useChannelMemoryCount(channelId);
 
   // Derive manual mode from the effective channel policy.
   // The Maintain Wiki button was removed in the action redesign — the
@@ -637,6 +643,15 @@ export function WikiTab() {
   // action. Update is the new primary, so route the legacy callsite
   // there.
   const handleRefresh = handleUpdate;
+
+  // Sync completion should refresh wiki/memory presence in place so
+  // empty-state CTAs transition to real content without navigation.
+  useEffect(() => {
+    if (!syncState?.job_id || syncState.state !== "idle") return;
+    refetch();
+    refetchVersions();
+    refetchMemoryCount();
+  }, [syncState?.job_id, syncState?.state, refetch, refetchVersions, refetchMemoryCount]);
 
   const handleRegenerateInLang = useCallback((lang: string) => {
     // Switch displayed language AND force a regeneration in that language.
@@ -753,6 +768,33 @@ export function WikiTab() {
     }
   }, [channelId]);
 
+  const handlePageDownload = useCallback(async (pageId: string, pageSlug?: string) => {
+    try {
+      const res = await authFetch(
+        `${API_BASE}/api/channels/${channelId}/wiki/pages/${encodeURIComponent(pageId)}/download`,
+      );
+      if (!res.ok) {
+        alert(`Page download failed (${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const nameMatch = disposition.match(/filename[^;=\n]*=["']?([^"';\n]+)/);
+      const filename = nameMatch
+        ? nameMatch[1].trim()
+        : `${pageSlug ?? pageId}-wiki.md`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("[WikiTab] Page download failed:", err);
+      alert("Page download failed. Please try again.");
+    }
+  }, [channelId]);
+
   // Compute topicPages BEFORE the early returns below — React's rules of
   // hooks require ``useMemo`` to fire on every render, and the early
   // returns at the loading/empty/404 branches would otherwise skip it.
@@ -863,28 +905,24 @@ export function WikiTab() {
     ];
     return (
       <PipelineEmptyState
-        icon={isNoMemory ? FolderSync : BookOpen}
-        title={isNoMemory ? "Sync this channel first" : wikiT(targetLang, "noWikiYet")}
+        icon={BookOpen}
+        title={isNoMemory ? "Build your channel wiki" : wikiT(targetLang, "noWikiYet")}
         description={
           isNoMemory
-            ? "Wikis are built from channel memories. Sync this channel to extract memories, then return here to generate a wiki."
+            ? "Turn conversations into a structured wiki with topics, decisions, and references."
             : wikiT(targetLang, "noWikiEmptySubtitle")
         }
         steps={steps}
+        primaryActionLabel={isNoMemory ? "Sync Channel Now" : undefined}
+        onPrimaryAction={isNoMemory && triggerSync ? () => void triggerSync() : undefined}
+        primaryActionDisabled={!triggerSync || !!isSyncing}
+        primaryActionLoading={!!isSyncing}
+        secondaryActionLabel={isNoMemory ? "View sync history" : undefined}
+        onSecondaryAction={isNoMemory ? () => navigate(`/channels/${channelId}/sync-history`) : undefined}
+        secondaryActionVariant="link"
       >
         {isNoMemory ? (
-          <>
-            <p className="text-xs text-muted-foreground">
-              Use the <span className="font-medium text-foreground">Sync Channel</span> button in the top-right to begin.
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => navigate(`/channels/${channelId}/sync-history`)}
-            >
-              View sync history
-            </Button>
-          </>
+          <></>
         ) : (
           <WikiRegenerateButton
             currentLang={targetLang}
@@ -973,13 +1011,37 @@ export function WikiTab() {
     // 100→60→100 flash even when the lastKeyRef guard correctly skipped
     // the data swap. The guard already prevents content tearing, so the
     // wrapper is pure noise. Render the page directly.
-    pageContent = renderPage(
+    const renderedPage = renderPage(
       activePage,
       topicPages,
       handleNavigate,
       displayedLang,
       folderPages,
       overviewGeneratedAt,
+    );
+    // Per-page download button — shown for every page except the overview
+    // (the top-bar "Download wiki" button covers the overview export).
+    // Icon-only, small, positioned at the top-right of the content column
+    // so it stays out of the way of the page heading.
+    const isOverviewPage =
+      activePage.id === "overview" ||
+      (activePage.page_type === "fixed" && activePage.slug === "overview");
+    pageContent = isOverviewPage ? renderedPage : (
+      <div className="relative">
+        <div className="absolute right-0 top-0 z-10">
+          <button
+            type="button"
+            title="Download this page as Markdown"
+            aria-label="Download page"
+            onClick={() => void handlePageDownload(activePage.id, activePage.slug)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-muted/40 px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          >
+            <Download size={12} />
+            <span className="hidden sm:inline">Export page</span>
+          </button>
+        </div>
+        {renderedPage}
+      </div>
     );
   }
 
