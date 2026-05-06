@@ -1,0 +1,579 @@
+/**
+ * Tests for the NarrativeArticleModule.
+ *
+ * Coverage:
+ *  - Single section + paragraph renders the body
+ *  - Multiple sections render with anchor IDs as `id={anchor}`
+ *  - Citation chips render with `data-fact-id` attribute
+ *  - Citation chip exposes the fact text via the `title` attribute (the
+ *    hover popover is rendered alongside, but title is the zero-cost
+ *    fallback for screen readers / mobile)
+ *  - agent-inference paragraph renders the `[agent-inference]` chip
+ *  - Visual dispatch: table, list, callout, code, blockquote, mermaid
+ *    each render the matching test-id wrapper
+ *  - Reading-time estimate matches `ceil(words / 200)`
+ *  - "X memories synthesized" badge counts distinct fact_ids
+ *  - Empty sections array renders nothing
+ *  - Citation chip without a matching `WikiCitation` still renders
+ *    (back-end may emit a fact_id with no popover preview)
+ */
+
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { render, screen, cleanup } from "@testing-library/react";
+import { NarrativeArticleModule } from "../NarrativeArticleModule";
+import type { WikiCitation, WikiPageModule } from "@/lib/types";
+
+afterEach(() => cleanup());
+
+// MermaidBlock pulls in mermaid which is heavy + relies on browser
+// APIs (matchMedia, getComputedStyle on SVG elements). Mock it for
+// the purpose of these tests — we only assert that the wrapper
+// renders, not the diagram pixels themselves.
+vi.mock("../../MermaidBlock", () => ({
+  MermaidBlock: ({ chart }: { chart: string }) => (
+    <div data-testid="mock-mermaid-block">{chart}</div>
+  ),
+}));
+
+interface ParagraphFixture {
+  text: string;
+  citations?: string[];
+  is_inference?: boolean;
+}
+
+interface SectionFixture {
+  anchor: string;
+  heading: string;
+  paragraphs: ParagraphFixture[];
+  citations?: string[];
+  visual?: { kind: string; content: unknown } | null;
+  citation_coverage?: number;
+}
+
+function makeModule(sections: SectionFixture[] = []): WikiPageModule {
+  return {
+    id: "narrative_article",
+    anchor: "narrative",
+    data: {
+      label: "Article",
+      renderer_kind: "frontend",
+      sections: sections.map((s) => ({
+        anchor: s.anchor,
+        heading: s.heading,
+        paragraphs: s.paragraphs.map((p) => ({
+          text: p.text,
+          citations: p.citations ?? [],
+          is_inference: p.is_inference ?? false,
+        })),
+        citations: s.citations ?? [],
+        visual: s.visual ?? null,
+        citation_coverage: s.citation_coverage ?? 1,
+      })),
+    },
+  };
+}
+
+function makeCitation(id: string, overrides: Partial<WikiCitation> = {}): WikiCitation {
+  return {
+    id,
+    author: "Alice",
+    channel: "general",
+    timestamp: "2025-04-01 12:34",
+    text_excerpt: `Memory text for ${id}`,
+    permalink: "https://example.com/m/123",
+    ...overrides,
+  };
+}
+
+const noop = () => undefined;
+
+// ---------------------------------------------------------------------------
+// Basic rendering
+// ---------------------------------------------------------------------------
+
+describe("NarrativeArticleModule — basic rendering", () => {
+  it("renders article with a single section + paragraph", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Introduction",
+            paragraphs: [
+              { text: "Beever Atlas connects Slack memories to a wiki.", citations: ["f1"] },
+            ],
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    expect(screen.getByTestId("narrative-article")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Introduction" })).toBeInTheDocument();
+    expect(
+      screen.getByText(/Beever Atlas connects Slack memories to a wiki\./),
+    ).toBeInTheDocument();
+  });
+
+  it("renders nothing when sections array is empty (defensive)", () => {
+    const { container } = render(
+      <NarrativeArticleModule
+        module={makeModule([])}
+        citations={[]}
+        onNavigate={noop}
+      />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("renders multiple sections with anchor IDs as `id` attributes", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Introduction",
+            paragraphs: [{ text: "Para A.", citations: ["f1"] }],
+          },
+          {
+            anchor: "details",
+            heading: "Details",
+            paragraphs: [{ text: "Para B.", citations: ["f2"] }],
+          },
+          {
+            anchor: "outlook",
+            heading: "Outlook",
+            paragraphs: [{ text: "Para C.", citations: ["f3"] }],
+          },
+        ])}
+        citations={[makeCitation("f1"), makeCitation("f2"), makeCitation("f3")]}
+        onNavigate={noop}
+      />,
+    );
+    const sections = screen.getAllByTestId("narrative-section");
+    expect(sections).toHaveLength(3);
+    // The h2 heading carries the anchor id so TOC links scroll-snap.
+    expect(document.getElementById("intro")).not.toBeNull();
+    expect(document.getElementById("details")).not.toBeNull();
+    expect(document.getElementById("outlook")).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Citation chips
+// ---------------------------------------------------------------------------
+
+describe("NarrativeArticleModule — citation chips", () => {
+  it("renders chips with `data-fact-id` attribute matching the cited fact_id", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [{ text: "Some prose.", citations: ["f-alpha", "f-beta"] }],
+          },
+        ])}
+        citations={[
+          makeCitation("f-alpha", { text_excerpt: "Alpha memory" }),
+          makeCitation("f-beta", { text_excerpt: "Beta memory" }),
+        ]}
+        onNavigate={noop}
+      />,
+    );
+    const chips = screen.getAllByTestId("narrative-citation-chip");
+    expect(chips).toHaveLength(2);
+    expect(chips[0].getAttribute("data-fact-id")).toBe("f-alpha");
+    expect(chips[1].getAttribute("data-fact-id")).toBe("f-beta");
+    // Display indices are 1-indexed in order of first occurrence.
+    expect(chips[0].textContent).toBe("[1]");
+    expect(chips[1].textContent).toBe("[2]");
+  });
+
+  it("citation chip exposes the fact text via the `title` attribute (popover fallback)", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [{ text: "Some prose.", citations: ["f1"] }],
+          },
+        ])}
+        citations={[
+          makeCitation("f1", {
+            text_excerpt: "OpenClaw runs the Slack bridge.",
+            author: "Bob",
+            timestamp: "2025-04-01 12:34",
+          }),
+        ]}
+        onNavigate={noop}
+      />,
+    );
+    const chip = screen.getByTestId("narrative-citation-chip");
+    const title = chip.getAttribute("title") || "";
+    expect(title).toContain("OpenClaw runs the Slack bridge.");
+    expect(title).toContain("@Bob");
+  });
+
+  it("renders the popover wrapper alongside the chip when the citation is known", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [{ text: "Some prose.", citations: ["f1"] }],
+          },
+        ])}
+        citations={[makeCitation("f1", { text_excerpt: "Cached fact" })]}
+        onNavigate={noop}
+      />,
+    );
+    const popover = screen.getByTestId("narrative-citation-popover");
+    expect(popover).toBeInTheDocument();
+    expect(popover.textContent || "").toContain("Cached fact");
+  });
+
+  it("dedupes display indices across paragraphs (same fact_id → same chip number)", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "s1",
+            heading: "S1",
+            paragraphs: [
+              { text: "First.", citations: ["f-a"] },
+              { text: "Second.", citations: ["f-b", "f-a"] },
+            ],
+          },
+        ])}
+        citations={[makeCitation("f-a"), makeCitation("f-b")]}
+        onNavigate={noop}
+      />,
+    );
+    const chips = screen.getAllByTestId("narrative-citation-chip");
+    // Order on the page: f-a (1), f-b (2), f-a (1)
+    expect(chips.map((c) => c.textContent)).toEqual(["[1]", "[2]", "[1]"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agent-inference chip
+// ---------------------------------------------------------------------------
+
+describe("NarrativeArticleModule — agent-inference paragraphs", () => {
+  it("renders an `[agent-inference]` chip when paragraph.is_inference is true", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [
+              {
+                text: "These decisions together suggest a shift toward enterprise.",
+                citations: ["f1", "f2"],
+                is_inference: true,
+              },
+            ],
+          },
+        ])}
+        citations={[makeCitation("f1"), makeCitation("f2")]}
+        onNavigate={noop}
+      />,
+    );
+    const chip = screen.getByTestId("narrative-inference-chip");
+    expect(chip).toBeInTheDocument();
+    expect(chip.textContent).toBe("[agent-inference]");
+  });
+
+  it("does NOT render the inference chip when paragraph.is_inference is false", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [
+              { text: "Direct fact-cite paragraph.", citations: ["f1"], is_inference: false },
+            ],
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    expect(screen.queryByTestId("narrative-inference-chip")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Visual dispatcher
+// ---------------------------------------------------------------------------
+
+describe("NarrativeArticleModule — visual dispatcher", () => {
+  it("renders a table visual with headers + rows", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "compare",
+            heading: "Compare options",
+            paragraphs: [{ text: "See below.", citations: ["f1"] }],
+            visual: {
+              kind: "table",
+              content: {
+                headers: ["Option", "Cost"],
+                rows: [
+                  ["JWT", "low"],
+                  ["SAML", "high"],
+                ],
+              },
+            },
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const table = screen.getByTestId("narrative-visual-table");
+    expect(table).toBeInTheDocument();
+    expect(table.textContent || "").toContain("Option");
+    expect(table.textContent || "").toContain("JWT");
+    expect(table.textContent || "").toContain("SAML");
+  });
+
+  it("renders an unordered list when ordered is false", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "list",
+            heading: "Steps",
+            paragraphs: [{ text: "Plan.", citations: ["f1"] }],
+            visual: {
+              kind: "list",
+              content: { items: ["First", "Second", "Third"], ordered: false },
+            },
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const list = screen.getByTestId("narrative-visual-list");
+    expect(list.tagName.toLowerCase()).toBe("ul");
+    expect(list.textContent || "").toContain("First");
+    expect(list.textContent || "").toContain("Third");
+  });
+
+  it("renders an ordered list when ordered is true", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "list",
+            heading: "Steps",
+            paragraphs: [{ text: "Plan.", citations: ["f1"] }],
+            visual: {
+              kind: "list",
+              content: { items: ["A", "B"], ordered: true },
+            },
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const list = screen.getByTestId("narrative-visual-list");
+    expect(list.tagName.toLowerCase()).toBe("ol");
+  });
+
+  it("renders a callout via CalloutBox", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "warn",
+            heading: "Warn",
+            paragraphs: [{ text: "Take care.", citations: ["f1"] }],
+            visual: {
+              kind: "callout",
+              content: { type: "warning", content: "Mind the gap." },
+            },
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const callout = screen.getByTestId("narrative-visual-callout");
+    expect(callout).toBeInTheDocument();
+    expect(callout.textContent || "").toContain("Mind the gap.");
+  });
+
+  it("renders a code block with language class", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "code",
+            heading: "Code",
+            paragraphs: [{ text: "See snippet.", citations: ["f1"] }],
+            visual: {
+              kind: "code",
+              content: { language: "python", code: "print('hi')" },
+            },
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const pre = screen.getByTestId("narrative-visual-code");
+    expect(pre).toBeInTheDocument();
+    const code = pre.querySelector("code");
+    expect(code?.className || "").toContain("language-python");
+    expect(code?.textContent || "").toContain("print('hi')");
+  });
+
+  it("renders a blockquote with attribution", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "quote",
+            heading: "Voice",
+            paragraphs: [{ text: "Memorable.", citations: ["f1"] }],
+            visual: {
+              kind: "blockquote",
+              content: { content: "Ship small, ship often.", attribution: "Eng team" },
+            },
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const quote = screen.getByTestId("narrative-visual-blockquote");
+    expect(quote).toBeInTheDocument();
+    expect(quote.textContent || "").toContain("Ship small, ship often.");
+    expect(quote.textContent || "").toContain("Eng team");
+  });
+
+  it("renders a mermaid visual via the mocked MermaidBlock", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "flow",
+            heading: "Flow",
+            paragraphs: [{ text: "See diagram.", citations: ["f1"] }],
+            visual: { kind: "mermaid", content: "graph TD\nA-->B" },
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const wrapper = screen.getByTestId("narrative-visual-mermaid");
+    expect(wrapper).toBeInTheDocument();
+    // Mocked MermaidBlock just echoes the chart string into a stub div.
+    expect(screen.getByTestId("mock-mermaid-block").textContent || "").toContain("graph TD");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Header badges
+// ---------------------------------------------------------------------------
+
+describe("NarrativeArticleModule — header badges", () => {
+  it("computes reading-time as ceil(words / 200)", () => {
+    // 250 words → ceil(250/200) = 2 minutes
+    const longText = Array.from({ length: 250 }, (_, i) => `word${i}`).join(" ");
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [{ text: longText, citations: ["f1"] }],
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const reading = screen.getByTestId("narrative-reading-time");
+    expect(reading.textContent || "").toMatch(/2\s*min read/);
+  });
+
+  it("renders 1 min read for short articles (sub-200-word floor)", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [{ text: "Just a few words here.", citations: ["f1"] }],
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const reading = screen.getByTestId("narrative-reading-time");
+    expect(reading.textContent || "").toMatch(/1\s*min read/);
+  });
+
+  it("counts distinct fact_ids for the 'memories synthesized' badge", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "s1",
+            heading: "S1",
+            paragraphs: [
+              { text: "A.", citations: ["f-a", "f-b"] },
+              { text: "B.", citations: ["f-a", "f-c"] },
+            ],
+          },
+          {
+            anchor: "s2",
+            heading: "S2",
+            paragraphs: [{ text: "C.", citations: ["f-d"] }],
+          },
+        ])}
+        citations={[
+          makeCitation("f-a"),
+          makeCitation("f-b"),
+          makeCitation("f-c"),
+          makeCitation("f-d"),
+        ]}
+        onNavigate={noop}
+      />,
+    );
+    const badge = screen.getByTestId("narrative-memories-synthesized");
+    // 4 distinct fact_ids: f-a, f-b, f-c, f-d
+    expect(badge.textContent || "").toMatch(/4\s*memories\s+synthesized/);
+  });
+
+  it("uses singular 'memory' label when only one fact is cited", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "s1",
+            heading: "S1",
+            paragraphs: [{ text: "Lonely.", citations: ["f-only"] }],
+          },
+        ])}
+        citations={[makeCitation("f-only")]}
+        onNavigate={noop}
+      />,
+    );
+    const badge = screen.getByTestId("narrative-memories-synthesized");
+    expect(badge.textContent || "").toMatch(/1\s*memory\s+synthesized/);
+  });
+});

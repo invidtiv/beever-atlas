@@ -47,6 +47,7 @@ import { TensionCalloutModule } from "./TensionCalloutModule";
 import { FolderStatsModule } from "./FolderStatsModule";
 import { TopContributorsModule } from "./TopContributorsModule";
 import { CrossCuttingDecisionsModule } from "./CrossCuttingDecisionsModule";
+import { NarrativeArticleModule } from "./NarrativeArticleModule";
 
 export interface ModuleProps {
   module: WikiPageModule;
@@ -95,6 +96,14 @@ function extractGlossary(
 // and lighter background tint.
 const READING_AIDS_IDS = new Set(["acronym_legend", "provenance_drawer"]);
 
+// The narrative_article module is the new spotlight (see
+// ``wiki-narrative-articles`` change) — when present it renders FIRST
+// in its own reading column, and the existing 26 modules below get
+// demoted into a collapsible "Reference & Evidence" appendix. When
+// absent (flag OFF, fallback fired, pre-narrative page), today's
+// module-only behavior is preserved.
+const NARRATIVE_ARTICLE_ID = "narrative_article";
+
 function renderModule(
   module: WikiPageModule,
   citations: WikiCitation[],
@@ -126,11 +135,18 @@ export function ModuleRenderer({
   onNavigate,
 }: ModuleRendererProps) {
   const glossary = extractGlossary(modules);
-  // Split modules into spine (top) + reading aids (bottom). Preserve
-  // original order within each bucket so authors keep control of the
-  // sequence — the footer just visually groups the trailing reference
-  // helpers, it doesn't reshuffle them.
-  const spineModules = modules.filter((m) => !READING_AIDS_IDS.has(m.id));
+  // Split modules into three buckets:
+  //   1. narrative_article — the new spotlight, renders FIRST when present
+  //   2. spine modules — existing 26 modules (key_facts, decision_log, ...)
+  //   3. reading aids — acronym_legend + provenance_drawer
+  //
+  // When a narrative_article is present, the spine modules render
+  // inside a collapsible "Reference & Evidence" appendix below the
+  // article. When absent, today's module-only layout is preserved.
+  const narrativeModule = modules.find((m) => m.id === NARRATIVE_ARTICLE_ID);
+  const spineModules = modules.filter(
+    (m) => !READING_AIDS_IDS.has(m.id) && m.id !== NARRATIVE_ARTICLE_ID,
+  );
   const readingAidsModules = modules.filter((m) => READING_AIDS_IDS.has(m.id));
   // Keep the canonical reading-aids order: acronym_legend first
   // (definitions help understand the page body), then provenance
@@ -141,11 +157,38 @@ export function ModuleRenderer({
     if (b.id === "acronym_legend") return 1;
     return 0;
   });
+
+  const hasNarrative = narrativeModule !== undefined;
+
   return (
     <>
-      {spineModules.map((module) =>
-        renderModule(module, citations, onNavigate, glossary),
+      {hasNarrative &&
+        renderModule(narrativeModule, citations, onNavigate, glossary)}
+
+      {hasNarrative ? (
+        spineModules.length > 0 && (
+          <details
+            data-testid="wiki-reference-evidence"
+            className="mt-12 border-t border-border pt-8"
+            open
+          >
+            <summary className="cursor-pointer font-medium text-sm text-muted-foreground uppercase tracking-wide select-none">
+              Reference &amp; Evidence ({spineModules.length} supporting{" "}
+              {spineModules.length === 1 ? "module" : "modules"})
+            </summary>
+            <div className="mt-6 space-y-8">
+              {spineModules.map((module) =>
+                renderModule(module, citations, onNavigate, glossary),
+              )}
+            </div>
+          </details>
+        )
+      ) : (
+        spineModules.map((module) =>
+          renderModule(module, citations, onNavigate, glossary),
+        )
       )}
+
       {readingAidsModules.length > 0 && (
         <aside
           className="wiki-page-footer mt-10 pt-6 border-t border-border/60 bg-muted/5 -mx-2 px-2 rounded-b-lg text-[13px] text-muted-foreground"
@@ -167,6 +210,8 @@ export function ModuleRenderer({
 
 function dispatchModule(module: WikiPageModule, props: ModuleProps) {
   switch (module.id) {
+    case "narrative_article":
+      return <NarrativeArticleModule key={module.anchor} {...props} />;
     case "hero_summary":
       return <HeroSummaryModule key={module.anchor} {...props} />;
     case "key_facts":
