@@ -207,15 +207,89 @@ async def test_save_page_then_get_round_trip() -> None:
     assert fetched.version == 1  # bumped from 0 → 1 on first save
 
 
-async def test_save_page_bumps_version_on_each_save() -> None:
+async def test_save_page_bumps_version_on_each_content_change() -> None:
+    """Version increments on each save where the user-visible content
+    differs from the prior persisted doc. Identical-content saves are
+    suppressed (see ``test_save_page_no_bump_when_content_unchanged``)."""
     store, _ = _make_store()
-    page = _make_page()
-    await store.save_page(page)
-    await store.save_page(page)
-    await store.save_page(page)
+    # Save 1 — first insert (version 0 → 1).
+    await store.save_page(_make_page(title="Auth v1"))
+    # Save 2 — title diff (1 → 2).
+    await store.save_page(_make_page(title="Auth v2"))
+    # Save 3 — title diff (2 → 3).
+    await store.save_page(_make_page(title="Auth v3"))
     fetched = await store.get_page("C1", "topic:auth")
     assert fetched is not None
     assert fetched.version == 3
+
+
+async def test_save_page_no_bump_when_content_unchanged() -> None:
+    """H-3 / H-4: when the new save is byte-identical to the prior
+    persisted doc on the user-visible content fields (title, slug,
+    sections, modules, narrative_sections, …), the version counter is
+    NOT incremented. ``updated_at`` is still refreshed so list-by-
+    recency ordering reflects the touch.
+    """
+    store, _ = _make_store()
+    # First save — fresh insert, version 0 → 1.
+    await store.save_page(_make_page())
+    first = await store.get_page("C1", "topic:auth")
+    assert first is not None and first.version == 1
+    # Second save — identical content, version must stay at 1.
+    await store.save_page(_make_page())
+    second = await store.get_page("C1", "topic:auth")
+    assert second is not None
+    assert second.version == 1
+    # Third save — still identical, still 1.
+    await store.save_page(_make_page())
+    third = await store.get_page("C1", "topic:auth")
+    assert third is not None
+    assert third.version == 1
+
+
+async def test_save_page_no_bump_with_identical_narrative_sections() -> None:
+    """H-3 / H-4 narrative-specific case: when ``narrative_sections``
+    matches the prior persisted doc, version stays put. Re-running the
+    compiler on the same fact set deterministically produces the same
+    article — so unchanged narrative should not drift the version."""
+    store, _ = _make_store()
+    section = {
+        "anchor": "context",
+        "heading": "Context",
+        "paragraphs": [
+            {"text": "Authlib was adopted.", "citations": ["f_1"], "is_inference": False}
+        ],
+        "citations": ["f_1"],
+        "visual": None,
+        "citation_coverage": 1.0,
+    }
+    page = WikiPage(
+        channel_id="C1",
+        target_lang="en",
+        page_id="topic:auth",
+        title="Auth",
+        slug="topic-auth",
+        sections=[WikiPageSection(id="overview", title="Overview", content_md="# Auth")],
+        narrative_sections=[section],
+    )
+    await store.save_page(page)
+    after_first = await store.get_page("C1", "topic:auth")
+    assert after_first is not None
+    assert after_first.version == 1
+    assert after_first.narrative_sections == [section]
+    # Save the same page again — narrative bytes match, version frozen.
+    await store.save_page(page)
+    after_second = await store.get_page("C1", "topic:auth")
+    assert after_second is not None
+    assert after_second.version == 1
+    # Modify the narrative — version bumps.
+    new_section = {**section, "heading": "Background"}
+    page.narrative_sections = [new_section]
+    await store.save_page(page)
+    after_third = await store.get_page("C1", "topic:auth")
+    assert after_third is not None
+    assert after_third.version == 2
+    assert after_third.narrative_sections[0]["heading"] == "Background"
 
 
 async def test_save_page_preserves_created_at_across_saves() -> None:

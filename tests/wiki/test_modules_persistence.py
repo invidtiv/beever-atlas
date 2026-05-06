@@ -138,3 +138,88 @@ def test_persistence_wiki_page_narrative_sections_round_trip() -> None:
     restored = PersistenceWikiPage.model_validate(dumped)
     assert restored.narrative_sections == original.narrative_sections
     assert restored.narrative_sections[0]["anchor"] == "context"
+
+
+def test_domain_wiki_page_narrative_sections_default_empty() -> None:
+    """Domain WikiPage shares the same default — required for the
+    compiler-output round-trip (the compiler returns ``domain.WikiPage``;
+    builder calls ``model_dump`` and stuffs the dict into the legacy
+    cache; per-page persistence reads it back via
+    ``persistence.WikiPage.model_validate``). Without this default,
+    legacy domain pages would crash on validation."""
+    page = DomainWikiPage(id="topic-auth", slug="topic-auth", title="Authentication")
+    assert page.narrative_sections == []
+
+
+def test_domain_to_persistence_narrative_sections_round_trip() -> None:
+    """C-1 regression: ``narrative_sections`` survives the
+    domain → ``model_dump`` → persistence path the WikiBuilder /
+    compiler use to write the legacy cache row that the per-page store
+    reads back. Without ``narrative_sections`` on the DOMAIN model,
+    the compiler's output would be silently dropped between compile +
+    persistence even though the validator + orchestrator produced it.
+    """
+    section = {
+        "anchor": "context",
+        "heading": "Integrate OpenClaw",
+        "paragraphs": [
+            {
+                "text": "The team chose OpenClaw as primary connector.",
+                "citations": ["f_12"],
+                "is_inference": False,
+            }
+        ],
+        "citations": ["f_12"],
+        "visual": None,
+        "citation_coverage": 1.0,
+    }
+    domain_page = DomainWikiPage(
+        id="topic-openclaw",
+        slug="topic-openclaw",
+        title="OpenClaw Integration",
+        page_type="topic",
+        narrative_sections=[section],
+    )
+    # ``model_dump(mode="json")`` is exactly what
+    # ``WikiBuilder.compile_wiki_for_channel`` runs before stuffing the
+    # subdoc into the legacy cache.
+    dumped = domain_page.model_dump(mode="json")
+    assert dumped["narrative_sections"] == [section]
+    # Persistence layer reads the same dict back via ``model_validate``
+    # (the path used by ``WikiCache.get_page`` when ``per_page_wiki=True``
+    # falls back to legacy doc, and by the migration script).
+    persistence_doc = {
+        "channel_id": "C_TEST",
+        "page_id": "topic-openclaw",
+        "slug": "topic-openclaw",
+        "title": "OpenClaw Integration",
+        "narrative_sections": dumped["narrative_sections"],
+    }
+    persisted = PersistenceWikiPage.model_validate(persistence_doc)
+    assert persisted.narrative_sections == [section]
+    assert persisted.narrative_sections[0]["paragraphs"][0]["text"].startswith(
+        "The team chose OpenClaw"
+    )
+
+
+def test_domain_to_persistence_empty_narrative_sections_default() -> None:
+    """Legacy domain pages (no narrative payload) round-trip without
+    losing the empty-list invariant — required for backward compat
+    with pages persisted before wiki-narrative-articles."""
+    domain_page = DomainWikiPage(
+        id="topic-old",
+        slug="topic-old",
+        title="Old Topic",
+    )
+    dumped = domain_page.model_dump(mode="json")
+    assert dumped["narrative_sections"] == []
+    persisted = PersistenceWikiPage.model_validate(
+        {
+            "channel_id": "C_TEST",
+            "page_id": "topic-old",
+            "slug": "topic-old",
+            "title": "Old Topic",
+            "narrative_sections": dumped["narrative_sections"],
+        }
+    )
+    assert persisted.narrative_sections == []

@@ -219,3 +219,76 @@ rollout, but watch for them in soak telemetry:
   `src/beever_atlas/api/mcp_server/_tools_retrieval.py::read_wiki_section`
 - Telemetry endpoint:
   `GET /api/admin/wiki/narrative-health?channel_id=<id>`
+
+## Deferred polish
+
+Code-review findings deemed non-blocking for the initial rollout.
+Each item is tracked here so a follow-up pass can clear them without
+re-discovering the context. Numbered IDs match the original review
+report.
+
+### Medium — quality polish
+
+- **M-1** — Forbidden-phrase regex tightening
+  (`src/beever_atlas/wiki/modules/narrative_validator.py:39-46`).
+  Current substring match catches narration cleanly; tighten to
+  word-boundary matches to avoid false positives on phrases like
+  "shared a link library".
+- **M-2** — Sentence-boundary regex preserves whitespace
+  (`src/beever_atlas/wiki/modules/narrative_validator.py:64`).
+  ``re.split`` on the boundary loses the trailing punctuation; rejoin
+  via ``re.findall`` so truncation outputs match input punctuation.
+- **M-3** — Missing `fact_id` chip rendering
+  (`web/src/components/wiki/modules/NarrativeArticleModule.tsx::ParagraphLine`).
+  When the citation list references a fact not in the page's
+  `citations` array, the chip is silently dropped. Render a `[?]`
+  placeholder in dev mode so authors notice broken references.
+- **M-4** — Unknown module ID warnings in dev
+  (`web/src/components/wiki/modules/ModuleRenderer.tsx`). When an
+  unknown `module.id` reaches the dispatcher today it renders
+  nothing; emit a `console.warn` in dev so frontend authors notice
+  catalog drift.
+- **M-5** — `read_wiki_section` schema parity
+  (`src/beever_atlas/api/mcp_server/_tools_retrieval.py:1338-1352`).
+  Tool returns `anchor`, `heading`, `paragraphs`, `citations`,
+  `visual`, `page_slug`. Add `page_title` and `channel_id` so agents
+  don't need a second `read_wiki_page` to render breadcrumbs.
+- **M-6** — `narrative_section_count` signal documentation
+  (`src/beever_atlas/wiki/modules/orchestrator.py:855` +
+  `src/beever_atlas/wiki/modules/planner.py`). Document the signal
+  in the planner's signal catalog so future module authors know it's
+  populated post-narrative-validation.
+- **M-7** — Edge-case test additions for the validator (e.g.
+  paragraph with `is_inference=true` AND a forbidden phrase, malformed
+  citation list types, single-paragraph 6000+ word section).
+- **M-8** — Anchor sanitization
+  (`src/beever_atlas/wiki/modules/narrative_validator.py:148`).
+  Anchors are taken verbatim from the LLM today; tighten to
+  `/^[a-z0-9-]+$/` and slug-fy or drop violating anchors.
+
+### Low — stylistic + naming + docs
+
+- **L-1** — Replace ``print`` calls with ``logger.info`` in any
+  remaining narrative debug paths (none known on the hot path
+  today; carry-over from Phase 2 dev).
+- **L-2** — `ModularPageOutput.narrative_telemetry` is `dict[str, Any]`;
+  define a TypedDict so the keys are discoverable from IDE autocomplete.
+- **L-3** — `NarrativeArticleModule.coerceSection` repeats the
+  validator's section-shape rules in TS; extract a small zod-like
+  schema or generate from the Python source as a future build-time
+  step.
+- **L-4** — `paragraph.is_inference` vs `is_inference` consistency in
+  prompt + frontend (mostly aligned; one stale doc string in the
+  validator references "inference paragraphs" without the
+  underscored field name).
+- **L-5** — `NarrativeTOC` IntersectionObserver ``rootMargin``
+  (`-10% 0px -70% 0px`) is hand-tuned for the current layout; promote
+  to a named constant and document the trade-off.
+- **L-6** — Citation-coverage chip color thresholds
+  (`web/src/components/wiki/WikiHealthToolbar.tsx`) are inline
+  hex codes; move to design tokens.
+- **L-7** — `archetype_hint_block` injection point in the prompt
+  reads from a stringly-typed key; consider a small enum mapping.
+- **L-8** — `narrative_article` module's ``label`` is hardcoded
+  "Article" in `build_narrative_article_data`; localise via
+  `wikiT` once narrative is on by default for non-English channels.

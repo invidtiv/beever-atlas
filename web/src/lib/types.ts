@@ -75,6 +75,20 @@ export interface WikiPage {
    *  data payload. Empty array = legacy page; renderer falls back to
    *  the single-template flow over ``content``. */
   modules?: WikiPageModule[];
+  /** Multi-section narrative article body produced by the v3
+   *  ``MODULE_COMPILE_PROMPT`` when the ``WIKI_NARRATIVE_ARTICLES``
+   *  feature flag is on. Mirrors the persistence-layer field. The
+   *  layout reads this to mount the sticky TOC; the
+   *  ``NarrativeArticleModule`` reads the same payload via its
+   *  ``module.data.sections`` slice. */
+  narrative_sections?: Array<{
+    anchor: string;
+    heading: string;
+    paragraphs?: Array<{ text: string; citations?: string[]; is_inference?: boolean }>;
+    citations?: string[];
+    visual?: { kind: string; content: unknown } | null;
+    citation_coverage?: number;
+  }>;
 }
 
 /** One entry in the adaptive page module plan. The ``data`` payload

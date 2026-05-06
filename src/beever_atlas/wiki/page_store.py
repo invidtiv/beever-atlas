@@ -27,6 +27,65 @@ from beever_atlas.models.persistence import WikiPage, WikiPageSection, WikiTensi
 logger = logging.getLogger(__name__)
 
 
+# Fields whose byte-equal match between the prior persisted doc and
+# the new save indicate "no content change" so the version bump can
+# be suppressed. Kept narrow on purpose — these are the user-visible
+# rendering surfaces. ``updated_at`` / ``version`` are excluded
+# (always different); ``last_facts_seen`` is excluded (set under
+# concurrent maintainer events even when content is unchanged);
+# ``pin_state`` is excluded (curation API has its own no-bump path).
+_CONTENT_DIFF_FIELDS: tuple[str, ...] = (
+    "title",
+    "slug",
+    "page_type",
+    "kind",
+    "kind_schema",
+    "parent_id",
+    "is_synthetic",
+    "is_dirty",
+    "merged_into",
+    "children",
+    "children_fingerprint",
+    "modules",
+    "narrative_sections",
+    "sections",
+    "tensions",
+    "cross_links",
+    "cross_links_broken",
+)
+
+
+def _narrative_content_equal(prior: dict[str, Any], new_doc: dict[str, Any]) -> bool:
+    """Return True when the prior + new docs represent identical
+    user-visible content.
+
+    Used by ``save_page`` to suppress the version bump when a regen
+    produced byte-identical pages — the ``narrative_sections`` field
+    in particular re-runs deterministically on the same fact set, so
+    drifting version on every regen makes "version" useless as a
+    change-detection signal.
+
+    Comparison is done in canonical-JSON form so dict-key ordering and
+    Pydantic ``UUID`` / ``datetime`` re-serialization don't trip the
+    diff. Defensive: any exception (e.g. unexpected non-JSON-able
+    values that slipped past ``model_dump``) returns False so the
+    standard $inc path takes over.
+    """
+    try:
+        import json as _json
+
+        for field in _CONTENT_DIFF_FIELDS:
+            prior_val = prior.get(field)
+            new_val = new_doc.get(field)
+            if _json.dumps(prior_val, sort_keys=True, default=str) != _json.dumps(
+                new_val, sort_keys=True, default=str
+            ):
+                return False
+        return True
+    except Exception:  # noqa: BLE001 — fall back to bumping on any compare error
+        return False
+
+
 def _canonical_page_path(doc: dict[str, Any]) -> str:
     """Return the canonical ``/wiki/...`` path for a stored page doc.
 
@@ -250,13 +309,14 @@ class WikiPageStore:
         Phase C alongside ``_compile_folder_page``.
 
         ``wiki-narrative-articles`` Phase 1 add-on: when the
-        ``narrative_sections`` content changes vs. the prior persisted
-        document (different anchors, different paragraph text, or
-        different citation lists), the version counter increments.
-        Identical narrative content on re-compile relies on the
-        existing ``$inc`` semantics — every save bumps version, which
-        is the conservative answer (a content-equality check would be
-        a separate optimization, not required for the spec).
+        ``narrative_sections`` content matches the prior persisted
+        document byte-for-byte (same anchors, same paragraph text,
+        same citation lists), the version counter is NOT incremented.
+        Identical narrative content on re-compile is a no-content-
+        change save — version stays put, ``updated_at`` is still
+        refreshed so list-by-recency ordering reflects the touch. A
+        content diff (any field) reverts to the standard ``$inc``
+        bump. See H-3 / H-4 in the wiki-narrative-articles code review.
         """
         if self._collection is None:
             raise RuntimeError("WikiPageStore not bound to a database")
@@ -279,11 +339,26 @@ class WikiPageStore:
         doc.pop("version", None)
         created_at = doc.pop("created_at", None) or datetime.now(tz=UTC).isoformat()
         doc["updated_at"] = datetime.now(tz=UTC).isoformat()
-        update: dict[str, Any] = {
-            "$set": doc,
-            "$inc": {"version": 1},
-            "$setOnInsert": {"created_at": created_at},
-        }
+
+        # Decide whether this save is a true content change or a
+        # no-op re-write (e.g., a regen produced byte-identical
+        # narrative on the same fact set). When the prior doc exists
+        # AND the relevant content fields are deep-equal, suppress
+        # the ``$inc`` so version doesn't drift on harmless saves.
+        # ``updated_at`` is still refreshed via $set so the recency
+        # ordering reflects the touch.
+        update: dict[str, Any]
+        if prior is not None and _narrative_content_equal(prior, doc):
+            update = {
+                "$set": doc,
+                "$setOnInsert": {"created_at": created_at},
+            }
+        else:
+            update = {
+                "$set": doc,
+                "$inc": {"version": 1},
+                "$setOnInsert": {"created_at": created_at},
+            }
         await self._collection.update_one(
             {
                 "channel_id": page.channel_id,

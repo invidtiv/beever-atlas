@@ -310,3 +310,112 @@ async def test_per_channel_override_overrides_global_flag(monkeypatch) -> None:
     assert '"narrative_sections":' in received_prompts[0], (
         "per-channel override did not activate the v3 prompt path"
     )
+
+
+# ---------------------------------------------------------------------------
+# H-8: parse-error fallback emits narrative_article_metrics line
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parse_error_fallback_emits_metrics_line(monkeypatch) -> None:
+    """H-8: when the v3 path hits a parse error, the orchestrator emits
+    BOTH a ``narrative_article_fallback`` line AND a
+    ``narrative_article_metrics`` line so the soak dashboard can
+    aggregate fallback rate consistently with the success path. Without
+    the metrics line, dashboards see ``rejected=False, section_count=0``
+    on every parse failure (because the metrics line was previously
+    only emitted on success) and operators can't distinguish "flag
+    OFF" from "v3 path crashed".
+    """
+    _enable_narrative_flag(monkeypatch)
+
+    import logging
+    captured: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    handler = _ListHandler(level=logging.INFO)
+    orch_logger = logging.getLogger("beever_atlas.wiki.modules.orchestrator")
+    orch_logger.addHandler(handler)
+    orch_logger.setLevel(logging.INFO)
+    try:
+        async def garbage_llm(prompt: str) -> str:
+            return "definitely not json {{{"
+
+        await compile_topic_page_modular(
+            title="Authlib OIDC Adoption",
+            summary="Auth migration.",
+            signals=_signals_for_test(),
+            render_inputs=_render_inputs(),
+            top_facts=[],
+            top_people=[],
+            llm=garbage_llm,
+        )
+    finally:
+        orch_logger.removeHandler(handler)
+
+    messages = [rec.getMessage() for rec in captured]
+    # Fallback log line is required.
+    assert any(
+        "narrative_article_fallback" in m and "parse_error" in m
+        for m in messages
+    ), f"missing parse_error fallback log; got {messages}"
+    # Metrics log line is required (H-8).
+    assert any(
+        "narrative_article_metrics" in m
+        and "parse_error" in m
+        and "rejected=True" in m
+        and "section_count=0" in m
+        for m in messages
+    ), (
+        "missing narrative_article_metrics line on parse-error path; "
+        f"got {messages}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_llm_error_fallback_emits_metrics_line(monkeypatch) -> None:
+    """H-8 sister case: when the LLM call itself raises, the
+    orchestrator should still emit fallback + metrics lines so the
+    dashboard can aggregate llm-error fallback rate."""
+    _enable_narrative_flag(monkeypatch)
+
+    import logging
+    captured: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    handler = _ListHandler(level=logging.INFO)
+    orch_logger = logging.getLogger("beever_atlas.wiki.modules.orchestrator")
+    orch_logger.addHandler(handler)
+    orch_logger.setLevel(logging.INFO)
+    try:
+        async def crashing_llm(prompt: str) -> str:
+            raise RuntimeError("simulated llm crash")
+
+        await compile_topic_page_modular(
+            title="Authlib OIDC Adoption",
+            summary="Auth migration.",
+            signals=_signals_for_test(),
+            render_inputs=_render_inputs(),
+            top_facts=[],
+            top_people=[],
+            llm=crashing_llm,
+        )
+    finally:
+        orch_logger.removeHandler(handler)
+
+    messages = [rec.getMessage() for rec in captured]
+    assert any(
+        "narrative_article_fallback" in m and "llm_error" in m
+        for m in messages
+    ), f"missing llm_error fallback log; got {messages}"
+    assert any(
+        "narrative_article_metrics" in m and "llm_error" in m
+        for m in messages
+    ), f"missing metrics line on llm-error path; got {messages}"

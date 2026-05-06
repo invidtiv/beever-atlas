@@ -1,13 +1,62 @@
-import { type ReactNode, useState, useCallback, useRef, useEffect } from "react";
+import { type ReactNode, useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Search, X, ChevronUp, ChevronDown, Menu } from "lucide-react";
 import { WikiSidebar } from "./WikiSidebar";
 import { WikiBreadcrumb } from "./WikiBreadcrumb";
 import { FreshnessBadge } from "./FreshnessBadge";
 import { WikiTableOfContents } from "./WikiTableOfContents";
+import { NarrativeTOC } from "./NarrativeTOC";
 import { VersionHistoryPanel } from "./VersionHistoryPanel";
 import { WikiRegenerateButton } from "@/components/channel/WikiRegenerateButton";
 import type { WikiStructure, WikiPage, WikiVersionSummary } from "@/lib/types";
 import { wikiT } from "@/lib/wikiI18n";
+
+/** Extract narrative-article TOC sections from a wiki page.
+ *
+ *  The narrative payload lives in TWO places after the
+ *  wiki-narrative-articles change: the page-level ``narrative_sections``
+ *  field (the canonical source — mirrored from persistence) AND the
+ *  ``narrative_article`` module's ``data.sections`` slice (built by
+ *  ``build_narrative_article_data`` for the React dispatcher). We
+ *  prefer the module-data path because it's been through the section
+ *  cleanup that drops anchorless / paragraph-less entries; we fall
+ *  back to the page-level field when the module entry is missing
+ *  (older docs that persisted ``narrative_sections`` but predate the
+ *  ``narrative_article`` planner pick).
+ */
+function extractNarrativeTocSections(
+  page: WikiPage,
+): Array<{ anchor: string; heading: string }> {
+  const sections: Array<{ anchor: string; heading: string }> = [];
+  const seen = new Set<string>();
+  const push = (anchor: unknown, heading: unknown) => {
+    if (typeof anchor !== "string" || !anchor) return;
+    if (typeof heading !== "string" || !heading) return;
+    if (seen.has(anchor)) return;
+    seen.add(anchor);
+    sections.push({ anchor, heading });
+  };
+  const narrativeModule = (page.modules ?? []).find(
+    (m) => m.id === "narrative_article",
+  );
+  if (narrativeModule?.data) {
+    const moduleSections = (narrativeModule.data as { sections?: unknown })
+      .sections;
+    if (Array.isArray(moduleSections)) {
+      for (const s of moduleSections) {
+        if (s && typeof s === "object") {
+          const r = s as Record<string, unknown>;
+          push(r.anchor, r.heading);
+        }
+      }
+    }
+  }
+  if (sections.length === 0 && Array.isArray(page.narrative_sections)) {
+    for (const s of page.narrative_sections) {
+      push(s?.anchor, s?.heading);
+    }
+  }
+  return sections;
+}
 
 interface WikiLayoutProps {
   channelId: string;
@@ -287,6 +336,19 @@ export function WikiLayout({
   const contentRef = useRef<HTMLDivElement>(null);
   const searchableContentRef = useRef<HTMLDivElement>(null);
 
+  // Narrative TOC sections come from the active page's narrative
+  // payload (page-level field or ``narrative_article`` module data).
+  // When ≥3 sections exist the sticky TOC mounts in the right rail
+  // and ``WikiTableOfContents`` is suppressed (the article body has
+  // ``data-toc-skip`` so the existing TOC wouldn't list narrative
+  // headings anyway, but suppressing the legacy fallback keeps the
+  // rail focused on the article structure).
+  const narrativeTocSections = useMemo(
+    () => extractNarrativeTocSections(activePage),
+    [activePage],
+  );
+  const hasNarrativeToc = narrativeTocSections.length >= 3;
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDragging.current = true;
@@ -461,10 +523,22 @@ export function WikiLayout({
         </div>
       </div>
 
-      {/* Right TOC Sidebar */}
+      {/* Right TOC Sidebar — when the active page has a multi-section
+          narrative article (≥3 sections), mount ``NarrativeTOC`` so
+          readers get a sticky table of contents tied to the article's
+          own anchors. The narrative article body is wrapped in
+          ``data-toc-skip`` so ``WikiTableOfContents`` already ignores
+          its headings; we still swap the rail entirely for narrative
+          pages because the heading-extraction TOC would be empty
+          anyway, and the narrative TOC carries semantically richer
+          labels (the planner's section headings, not raw H2 text). */}
       <div className="hidden xl:block w-48 shrink-0 overflow-y-auto">
         <div className="sticky top-0 px-4 py-8">
-          <WikiTableOfContents contentRef={contentRef} />
+          {hasNarrativeToc ? (
+            <NarrativeTOC sections={narrativeTocSections} />
+          ) : (
+            <WikiTableOfContents contentRef={contentRef} />
+          )}
         </div>
       </div>
     </div>

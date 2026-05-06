@@ -326,19 +326,41 @@ function VisualBlock({ visual }: VisualBlockProps) {
       );
     }
     case "callout": {
+      // Accept BOTH shapes the v3 prompt and earlier docs may have
+      // emitted: ``{type, content}`` (older docs) and
+      // ``{variant, text}`` (the v3 prompt's documented schema, see
+      // ``wiki/prompts.py`` callout example). Picking either canonical
+      // form would break the other; tolerating both keeps existing
+      // persisted articles renderable AND matches the prompt today.
+      // ``info`` is treated as ``note`` (the prompt allows
+      // ``warning|info|tip`` but the underlying CalloutBox component
+      // only knows ``note|tip|warning``).
       const content = visual.content as
-        | { type?: unknown; content?: unknown; text?: unknown }
+        | {
+            type?: unknown;
+            variant?: unknown;
+            content?: unknown;
+            text?: unknown;
+          }
         | undefined
         | null;
-      const typeRaw =
-        typeof content?.type === "string" ? content.type.toLowerCase() : "note";
+      const variantRaw =
+        typeof content?.variant === "string"
+          ? content.variant.toLowerCase()
+          : typeof content?.type === "string"
+            ? content.type.toLowerCase()
+            : "note";
       const type: "note" | "tip" | "warning" =
-        typeRaw === "tip" || typeRaw === "warning" ? typeRaw : "note";
+        variantRaw === "tip"
+          ? "tip"
+          : variantRaw === "warning"
+            ? "warning"
+            : "note";
       const text =
-        typeof content?.content === "string"
-          ? content.content
-          : typeof content?.text === "string"
-            ? content.text
+        typeof content?.text === "string"
+          ? content.text
+          : typeof content?.content === "string"
+            ? content.content
             : "";
       if (!text) return null;
       return (

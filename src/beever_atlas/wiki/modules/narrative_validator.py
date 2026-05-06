@@ -29,6 +29,8 @@ import logging
 import re
 from typing import Any
 
+from beever_atlas.wiki.modules._text_utils import _strip_safety_markers
+
 logger = logging.getLogger(__name__)
 
 
@@ -146,7 +148,14 @@ def _validate_section(
     if not isinstance(section, dict):
         return None
     anchor = str(section.get("anchor") or "").strip()
-    heading = str(section.get("heading") or "").strip()
+    # ``_strip_safety_markers`` is the canonical scrub point for
+    # prompt-safety wrappers (``<untrusted>``, ``<sanitized>``,
+    # ``<external>``). Applying it here, BEFORE persistence, means
+    # downstream consumers (frontend builder, MCP ``read_wiki_section``
+    # tool, drift comparator) receive clean text without each
+    # re-implementing the strip. See H-6 in the
+    # ``wiki-narrative-articles`` code review.
+    heading = _strip_safety_markers(section.get("heading") or "")
     if not anchor or not heading:
         logger.info(
             "narrative_section_dropped reason=missing_anchor_or_heading anchor=%s",
@@ -163,10 +172,21 @@ def _validate_section(
         if not isinstance(paragraph, dict):
             paragraphs_dropped[0] += 1
             continue
-        text = paragraph.get("text") or ""
-        if not isinstance(text, str) or not text.strip():
+        text_raw = paragraph.get("text") or ""
+        # Scrub safety markers before any other check — the
+        # forbidden-phrase + uncited filters need to see the cleaned
+        # text, and persisting the cleaned form means the frontend
+        # builder + MCP tool inherit the strip without duplicating it.
+        text = _strip_safety_markers(text_raw) if isinstance(text_raw, str) else ""
+        if not text:
             paragraphs_dropped[0] += 1
             continue
+        # Mutate the input dict so subsequent forbidden-phrase and
+        # citation checks operate on the cleaned text. The dict is the
+        # validator's local copy from the caller's list — safe to
+        # adjust for the duration of the loop iteration.
+        paragraph = dict(paragraph)
+        paragraph["text"] = text
         # 1. Forbidden-phrase filter — drop activity-narration paragraphs
         #    BEFORE the citation check so the structured log carries the
         #    most informative reason.
@@ -220,6 +240,17 @@ def _validate_section(
     # 3. Word-cap enforcement per section. Reconstruct the section
     #    text, count words, and if over the soft cap, truncate the
     #    LAST paragraph at a sentence boundary so the section fits.
+    #
+    # H-7 contract note: paragraph-level ``citations`` are metadata,
+    # NOT inline-reference tokens scraped from ``text``. When the last
+    # paragraph is truncated below, the ``citations`` list is left
+    # untouched — the validator does NOT re-derive citations by
+    # parsing ``[f_xxx]`` patterns out of the surviving text because
+    # the v3 prompt's citation discipline persists ``citations`` as a
+    # structured list (paragraphs cite by id, not by inline pattern).
+    # Display chips therefore reflect the paragraph's full claim set,
+    # not a substring lookup. Future tooling that wants chip-text
+    # alignment must do its own substring matching at render time.
     section_text = " ".join(p["text"] for p in cleaned_paragraphs)
     section_words = _word_count(section_text)
     if section_words > _SECTION_SOFT_MAX_WORDS:
@@ -229,7 +260,8 @@ def _validate_section(
         )
         # Truncate the last paragraph so the section fits. We keep all
         # earlier paragraphs intact; this preserves citation coverage
-        # and avoids a global re-balance.
+        # and avoids a global re-balance. The truncated paragraph's
+        # ``citations`` list is preserved (see H-7 contract note above).
         excess = section_words - _SECTION_SOFT_MAX_WORDS
         last = cleaned_paragraphs[-1]
         last_words = _word_count(last["text"])
@@ -313,6 +345,53 @@ def validate_narrative_sections(
     paragraphs_dropped = [0]
     sections_dropped = 0
     cleaned: list[dict[str, Any]] = []
+
+    # ── RAW citation-coverage gate (H-2) ─────────────────────────────
+    # Compute citation coverage on the RAW input BEFORE per-paragraph
+    # filtering. The earlier shape of this pass dropped uncited
+    # paragraphs first; the surviving set was 100% cited and the gate
+    # never fired — making the spec's ≥80% threshold dead code. Now
+    # the gate is computed on the LLM's pre-filter output: if the
+    # writer is producing too many uncited paragraphs to begin with,
+    # we reject the article wholesale and the orchestrator falls back
+    # to module-only rendering.
+    total_input_paragraphs = 0
+    cited_input_paragraphs = 0
+    for s in sections_in:
+        if not isinstance(s, dict):
+            continue
+        paragraphs = s.get("paragraphs")
+        if not isinstance(paragraphs, list):
+            continue
+        for p in paragraphs:
+            if not isinstance(p, dict):
+                continue
+            total_input_paragraphs += 1
+            citations_raw = p.get("citations")
+            if isinstance(citations_raw, list) and any(
+                isinstance(c, str) and c.strip() for c in citations_raw
+            ):
+                cited_input_paragraphs += 1
+    raw_coverage = (
+        cited_input_paragraphs / total_input_paragraphs
+        if total_input_paragraphs > 0
+        else 0.0
+    )
+    if total_input_paragraphs > 0 and raw_coverage < _CITATION_COVERAGE_GATE:
+        logger.info(
+            "narrative_article_rejected reason=low_citation_coverage "
+            "raw_coverage=%.3f gate=%.2f cited=%d total=%d",
+            raw_coverage, _CITATION_COVERAGE_GATE,
+            cited_input_paragraphs, total_input_paragraphs,
+        )
+        return [], {
+            "rejected": True,
+            "reason": "low_citation_coverage",
+            "citation_coverage": raw_coverage,
+            "total_words": 0,
+            "sections_dropped": 0,
+            "paragraphs_dropped": 0,
+        }
 
     try:
         for raw in sections_in:

@@ -85,13 +85,30 @@ def test_malformed_section_dropped() -> None:
 
 
 def test_uncited_paragraph_dropped() -> None:
-    """A paragraph with empty citations is dropped before coverage gating."""
+    """A paragraph with empty citations is dropped via the per-paragraph
+    filter — but only when the article-level RAW coverage clears the
+    80% gate. With one cited + one uncited (50% raw coverage) the
+    article is now rejected wholesale by the H-2 fix; this test
+    therefore exercises a 5-paragraph section where the dropped
+    paragraph is below the gate threshold (4/5 = 80% boundary)."""
     sections = [
         _make_section(
             paragraphs=[
                 _make_paragraph(
                     text="The team adopted Authlib for OAuth/OIDC discovery.",
                     citations=["f_1"],
+                ),
+                _make_paragraph(
+                    text="It supports OIDC discovery natively.",
+                    citations=["f_2"],
+                ),
+                _make_paragraph(
+                    text="The migration was completed in two weeks.",
+                    citations=["f_3"],
+                ),
+                _make_paragraph(
+                    text="Operators report no incidents post-migration.",
+                    citations=["f_4"],
                 ),
                 _make_paragraph(
                     text="This is an uncited claim that must be dropped.",
@@ -101,25 +118,26 @@ def test_uncited_paragraph_dropped() -> None:
         ),
     ]
     cleaned, telem = validate_narrative_sections(sections)
-    # The whole article fails coverage if uncited paragraphs are
-    # dropped from a 2-paragraph section (1/2 = 50% < 80%) — but
-    # since drops happen pre-coverage, the surviving section has
-    # 1/1 = 100% coverage.
+    # 4/5 = 80% raw coverage clears the gate (>= 0.80 boundary).
     assert telem["paragraphs_dropped"] >= 1
     if cleaned:
-        # Validator kept the cited paragraph, dropped the uncited one.
+        # Validator kept the cited paragraphs, dropped the uncited one.
         assert all(p["citations"] for p in cleaned[0]["paragraphs"])
 
 
 def test_uncited_inference_paragraph_dropped() -> None:
-    """Inference paragraphs MUST cite ≥1 fact_id (Decision 3)."""
+    """Inference paragraphs MUST cite ≥1 fact_id (Decision 3).
+
+    Five paragraphs (4 cited + 1 uncited inference) keeps raw coverage
+    at 80% — clears the article-level gate (H-2) so the per-paragraph
+    drop of the uncited inference is observable in cleaned output."""
     sections = [
         _make_section(
             paragraphs=[
-                _make_paragraph(
-                    text="The team adopted Authlib.",
-                    citations=["f_1"],
-                ),
+                _make_paragraph(text="Adopted Authlib.", citations=["f_1"]),
+                _make_paragraph(text="OIDC supported.", citations=["f_2"]),
+                _make_paragraph(text="Migrated.", citations=["f_3"]),
+                _make_paragraph(text="Operators are happy.", citations=["f_4"]),
                 _make_paragraph(
                     text="Together these decisions suggest a shift toward enterprise.",
                     citations=[],
@@ -239,16 +257,35 @@ def test_synthesized_voice_passes_filter() -> None:
 
 
 def test_low_coverage_rejects_article() -> None:
-    """Articles below 80% citation coverage are rejected wholesale.
+    """Articles below 80% RAW citation coverage are rejected wholesale.
 
-    Note: paragraphs with NO citations are dropped before the coverage
-    calculation, so to test the coverage gate we need every paragraph
-    to survive (have at least one citation) but the OVERALL article
-    coverage must still come out under 80%. Today the per-paragraph
-    drop ensures surviving paragraphs are 100% cited, so this test
-    verifies the coverage gate doesn't fire on a clean article.
+    Coverage is now computed on the LLM's pre-filter output (H-2 fix
+    in the wiki-narrative-articles code review). Six paragraphs with
+    only three cited (50% raw coverage) trip the gate; the article is
+    rejected and the orchestrator falls back to module-only rendering.
     """
-    # 4 paragraphs all cited → coverage = 100% → not rejected
+    sections = [
+        _make_section(
+            paragraphs=[
+                _make_paragraph(text="Cited 1.", citations=["f_1"]),
+                _make_paragraph(text="Cited 2.", citations=["f_2"]),
+                _make_paragraph(text="Cited 3.", citations=["f_3"]),
+                _make_paragraph(text="Uncited 1.", citations=[]),
+                _make_paragraph(text="Uncited 2.", citations=[]),
+                _make_paragraph(text="Uncited 3.", citations=[]),
+            ]
+        ),
+    ]
+    cleaned, telem = validate_narrative_sections(sections)
+    assert cleaned == []
+    assert telem["rejected"] is True
+    assert telem["reason"] == "low_citation_coverage"
+    # 3 / 6 = 0.5 raw coverage — well below the 0.80 gate.
+    assert telem["citation_coverage"] < 0.80
+
+
+def test_full_coverage_passes_gate() -> None:
+    """Articles at >= 80% RAW citation coverage clear the gate."""
     sections = [
         _make_section(
             paragraphs=[
@@ -411,6 +448,50 @@ def test_section_visual_passes_through() -> None:
     cleaned, _ = validate_narrative_sections(sections)
     assert len(cleaned) == 1
     assert cleaned[0]["visual"] == visual
+
+
+def test_safety_markers_stripped_from_paragraph_text() -> None:
+    """H-6: prompt-safety wrapper tags are stripped at the validator
+    level so downstream consumers (frontend builder, MCP read_wiki_section
+    tool, drift comparator) all see clean text without re-implementing
+    the strip."""
+    sections = [
+        _make_section(
+            paragraphs=[
+                _make_paragraph(
+                    text="<untrusted>Authlib was adopted for OIDC.</untrusted>",
+                    citations=["f_1"],
+                ),
+                _make_paragraph(
+                    text="The team migrated quickly.",
+                    citations=["f_2"],
+                ),
+            ]
+        ),
+    ]
+    cleaned, telem = validate_narrative_sections(sections)
+    assert telem["rejected"] is False
+    assert len(cleaned) == 1
+    first_text = cleaned[0]["paragraphs"][0]["text"]
+    assert "<untrusted>" not in first_text
+    assert "</untrusted>" not in first_text
+    assert "Authlib" in first_text
+
+
+def test_safety_markers_stripped_from_heading() -> None:
+    """Heading text is also scrubbed by the canonical strip point."""
+    sections = [
+        _make_section(
+            anchor="ctx",
+            heading="<untrusted>Context</untrusted>",
+            paragraphs=[
+                _make_paragraph(text="Authlib was adopted.", citations=["f_1"]),
+            ],
+        ),
+    ]
+    cleaned, _ = validate_narrative_sections(sections)
+    assert len(cleaned) == 1
+    assert cleaned[0]["heading"] == "Context"
 
 
 def test_section_invalid_visual_set_to_none() -> None:

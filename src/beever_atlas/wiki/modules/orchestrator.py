@@ -769,6 +769,22 @@ async def compile_topic_page_modular(
         raw = await result if inspect.isawaitable(result) else result  # type: ignore[assignment]
     except Exception as exc:  # noqa: BLE001
         logger.exception("module_compile_llm_failed exc=%s", exc)
+        if narrative_enabled:
+            # H-8: emit ``narrative_article_metrics`` on the LLM-error
+            # fallback path so soak dashboards see fallback metrics
+            # consistently across every failure cause (LLM crash,
+            # parse error, validator rejection).
+            page_slug_for_log = str(render_inputs.get("page_id") or title)
+            logger.info(
+                "narrative_article_fallback reason=llm_error page=%s",
+                page_slug_for_log,
+            )
+            logger.info(
+                "narrative_article_metrics page=%s section_count=0 total_words=0 "
+                "citation_coverage=0.000 distinct_facts_cited=0 rejected=True "
+                "reason=llm_error",
+                page_slug_for_log,
+            )
         return _fallback_output(title, render_inputs)
 
     # Stage 2 — parse JSON response.
@@ -785,6 +801,21 @@ async def compile_topic_page_modular(
             page_slug_for_log = str(render_inputs.get("page_id") or title)
             logger.info(
                 "narrative_article_fallback reason=parse_error page=%s",
+                page_slug_for_log,
+            )
+            # H-8: also emit ``narrative_article_metrics`` on the
+            # parse-error fallback path. Without this, the soak
+            # dashboard sees ``rejected=False, section_count=0`` for
+            # every parse failure (because the metrics line was only
+            # emitted on the success branch) and operators can't
+            # distinguish "flag was OFF" from "v3 path crashed". The
+            # fallback record carries zero counts and the explicit
+            # ``rejected=True, reason=parse_error`` so dashboards can
+            # aggregate fallback rate consistently.
+            logger.info(
+                "narrative_article_metrics page=%s section_count=0 total_words=0 "
+                "citation_coverage=0.000 distinct_facts_cited=0 rejected=True "
+                "reason=parse_error",
                 page_slug_for_log,
             )
         return _fallback_output(title, render_inputs)

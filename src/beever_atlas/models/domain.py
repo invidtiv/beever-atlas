@@ -325,6 +325,19 @@ class WikiPage(BaseModel):
     # to the single-template flow over ``content``.
     modules: list[dict[str, Any]] = Field(default_factory=list)
 
+    # ``wiki-narrative-articles`` — multi-section narrative article
+    # body produced by the v3 ``MODULE_COMPILE_PROMPT`` when the
+    # ``WIKI_NARRATIVE_ARTICLES`` feature flag is on. Each entry is
+    # ``{anchor, heading, paragraphs: [{text, citations[],
+    # is_inference}], citations[], visual: dict | None,
+    # citation_coverage: float}``. Mirrors ``persistence.WikiPage.
+    # narrative_sections`` so the domain → ``model_dump`` →
+    # ``wiki_cache`` round-trip carries the field through to the per-
+    # page store. Empty list means the page predates narrative
+    # generation OR the validator rejected the LLM output and the
+    # page falls back to module-only rendering.
+    narrative_sections: list[dict[str, Any]] = Field(default_factory=list)
+
     @property
     def is_folder(self) -> bool:
         """True when this page is a structure-planner folder (or

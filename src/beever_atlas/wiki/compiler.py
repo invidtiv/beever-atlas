@@ -3594,6 +3594,13 @@ class WikiCompiler:
                 out.content, _build_citations(sorted_facts[:20])
             ),
             modules=out.modules,
+            # ``wiki-narrative-articles`` — propagate the validated
+            # narrative payload through to the domain page so
+            # ``model_dump`` writes it into the cached subdoc; the
+            # persistence layer mirrors the field name and the read
+            # path materialises it back. Empty list when the flag is
+            # OFF or the validator rejected the LLM output.
+            narrative_sections=list(getattr(out, "narrative_sections", []) or []),
             children=children_refs,
         )
 
