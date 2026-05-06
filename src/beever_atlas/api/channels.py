@@ -456,10 +456,20 @@ async def list_channels() -> list[ChannelResponse]:
                 )
                 # Fall back to the persisted pick-list so the workspace
                 # still appears even when its bridge is briefly down.
+                #
+                # Mark these channels as ``"error"`` regardless of the
+                # row's stored ``conn.status`` — the live fetch just
+                # failed, which is empirically more authoritative than
+                # whatever the platform_store has cached. This is what
+                # makes the sidebar's ⚠ badge show up for cases like
+                # Slack ``account_inactive`` (token's underlying account
+                # is dead but the connection row was never updated). The
+                # persisted ``conn.status`` is a slow signal; bridge
+                # fetch failure is a fast signal — prefer the fast one.
                 synthesised = await _synthesize_channels_from_selected(conn)
                 all_channels.extend(synthesised)
                 for ch in synthesised:
-                    status_by_channel[ch.channel_id] = conn.status
+                    status_by_channel[ch.channel_id] = "error"
                 continue
             all_channels.extend(result)
             for ch in result:
