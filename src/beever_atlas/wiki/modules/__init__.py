@@ -229,6 +229,14 @@ def _has_tensions() -> SelectionPredicate:
     return lambda s: int(s.get("tension_count", 0)) >= 1
 
 
+def _has_narrative_sections() -> SelectionPredicate:
+    """Eligible when the cluster has at least one validated narrative
+    section. The signal ``narrative_section_count`` is populated by
+    ``compute_signals`` from ``cluster.get("narrative_sections")``;
+    pre-narrative pages collapse to 0 naturally."""
+    return lambda s: int(s.get("narrative_section_count", 0)) >= 1
+
+
 # ---------------------------------------------------------------------------
 # The catalog — single source of truth.
 # ---------------------------------------------------------------------------
@@ -240,6 +248,13 @@ MODULE_CATALOG: dict[str, ModuleSpec] = {
         label="Summary",
         description="Bold TL;DR + 2-3 sentence overview + a compact stat strip showing critical / decision / open-question / tension counts. Always module #1 when fact_count ≥ 1.",
         eligible=_always_eligible_with_min_facts(1),
+        renderer_kind="frontend",
+    ),
+    "narrative_article": ModuleSpec(
+        id="narrative_article",
+        label="Article",
+        description="Multi-section article with explanatory prose, inline citations, and optional supporting visuals. Renders at the top of the page; existing modules render below as Reference & Evidence appendix.",
+        eligible=_has_narrative_sections(),
         renderer_kind="frontend",
     ),
     "decision_banner": ModuleSpec(

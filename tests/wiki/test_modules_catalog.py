@@ -14,12 +14,13 @@ from beever_atlas.wiki.modules import (
 
 
 def test_catalog_has_all_documented_modules() -> None:
-    """The 26 module IDs declared in the spec MUST all exist in the
+    """The 27 module IDs declared in the spec MUST all exist in the
     catalog. Adding/removing modules requires updating the spec — this
     guard catches code-only drift."""
     expected = {
         # Content
         "hero_summary",
+        "narrative_article",  # multi-section narrative article (wiki-narrative-articles)
         "decision_banner",  # archetype-aware spotlight (Phase 4 prep)
         "tension_callout",  # heuristic tension detector (Phase 4)
         "key_facts",
@@ -82,9 +83,10 @@ def test_list_module_ids_stable_order() -> None:
     a stable order means deterministic prompts."""
     ids = list_module_ids()
     assert ids[0] == "hero_summary"  # first in catalog (always module #1)
-    assert ids[1] == "decision_banner"  # archetype-aware spotlight (module #2 on Decision pages)
-    assert ids[2] == "tension_callout"  # heuristic-detected contradicting position pair
-    assert ids[3] == "key_facts"  # spine content begins after archetype-spotlights
+    assert ids[1] == "narrative_article"  # multi-section article (Top of page when present)
+    assert ids[2] == "decision_banner"  # archetype-aware spotlight (module #2 on Decision pages)
+    assert ids[3] == "tension_callout"  # heuristic-detected contradicting position pair
+    assert ids[4] == "key_facts"  # spine content begins after archetype-spotlights
     # Folder-archetype modules sit at the END of the catalog (after
     # ``provenance_drawer``); they only fire on folder index pages.
     assert ids[-1] == "cross_cutting_decisions"
@@ -92,7 +94,8 @@ def test_list_module_ids_stable_order() -> None:
     assert "folder_stats" in ids
     assert "top_contributors" in ids
     assert "tension_callout" in ids
-    assert len(ids) == 26
+    assert "narrative_article" in ids
+    assert len(ids) == 27
 
 
 def test_eligible_predicates_handle_missing_signals() -> None:

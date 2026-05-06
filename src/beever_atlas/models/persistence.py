@@ -424,5 +424,16 @@ class WikiPage(BaseModel):
     legacy single-template flow over ``content``. See spec
     ``adaptive-page-modules`` for the catalog."""
 
+    narrative_sections: list[dict[str, Any]] = Field(default_factory=list)
+    """Multi-section narrative article body produced by the v3
+    ``MODULE_COMPILE_PROMPT`` when the ``WIKI_NARRATIVE_ARTICLES``
+    feature flag is on. Each entry is ``{anchor, heading, paragraphs:
+    [{text, citations[], is_inference}], citations[], visual: dict |
+    None, citation_coverage: float}``. Empty list means the page
+    predates narrative generation OR the LLM response failed
+    citation/parse gates and the page falls back to module-only
+    rendering. See ``openspec/changes/wiki-narrative-articles/`` for
+    the schema + citation discipline rules."""
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))

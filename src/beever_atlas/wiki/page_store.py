@@ -176,6 +176,53 @@ class WikiPageStore:
             pages.append(WikiPage.model_validate(doc))
         return pages
 
+    async def get_section(
+        self,
+        channel_id: str,
+        page_slug: str,
+        anchor: str,
+        target_lang: str = "en",
+    ) -> dict | None:
+        """Return one narrative section's payload by ``(page_slug, anchor)``.
+
+        Backs the MCP ``read_wiki_section`` tool. Reads only the
+        ``narrative_sections`` array from the page document and scans
+        for the matching ``anchor``. Returns the raw section dict
+        (``{anchor, heading, paragraphs, citations, visual,
+        citation_coverage}``) on hit, ``None`` on miss (page missing,
+        anchor missing, or no narrative_sections persisted yet).
+
+        Spec: ``openspec/changes/wiki-narrative-articles/specs/wiki-page-store/``
+        — "Page document supports targeted section retrieval".
+
+        Implementation note: a Mongo projection would shave a few
+        bytes per call, but the per-page document is bounded (~10s of
+        KB for typical pages) and the cost of fetching the full doc
+        is dwarfed by the channel ACL check the MCP wrapper already
+        runs. Keeping the read simple avoids a divergence risk where
+        the projection drifts from the schema.
+        """
+        if self._collection is None or not page_slug or not anchor:
+            return None
+        doc = await self._collection.find_one(
+            {
+                "channel_id": channel_id,
+                "target_lang": target_lang,
+                "slug": page_slug,
+            }
+        )
+        if doc is None:
+            return None
+        sections = doc.get("narrative_sections") or []
+        if not isinstance(sections, list):
+            return None
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            if str(section.get("anchor") or "") == anchor:
+                return section
+        return None
+
     async def save_page(self, page: WikiPage) -> None:
         """Idempotent upsert — bumps ``version`` and ``updated_at`` atomically.
 
@@ -201,6 +248,15 @@ class WikiPageStore:
         redirects are filtered at write time. The fingerprint-aware
         body-preservation optimization for folder pages lands in
         Phase C alongside ``_compile_folder_page``.
+
+        ``wiki-narrative-articles`` Phase 1 add-on: when the
+        ``narrative_sections`` content changes vs. the prior persisted
+        document (different anchors, different paragraph text, or
+        different citation lists), the version counter increments.
+        Identical narrative content on re-compile relies on the
+        existing ``$inc`` semantics — every save bumps version, which
+        is the conservative answer (a content-equality check would be
+        a separate optimization, not required for the spec).
         """
         if self._collection is None:
             raise RuntimeError("WikiPageStore not bound to a database")

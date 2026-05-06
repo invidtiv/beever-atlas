@@ -282,6 +282,16 @@ def compute_signals(
 
     tension_result = detect_tensions(facts if isinstance(facts, list) else [])
     tension_count = len(tension_result.get("tensions", []))
+
+    # Narrative-articles change — count of narrative sections persisted
+    # on this cluster (or this page's prior compile). Populated when
+    # the v3 prompt's narrative pass succeeds and survives validation;
+    # zero on pre-narrative clusters so the predicate fails naturally.
+    narrative_sections_seq = cluster.get("narrative_sections") or []
+    if isinstance(narrative_sections_seq, list):
+        narrative_section_count = len(narrative_sections_seq)
+    else:
+        narrative_section_count = 0
     # ``person_fact_count`` remains a placeholder — Phase 5 enrichment
     # will populate it. Setting to 0 keeps the archetype derivation
     # total without firing the ``person`` branch today.
@@ -342,6 +352,10 @@ def compute_signals(
         "descendant_decision_count": descendant_decision_count,
         "descendant_question_count": descendant_question_count,
         "distinct_contributor_count": distinct_contributor_count,
+        # Narrative-articles change — count of validated narrative
+        # sections persisted on this page. Feeds the
+        # ``narrative_article`` module predicate.
+        "narrative_section_count": narrative_section_count,
     }
 
 
@@ -508,6 +522,7 @@ def _validate_plan(
 
 _HUMAN_RULES: dict[str, str] = {
     "hero_summary": "ALWAYS pick when fact_count ≥ 1. MUST be module #1 in your plan — the bold TL;DR + summary lead the page.",
+    "narrative_article": "Pick when narrative_section_count ≥ 1. Renders a multi-section explanatory article at the TOP of the page; existing modules render below as Reference & Evidence appendix. The narrative_sections payload is produced by the v3 prompt's narrative pass and persisted with the page.",
     "decision_banner": "Pick when archetype == 'decision' (signals.archetype). MUST be module #2 (right after hero_summary) for Decision-archetype pages — the page is centered on the decision, so it gets a spotlight banner instead of a buried key_facts row.",
     "tension_callout": "Pick when tension_count ≥ 1. Place IMMEDIATELY after hero_summary on Topic pages (module #2). On Decision-archetype pages place it after decision_banner (module #3 — decision_banner stays at #2 because it IS the page subject; tension comes next). Tensions are high-signal contradictions surfaced by the heuristic detector — they belong near the top, never below key_facts.",
     "key_facts": "Pick when fact_count ≥ 5.",
