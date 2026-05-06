@@ -104,6 +104,7 @@ describe("ExtractionWorkerPanelInner — count chips", () => {
     const status = makeExtractionStatus({ pending: 50, extracting: 20, done: 430, failed: 2 });
     render(
       <ExtractionWorkerPanelInner
+        channelId="ch-test"
         extractionStatus={status}
         workerMetrics={WORKER_METRICS_HEALTHY}
         wikiMetrics={null}
@@ -120,6 +121,7 @@ describe("ExtractionWorkerPanelInner — count chips", () => {
     const status = makeExtractionStatus({ done: 430, extracting: 20, pending: 50, failed: 0 });
     render(
       <ExtractionWorkerPanelInner
+        channelId="ch-test"
         extractionStatus={status}
         workerMetrics={null}
         wikiMetrics={null}
@@ -136,6 +138,7 @@ describe("ExtractionWorkerPanelInner — breaker badge", () => {
   it("shows a healthy (closed) badge when breaker_state is closed", () => {
     render(
       <ExtractionWorkerPanelInner
+        channelId="ch-test"
         extractionStatus={makeExtractionStatus()}
         workerMetrics={WORKER_METRICS_HEALTHY}
         wikiMetrics={null}
@@ -149,6 +152,7 @@ describe("ExtractionWorkerPanelInner — breaker badge", () => {
   it("shows an open badge when breaker_state is open", () => {
     render(
       <ExtractionWorkerPanelInner
+        channelId="ch-test"
         extractionStatus={makeExtractionStatus()}
         workerMetrics={WORKER_METRICS_OPEN}
         wikiMetrics={null}
@@ -162,6 +166,7 @@ describe("ExtractionWorkerPanelInner — breaker badge", () => {
   it("shows no breaker badge when workerMetrics is null", () => {
     render(
       <ExtractionWorkerPanelInner
+        channelId="ch-test"
         extractionStatus={makeExtractionStatus()}
         workerMetrics={null}
         wikiMetrics={null}
@@ -176,6 +181,7 @@ describe("ExtractionWorkerPanelInner — wiki activity", () => {
   it("shows wiki facts and rewrites when wiki metrics are non-zero", () => {
     render(
       <ExtractionWorkerPanelInner
+        channelId="ch-test"
         extractionStatus={makeExtractionStatus()}
         workerMetrics={WORKER_METRICS_HEALTHY}
         wikiMetrics={WIKI_METRICS_ACTIVE}
@@ -183,18 +189,19 @@ describe("ExtractionWorkerPanelInner — wiki activity", () => {
     );
 
     // apply_update_count_5min=42 → "42 facts integrated into wiki"
-    // rewrite_count_by_page_kind sums to 4 → "4 pages refreshed"
+    // rewrite_count_by_page_kind sums to 4 → "4 pages rewritten"
     // Numbers and labels are split across child <span> nodes; query the
     // containing panel and check its full textContent.
     const panel = screen.getByTestId("extraction-worker-panel");
     expect(panel).toHaveTextContent("42");
     expect(panel).toHaveTextContent(/facts integrated into wiki/i);
-    expect(panel).toHaveTextContent(/pages refreshed/i);
+    expect(panel).toHaveTextContent(/pages? rewritten/i);
   });
 
   it("does not render wiki row when wiki metrics are zero", () => {
     render(
       <ExtractionWorkerPanelInner
+        channelId="ch-test"
         extractionStatus={makeExtractionStatus()}
         workerMetrics={WORKER_METRICS_HEALTHY}
         wikiMetrics={{
