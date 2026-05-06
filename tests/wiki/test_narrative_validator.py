@@ -50,6 +50,194 @@ def _make_section(
 
 
 # ---------------------------------------------------------------------------
+# M-1: forbidden-phrase regex tightening (word-boundary)
+# ---------------------------------------------------------------------------
+
+
+def test_forbidden_phrase_word_boundary_does_not_flag_denoted() -> None:
+    """M-1: legitimate 'denoted that' must NOT trigger the forbidden
+    'noted that' filter — the substring is embedded inside a longer
+    word and word-boundary matching is required."""
+    sections = [
+        _make_section(
+            paragraphs=[
+                _make_paragraph(
+                    text="Authlib was adopted for OIDC.",
+                    citations=["f_1"],
+                ),
+                _make_paragraph(
+                    text="The diagram denoted that the upstream service was unavailable.",
+                    citations=["f_2"],
+                ),
+            ]
+        ),
+    ]
+    cleaned, telem = validate_narrative_sections(sections)
+    assert telem["rejected"] is False
+    # The 'denoted that' paragraph is NOT dropped by the forbidden-phrase filter.
+    assert telem["paragraphs_dropped"] == 0
+    assert len(cleaned) == 1
+    paragraph_texts = [p["text"] for p in cleaned[0]["paragraphs"]]
+    assert any("denoted that" in t for t in paragraph_texts)
+
+
+def test_forbidden_phrase_word_boundary_does_not_flag_reposted() -> None:
+    """M-1: 'reposted about' must NOT trigger the 'posted about'
+    filter — substring is inside a longer word."""
+    sections = [
+        _make_section(
+            paragraphs=[
+                _make_paragraph(
+                    text="Authlib adoption proceeded smoothly.",
+                    citations=["f_1"],
+                ),
+                _make_paragraph(
+                    text="The team reposted about the OIDC migration after the demo.",
+                    citations=["f_2"],
+                ),
+            ]
+        ),
+    ]
+    cleaned, telem = validate_narrative_sections(sections)
+    assert telem["rejected"] is False
+    assert telem["paragraphs_dropped"] == 0
+    assert len(cleaned) == 1
+
+
+def test_forbidden_phrase_word_boundary_legit_about_z() -> None:
+    """M-1: 'comment was about Z' must NOT trigger the 'posted about'
+    filter — only the literal phrase variants are forbidden."""
+    sections = [
+        _make_section(
+            paragraphs=[
+                _make_paragraph(
+                    text="Authlib supports OIDC discovery.",
+                    citations=["f_1"],
+                ),
+                _make_paragraph(
+                    text="The comment was about Z and not the wider design.",
+                    citations=["f_2"],
+                ),
+            ]
+        ),
+    ]
+    cleaned, telem = validate_narrative_sections(sections)
+    assert telem["rejected"] is False
+    assert telem["paragraphs_dropped"] == 0
+
+
+def test_forbidden_phrase_mixed_case_still_dropped() -> None:
+    """M-1 regression: 'Shared A Link' (mixed case) must STILL drop
+    — case-insensitive matching is preserved in the regex flags."""
+    sections = [
+        _make_section(
+            paragraphs=[
+                _make_paragraph(
+                    text="The team adopted Authlib.",
+                    citations=["f_1"],
+                ),
+                _make_paragraph(
+                    text="The author Shared A Link to the GitHub repo.",
+                    citations=["f_2"],
+                ),
+            ]
+        ),
+    ]
+    cleaned, telem = validate_narrative_sections(sections)
+    assert telem["paragraphs_dropped"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# M-8: anchor sanitisation
+# ---------------------------------------------------------------------------
+
+
+def test_valid_anchor_unchanged() -> None:
+    """M-8: a valid kebab-case anchor passes through untouched."""
+    sections = [
+        _make_section(
+            anchor="context",
+            heading="Context",
+            paragraphs=[_make_paragraph(text="Adopted Authlib.", citations=["f_1"])],
+        ),
+    ]
+    cleaned, _ = validate_narrative_sections(sections)
+    assert len(cleaned) == 1
+    assert cleaned[0]["anchor"] == "context"
+
+
+def test_anchor_with_html_chars_sanitised() -> None:
+    """M-8: anchor with HTML / injection-like chars falls back to a
+    safe slug derived from the input (or section-N)."""
+    sections = [
+        _make_section(
+            anchor="</h2><script>alert(1)//",
+            heading="Real heading",
+            paragraphs=[_make_paragraph(text="Adopted Authlib.", citations=["f_1"])],
+        ),
+    ]
+    cleaned, _ = validate_narrative_sections(sections)
+    assert len(cleaned) == 1
+    anchor = cleaned[0]["anchor"]
+    # No angle brackets, no quotes, no parens, all lowercase.
+    assert "<" not in anchor and ">" not in anchor
+    assert "(" not in anchor and ")" not in anchor
+    assert anchor == anchor.lower()
+    # Either a derived slug or the section-N fallback.
+    import re as _re
+    assert _re.match(r"^[a-z0-9][a-z0-9-]{0,23}$", anchor) is not None
+
+
+def test_empty_anchor_uses_section_fallback() -> None:
+    """M-8: empty anchor + heading-derived slug fails to validate
+    yields the section-N fallback (positionally indexed from 1)."""
+    # Heading is single non-alphanumeric char so slug-from-heading
+    # also fails to validate, forcing the section-N fallback.
+    sections = [
+        _make_section(
+            anchor="",
+            heading="—",  # em-dash; slug becomes empty
+            paragraphs=[_make_paragraph(text="Adopted Authlib.", citations=["f_1"])],
+        ),
+    ]
+    cleaned, _ = validate_narrative_sections(sections)
+    # Heading after _strip_safety_markers is non-empty so section is
+    # kept. Anchor falls back to section-1.
+    if cleaned:
+        assert cleaned[0]["anchor"] == "section-1"
+
+
+def test_long_anchor_truncated_to_24_chars() -> None:
+    """M-8: a 30+ char anchor is truncated to 24 chars max via the
+    slug-derivation path."""
+    sections = [
+        _make_section(
+            anchor="this-is-a-very-long-anchor-that-exceeds-the-limit",
+            heading="Context",
+            paragraphs=[_make_paragraph(text="Adopted Authlib.", citations=["f_1"])],
+        ),
+    ]
+    cleaned, _ = validate_narrative_sections(sections)
+    assert len(cleaned) == 1
+    assert len(cleaned[0]["anchor"]) <= 24
+
+
+def test_anchor_uppercase_sanitised_to_lowercase() -> None:
+    """M-8: uppercase chars are normalised to lowercase via the
+    sanitisation pipeline."""
+    sections = [
+        _make_section(
+            anchor="Context",  # uppercase — fails strict regex
+            heading="Context",
+            paragraphs=[_make_paragraph(text="Adopted Authlib.", citations=["f_1"])],
+        ),
+    ]
+    cleaned, _ = validate_narrative_sections(sections)
+    assert len(cleaned) == 1
+    assert cleaned[0]["anchor"] == "context"
+
+
+# ---------------------------------------------------------------------------
 # Empty / malformed input handling
 # ---------------------------------------------------------------------------
 

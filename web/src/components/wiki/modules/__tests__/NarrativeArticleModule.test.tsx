@@ -577,3 +577,147 @@ describe("NarrativeArticleModule — header badges", () => {
     expect(badge.textContent || "").toMatch(/1\s*memory\s+synthesized/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// M-8: anchor sanitisation (defense-in-depth)
+// ---------------------------------------------------------------------------
+
+describe("NarrativeArticleModule — anchor sanitisation (M-8)", () => {
+  it("renders a valid kebab-case anchor as the section id verbatim", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "context",
+            heading: "Context",
+            paragraphs: [{ text: "Para.", citations: ["f1"] }],
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    expect(document.getElementById("context")).not.toBeNull();
+  });
+
+  it("sanitises HTML-injection anchors so the rendered id is safe", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "</h2><script>alert(1)//",
+            heading: "Real heading",
+            paragraphs: [{ text: "Para.", citations: ["f1"] }],
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    // The dangerous string must NOT appear as an element id.
+    expect(document.getElementById("</h2><script>alert(1)//")).toBeNull();
+    // Whatever id the section ends up with must satisfy the kebab-case
+    // contract (matches the backend ``_VALID_ANCHOR_RE``).
+    const section = screen.getByTestId("narrative-section");
+    const heading = section.querySelector("h2");
+    const id = heading?.getAttribute("id") || "";
+    expect(id).toMatch(/^[a-z0-9][a-z0-9-]{0,23}$/);
+  });
+
+  it("uses section-N fallback when anchor + heading slug both fail", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "",
+            heading: "—",  // em-dash; slug becomes empty
+            paragraphs: [{ text: "Para.", citations: ["f1"] }],
+          },
+        ])}
+        citations={[makeCitation("f1")]}
+        onNavigate={noop}
+      />,
+    );
+    const section = screen.getByTestId("narrative-section");
+    const heading = section.querySelector("h2");
+    expect(heading?.getAttribute("id")).toBe("section-1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M-3: missing fact_id chip — dev-only [?] fallback (defensive guard)
+// ---------------------------------------------------------------------------
+//
+// The factIdIndex is built from paragraph citations, so under normal flow
+// every paragraph fact_id is in the index. The dev-only [?] branch in
+// ``ParagraphLine`` is a defensive guard against future code paths that
+// supply a pre-built / filtered index (e.g. via shared rendering helpers).
+// These tests verify the contract: valid citations render the normal chip
+// and never the [?] missing-chip variant.
+
+describe("NarrativeArticleModule — missing fact_id chip (M-3)", () => {
+  it("renders normal chip when fact_id is present in the index", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [{ text: "Some prose.", citations: ["f-known"] }],
+          },
+        ])}
+        citations={[makeCitation("f-known")]}
+        onNavigate={noop}
+      />,
+    );
+    const chip = screen.getByTestId("narrative-citation-chip");
+    expect(chip).toBeInTheDocument();
+    expect(chip.getAttribute("data-fact-id")).toBe("f-known");
+    expect(screen.queryByTestId("narrative-citation-chip-missing")).not.toBeInTheDocument();
+  });
+
+  it("never renders the [?] missing-chip variant for valid citations", () => {
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [
+              { text: "First.", citations: ["f-a"] },
+              { text: "Second.", citations: ["f-b"] },
+            ],
+          },
+        ])}
+        citations={[makeCitation("f-a"), makeCitation("f-b")]}
+        onNavigate={noop}
+      />,
+    );
+    expect(screen.queryAllByTestId("narrative-citation-chip-missing")).toHaveLength(0);
+  });
+
+  it("still renders the normal chip even when the citation has no popover preview", () => {
+    // Page-level citations array empty (no WikiCitation popover data),
+    // but the paragraph-level fact_id is still in factIdIndex (built
+    // from paragraph citations) so the normal chip renders without
+    // popover. The [?] branch does NOT trigger here — that is reserved
+    // for index-miss only.
+    render(
+      <NarrativeArticleModule
+        module={makeModule([
+          {
+            anchor: "intro",
+            heading: "Intro",
+            paragraphs: [{ text: "Some prose.", citations: ["f-orphan"] }],
+          },
+        ])}
+        citations={[]}
+        onNavigate={noop}
+      />,
+    );
+    const chip = screen.getByTestId("narrative-citation-chip");
+    expect(chip).toBeInTheDocument();
+    expect(chip.getAttribute("data-fact-id")).toBe("f-orphan");
+    expect(screen.queryByTestId("narrative-citation-chip-missing")).not.toBeInTheDocument();
+  });
+});

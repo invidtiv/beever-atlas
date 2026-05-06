@@ -35,16 +35,20 @@ logger = logging.getLogger(__name__)
 
 
 # Activity-log narration phrases that must never appear in narrative
-# paragraphs. The match is case-insensitive substring — keeps the rule
-# simple + cheap. Adding a phrase here automatically tightens the
-# discipline; removing one needs a spec update.
-_FORBIDDEN_PHRASES: tuple[str, ...] = (
-    "shared a link",
-    "shared an article",
-    "noted that",
-    "mentioned that",
-    "posted about",
-    "presented that",
+# paragraphs. We use a word-boundary regex (M-1) instead of plain
+# substring match so legitimate words containing these substrings
+# (e.g., "denoted that the X", "reposted about Y") are NOT flagged.
+# The phrase set is closed — to add a new forbidden phrase, extend
+# the alternation below. Compiled once at module load.
+_FORBIDDEN_PHRASE_RE = re.compile(
+    r"\b(?:"
+    r"shared (?:a|an) (?:link|article)|"
+    r"noted that|"
+    r"mentioned that|"
+    r"posted about|"
+    r"presented that"
+    r")\b",
+    re.IGNORECASE,
 )
 
 # Section / article word-count thresholds. Sections over the soft cap
@@ -64,6 +68,12 @@ _CITATION_COVERAGE_GATE = 0.80
 # followed by whitespace. Conservative; captures the most common
 # patterns without trying to handle abbreviations or quoted speech.
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+
+# Anchor format (M-8): kebab-case alphanumeric, must start with a
+# letter or digit, max 24 chars. Matches the v3 prompt's anchor
+# guidance and keeps DOM ``id`` lookups (``getElementById``) reliable
+# regardless of what the LLM emits. Compiled once at module load.
+_VALID_ANCHOR_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 
 
 def _word_count(text: str) -> int:
@@ -102,6 +112,30 @@ def _truncate_to_word_cap(text: str, cap: int) -> str:
     return " ".join(kept).strip()
 
 
+def _sanitize_anchor(raw: str, fallback_idx: int) -> str:
+    """Return a valid kebab-case anchor (M-8 — defensive sanitisation).
+
+    Tries the raw value first; if invalid, derives from the heading
+    (slugify); if heading also fails, falls back to ``section-N``.
+    Never raises — anchor is always non-empty and DOM-safe so the
+    frontend's ``getElementById`` scroll-snap stays reliable even
+    when the LLM emits malformed or HTML-injection-like anchors.
+
+    The frontend mirrors this regex in
+    ``NarrativeArticleModule.tsx::sanitizeAnchor`` for
+    defense-in-depth on already-persisted articles.
+    """
+    candidate = (raw or "").strip().lower()
+    if _VALID_ANCHOR_RE.match(candidate):
+        return candidate
+    # Try slugifying — keep alphanumerics + dashes, collapse runs of
+    # non-alphanumerics into a single dash, trim, cap at 24 chars.
+    slug = re.sub(r"[^a-z0-9]+", "-", candidate).strip("-")[:24]
+    if _VALID_ANCHOR_RE.match(slug):
+        return slug
+    return f"section-{fallback_idx}"
+
+
 def _paragraph_is_uncited(paragraph: dict[str, Any]) -> bool:
     """True when the paragraph has zero non-empty fact_id citations.
 
@@ -117,25 +151,26 @@ def _paragraph_is_uncited(paragraph: dict[str, Any]) -> bool:
 
 def _paragraph_has_forbidden_phrase(paragraph: dict[str, Any]) -> str | None:
     """Return the offending phrase when the paragraph contains a
-    forbidden activity-narration phrase (case-insensitive substring),
-    else None.
+    forbidden activity-narration phrase, else None.
 
-    We return the matched phrase so the caller can include it in the
-    structured drop-log line — useful for soak telemetry."""
+    Uses ``_FORBIDDEN_PHRASE_RE`` (word-boundary, case-insensitive) so
+    legitimate words containing these substrings — e.g. "denoted that
+    the X", "reposted about Y" — are NOT flagged. We return the
+    matched phrase so the caller can include it in the structured
+    drop-log line — useful for soak telemetry.
+    """
     text = paragraph.get("text") or ""
     if not isinstance(text, str):
         return None
-    lowered = text.lower()
-    for phrase in _FORBIDDEN_PHRASES:
-        if phrase in lowered:
-            return phrase
-    return None
+    match = _FORBIDDEN_PHRASE_RE.search(text)
+    return match.group(0) if match else None
 
 
 def _validate_section(
     section: dict[str, Any],
     *,
     paragraphs_dropped: list[int],
+    section_idx: int = 1,
 ) -> dict[str, Any] | None:
     """Validate one section. Returns the cleaned section payload, or
     ``None`` when the section has no surviving paragraphs (caller
@@ -144,10 +179,15 @@ def _validate_section(
     Mutates ``paragraphs_dropped`` (a single-element list used as a
     mutable accumulator) so the caller can surface a total count in
     telemetry without redundant traversal.
+
+    ``section_idx`` is the 1-based position of this section in the
+    article — used as the fallback for anchor sanitisation (M-8) so a
+    section with a malformed anchor still gets a stable ``section-N``
+    identifier rather than dropping the section entirely.
     """
     if not isinstance(section, dict):
         return None
-    anchor = str(section.get("anchor") or "").strip()
+    raw_anchor = str(section.get("anchor") or "").strip()
     # ``_strip_safety_markers`` is the canonical scrub point for
     # prompt-safety wrappers (``<untrusted>``, ``<sanitized>``,
     # ``<external>``). Applying it here, BEFORE persistence, means
@@ -156,12 +196,19 @@ def _validate_section(
     # re-implementing the strip. See H-6 in the
     # ``wiki-narrative-articles`` code review.
     heading = _strip_safety_markers(section.get("heading") or "")
-    if not anchor or not heading:
+    if not heading:
         logger.info(
             "narrative_section_dropped reason=missing_anchor_or_heading anchor=%s",
-            anchor or "<empty>",
+            raw_anchor or "<empty>",
         )
         return None
+    # M-8: sanitise the anchor against ``_VALID_ANCHOR_RE``. Never
+    # drops the section on a bad anchor — falls back to a derived slug
+    # or ``section-N``. Heading was already validated above, so an
+    # empty raw_anchor only triggers the slug-from-heading path when
+    # the heading itself yields valid characters; otherwise we end up
+    # at ``section-N``.
+    anchor = _sanitize_anchor(raw_anchor or heading, section_idx)
 
     paragraphs_in = section.get("paragraphs") or []
     if not isinstance(paragraphs_in, list):
@@ -394,8 +441,12 @@ def validate_narrative_sections(
         }
 
     try:
-        for raw in sections_in:
-            section = _validate_section(raw, paragraphs_dropped=paragraphs_dropped)
+        for idx, raw in enumerate(sections_in, start=1):
+            section = _validate_section(
+                raw,
+                paragraphs_dropped=paragraphs_dropped,
+                section_idx=idx,
+            )
             if section is None:
                 sections_dropped += 1
                 continue

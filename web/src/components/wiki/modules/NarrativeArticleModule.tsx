@@ -65,13 +65,45 @@ interface NarrativeArticleData {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Coerce a section payload from the unknown ``module.data`` blob. */
-function coerceSection(raw: unknown): NarrativeSection | null {
+/** Anchor format (M-8): kebab-case alphanumeric, must start with a
+ *  letter or digit, max 24 chars. Mirrors
+ *  ``_VALID_ANCHOR_RE`` in
+ *  ``src/beever_atlas/wiki/modules/narrative_validator.py`` so newly
+ *  validated articles satisfy this trivially and pre-existing
+ *  persisted articles get sanitised at render time too (defense in
+ *  depth). Required so ``getElementById(anchor)`` scroll-snap stays
+ *  reliable even when the LLM emits HTML-injection-like strings. */
+const VALID_ANCHOR_RE = /^[a-z0-9][a-z0-9-]{0,23}$/;
+
+function sanitizeAnchor(raw: string, fallbackIdx: number): string {
+  const trimmed = (raw || "").trim().toLowerCase();
+  if (VALID_ANCHOR_RE.test(trimmed)) return trimmed;
+  const slug = trimmed
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  if (VALID_ANCHOR_RE.test(slug)) return slug;
+  return `section-${fallbackIdx}`;
+}
+
+/** Coerce a section payload from the unknown ``module.data`` blob.
+ *
+ *  ``fallbackIdx`` is the 1-based position of this section in the
+ *  article — used as the fallback for anchor sanitisation so a
+ *  malformed anchor still gets a stable ``section-N`` identifier
+ *  rather than dropping the whole section.
+ */
+function coerceSection(raw: unknown, fallbackIdx: number): NarrativeSection | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  const anchor = typeof r.anchor === "string" ? r.anchor : "";
+  const rawAnchor = typeof r.anchor === "string" ? r.anchor : "";
   const heading = typeof r.heading === "string" ? r.heading : "";
-  if (!anchor || !heading) return null;
+  if (!heading) return null;
+  // M-8 defense-in-depth: backend validator already sanitises, but
+  // pre-existing persisted articles or non-validator code paths may
+  // emit a non-conforming anchor. Sanitise here so the rendered DOM
+  // ``id`` is always a clean kebab-case slug.
+  const anchor = sanitizeAnchor(rawAnchor || heading, fallbackIdx);
 
   const paragraphsRaw = Array.isArray(r.paragraphs) ? r.paragraphs : [];
   const paragraphs: NarrativeParagraph[] = [];
@@ -128,6 +160,11 @@ function coerceSection(raw: unknown): NarrativeSection | null {
 /** Build a Map from fact_id → 1-indexed display number based on the
  *  order of first occurrence across all sections. The frontend uses
  *  this map so chips render as `[1]`, `[2]` etc. with stable indices.
+ *
+ *  Paragraphs that cite a fact_id NOT in this map fall through to
+ *  the dev-only ``[?]`` chip branch in ``ParagraphLine`` (M-3) —
+ *  defensive guard against future code paths that supply a
+ *  pre-built or filtered index.
  */
 function buildFactIdIndex(sections: NarrativeSection[]): Map<string, number> {
   const idx = new Map<string, number>();
@@ -174,6 +211,12 @@ function distinctFactCount(sections: NarrativeSection[]): number {
 // ---------------------------------------------------------------------------
 // Inline citation chip (with hover preview)
 // ---------------------------------------------------------------------------
+
+/** Track fact_ids we've already warned about so dev-mode console
+ *  output does not spam on every render. Module-level Set is fine —
+ *  the warnings are diagnostic and the lifecycle of "warned about
+ *  this id" is the page session. (M-3) */
+const warnedFactIds = new Set<string>();
 
 interface CitationChipProps {
   factId: string;
@@ -456,7 +499,34 @@ interface ParagraphProps {
 function ParagraphLine({ paragraph, factIdIndex, citationLookup }: ParagraphProps) {
   const chips: ReactNode[] = paragraph.citations.map((cid) => {
     const displayIndex = factIdIndex.get(cid);
-    if (!displayIndex) return null;
+    if (displayIndex === undefined) {
+      // M-3: silently dropping a missing-fact_id citation hides
+      // upgrade-time data drift. In dev render a dim ``[?]`` chip
+      // with ``data-fact-id`` so authors notice; in prod fall back
+      // to the prior "render nothing" behaviour so users never see
+      // diagnostic UI.
+      if (import.meta.env.DEV) {
+        if (!warnedFactIds.has(cid)) {
+          // eslint-disable-next-line no-console -- dev-only diagnostic
+          console.warn(
+            `[NarrativeArticle] citation references missing fact_id: ${cid}`,
+          );
+          warnedFactIds.add(cid);
+        }
+        return (
+          <span
+            key={cid}
+            data-testid="narrative-citation-chip-missing"
+            data-fact-id={cid}
+            title={`Missing fact: ${cid}`}
+            className="inline-flex items-center px-1 py-0.5 mx-0.5 text-[10px] font-medium leading-none rounded bg-amber-500/20 text-amber-700 dark:text-amber-400 cursor-help"
+          >
+            [?]
+          </span>
+        );
+      }
+      return null;
+    }
     return (
       <CitationChip
         key={cid}
@@ -501,8 +571,8 @@ export function NarrativeArticleModule({ module, citations }: ModuleProps) {
   const data = (module.data ?? {}) as NarrativeArticleData;
   const sectionsRaw = Array.isArray(data.sections) ? data.sections : [];
   const sections: NarrativeSection[] = [];
-  for (const raw of sectionsRaw) {
-    const cleaned = coerceSection(raw);
+  for (let i = 0; i < sectionsRaw.length; i += 1) {
+    const cleaned = coerceSection(sectionsRaw[i], i + 1);
     if (cleaned) sections.push(cleaned);
   }
   if (sections.length === 0) {
