@@ -20,6 +20,8 @@ permissions:
 jobs:
   backend:
     name: Backend (Python 3.12)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     services:
       mongodb:
@@ -73,6 +75,8 @@ jobs:
 
   web:
     name: Web (Node 20)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -104,6 +108,8 @@ jobs:
 
   bot:
     name: Bot (Node 20)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -132,6 +138,8 @@ jobs:
 
   supply-chain-lint:
     name: Supply Chain (digest pinning)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

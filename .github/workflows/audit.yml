@@ -19,6 +19,8 @@ permissions:
 jobs:
   audit:
     name: pip-audit + npm audit (HIGH/CRITICAL gate)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

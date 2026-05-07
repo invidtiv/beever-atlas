@@ -12,6 +12,8 @@ permissions:
 jobs:
   contracts:
     name: Graph backend contract tests
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
 
     services:
