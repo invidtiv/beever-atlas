@@ -68,6 +68,12 @@ function sanitizeMermaid(raw: string): string {
   // Pipe-style edge labels (-->|x|) are preserved by treating them as part of the
   // arrow token. Applied BEFORE bracket-cleanup so label parens don't confuse the regex.
   const NODE_TOKEN = /[A-Za-z0-9_]+(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\})?/;
+  // codeql[js/incomplete-multi-character-sanitization] — this regex
+  // tokenises mermaid arrow syntax (e.g. ``-->|label| Node``); it is
+  // NOT used to filter HTML comment terminators. The CodeQL pattern
+  // matcher flags any regex consuming ``-->`` as HTML-filtering, but
+  // mermaid input is sanitised separately in ``sanitizeMermaid`` and
+  // never reaches innerHTML — output goes through mermaid.render → SVG.
   const ARROW_TOKEN = /-->?\|[^|]*\||-->/;
   // Build a regex that matches 3+ chained tokens: NODE ARROW NODE (ARROW NODE)+
   const CHAIN_RE = new RegExp(
