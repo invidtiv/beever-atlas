@@ -3678,22 +3678,27 @@ class WikiCompiler:
         #   1. Core Discussions  — top decisions + key voices
         #   2. Project Status    — momentum + team dynamics
         #   3. Recent Updates    — week-over-week activity counts
+        # ``_target_lang`` is normally set in ``__init__``; the
+        # ``getattr`` fallback covers tests that construct the
+        # compiler via ``__new__`` (e.g. ``test_wiki_compiler_empty_channel``)
+        # without going through the regular constructor path.
+        splicer_lang = getattr(self, "_target_lang", "en")
         post_content = _splice_core_discussions(
             post_content,
             top_decisions=getattr(summary, "top_decisions", []) or [],
             cited_facts=cited_facts_for_prompt,
-            lang=self._target_lang,
+            lang=splicer_lang,
         )
         post_content = _splice_project_status(
             post_content,
             momentum=getattr(summary, "momentum", "") or "",
             team_dynamics=getattr(summary, "team_dynamics", "") or "",
-            lang=self._target_lang,
+            lang=splicer_lang,
         )
         post_content = _splice_recent_updates(
             post_content,
             recent_activity_summary=getattr(summary, "recent_activity_summary", {}) or {},
-            lang=self._target_lang,
+            lang=splicer_lang,
         )
         return WikiPage(
             id="overview",
