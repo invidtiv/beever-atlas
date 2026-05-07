@@ -82,6 +82,11 @@ class _FakeWikiPages:
         # Map (channel_id, target_lang, page_id) → stored doc
         self._docs: dict[tuple[str, str, str], dict[str, Any]] = dict(seeded or {})
         self.upserts: list[tuple[tuple[str, str, str], dict[str, Any]]] = []
+        # ``WikiPageStore.ensure_indexes`` (called by the migration entrypoint
+        # before its loop) issues several ``create_index`` calls. The fake
+        # treats them as no-ops — the dict storage already enforces the
+        # compound key, which is the only invariant the migration relies on.
+        self.create_index = AsyncMock()
 
     @staticmethod
     def _key(filt: dict[str, Any]) -> tuple[str, str, str]:
@@ -158,7 +163,19 @@ def _setup_fake_stores(
     cache = _FakeWikiCache(legacy_rows)
     pages = _FakeWikiPages(seeded_pages)
     state = _FakeMigrationState()
-    db = {"wiki_cache": cache, "wiki_pages": pages, "migration_state": state}
+    # ``WikiPageStore.__init__`` resolves both ``wiki_pages`` and
+    # ``wiki_redirects`` on the bound db, even though the migration
+    # itself never writes to redirects. A no-op fake satisfies the
+    # constructor + ``ensure_indexes`` (create_index) without changing
+    # the migration test's behaviour.
+    redirects = MagicMock()
+    redirects.create_index = AsyncMock()
+    db = {
+        "wiki_cache": cache,
+        "wiki_pages": pages,
+        "migration_state": state,
+        "wiki_redirects": redirects,
+    }
     fake_stores = MagicMock()
     fake_stores.startup = AsyncMock()
     fake_stores.shutdown = AsyncMock()
