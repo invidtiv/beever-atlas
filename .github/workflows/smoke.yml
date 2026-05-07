@@ -18,6 +18,8 @@ permissions:
 jobs:
   smoke:
     name: Docker Compose smoke test
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

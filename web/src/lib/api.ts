@@ -127,6 +127,12 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined,
       headers: options?.headers,
     }),
+  patch: <T>(path: string, body?: unknown, options?: { headers?: Record<string, string> }) =>
+    request<T>(path, {
+      method: "PATCH",
+      body: body ? JSON.stringify(body) : undefined,
+      headers: options?.headers,
+    }),
   delete: <T>(path: string, options?: { headers?: Record<string, string> }) =>
     request<T>(path, { method: "DELETE", headers: options?.headers }),
 };

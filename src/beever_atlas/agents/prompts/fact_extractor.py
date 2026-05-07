@@ -48,6 +48,38 @@ A fact is a concise statement that:
 - Write like a teammate summarising a thread, NOT like a structured log insert.
 - One crisp sentence beats two vague ones.
 
+### Writing style — synthesized knowledge, NOT activity log
+
+Each fact's ``memory_text`` MUST state the underlying knowledge as a
+declarative, third-person sentence. Do NOT narrate WHO shared/posted/
+mentioned/noted what.
+
+FORBIDDEN phrases (drop these — they're activity-log narration):
+- "shared a link"
+- "shared an article"
+- "shared a [Neo4j blog] post"
+- "shared a [GitHub] repository"
+- "noted that"
+- "mentioned that"
+- "posted about"
+- "presented that"
+- "asked the team..."  (when followed by a clarification — extract the underlying question, not the act of asking)
+
+GOOD examples:
+- "The team adopted Authlib over google-auth-oauthlib for its modern OIDC discovery."
+- "Ory Hydra is an OAuth 2.0 + OpenID Connect provider that the team is evaluating as an authentication backend."
+- "fastapi-sso provides OAuth integration patterns relevant to the FastAPI authentication strategy."
+- "The Neo4j blog post 'Build AI Agents that Make Better Decisions on GCP' describes a pattern combining Neo4j graph context with GCP-hosted agents — relevant to Beever Atlas's planned architecture."
+
+BAD examples (will cause the fact to be rejected):
+- "Thomas Chong shared a link to the GitHub repository for Ory Hydra."  ← who-narrative; rewrite as "Ory Hydra is an OAuth 2.0 + OIDC provider..."
+- "Jacky Chan mentioned that fastapi-sso could be useful."  ← rewrite as "fastapi-sso could provide OAuth integration patterns for the FastAPI auth strategy."
+- "Thomas Chong shared a Neo4j blog post titled..."  ← rewrite as "The Neo4j blog post '...' describes a pattern combining..."
+
+When the source message IS just a link share (no surrounding context), still synthesize: state what the linked resource IS or DOES, not who shared it. The author is preserved separately in ``author_name`` — do not duplicate that into ``memory_text``.
+
+When you cannot determine what a link/resource IS without speculation, set the fact's ``importance`` to "low" and write a minimal description. Do NOT fabricate context.
+
 ---
 
 ### Skip criteria — return empty facts for messages that are:
@@ -194,6 +226,71 @@ For each fact, copy from the source message:
 
 ---
 
+## Phase 3 — enrichment fields (OPTIONAL — populate when applicable)
+
+For each extracted fact, if it makes sense given the source message,
+also populate these structured fields. Skip them entirely (do NOT
+emit empty strings or fabrications) when the source doesn't support
+the field.
+
+### When `fact_type == "decision"`:
+
+- `rationale`: the SINGLE-sentence justification — what the
+  decision is FOR. Look for "because", "since", "to ensure",
+  "in order to" clauses. Examples:
+    Source: "Adopt CLA — provides relicensing flexibility for
+            commercial forks."
+    rationale: "Provides relicensing flexibility for commercial forks."
+
+- `alternatives_considered`: a list of options that were
+  considered and rejected. Look for "vs", "rather than", "rejected",
+  "instead of", "considered". Each item is 1-3 words naming the
+  alternative. Examples:
+    Source: "Adopt Copyright-assignment CLA. DCO and License-grant
+            CLA were considered but rejected."
+    alternatives_considered: ["DCO", "License-grant CLA"]
+
+- `consequences_open`: open questions raised in the SAME thread
+  about downstream effects. Each item is a 1-sentence question.
+  Examples:
+    Source: "Adopt CLA. But will contributors hesitate to sign?
+            Need a CLA bot before public PRs."
+    consequences_open: [
+      "Will contributors hesitate to sign?",
+      "Need CLA bot before public PRs"
+    ]
+
+### When `fact_type in {{"opinion", "recommendation"}}`:
+
+- `sentiment`: one of:
+    "neutral" — descriptive, no value judgment.
+    "concerning" — raises a concern or warning.
+    "positive" — endorsement or favorable view.
+    "recommendation" — explicit suggestion to do something.
+  Default to `null` if uncertain — do NOT guess.
+
+### For ANY `fact_type`:
+
+- `numeric_values`: list of significant numbers (≥ 100 OR currency
+  values OR percentages with explicit context). Each item:
+    {{
+      "label": "noun describing what's being counted (e.g. 'stars',
+                'impressions', 'paid-media equivalent')",
+      "value": "display form (e.g. '2,396', '534k', 'HK$130k')",
+      "raw_value": 2396,
+      "unit": "USD" | "HKD" | "stars" | etc. — null when no unit
+    }}
+  Skip throwaway numbers (years, version numbers like "v0.2",
+  page numbers). Cap at 5 items per fact.
+
+- `glossary_terms`: list of acronyms (3+ uppercase letters)
+  or domain-specific terms used in this fact's text. The wiki
+  layer filters this against the channel glossary; you don't
+  need to know which terms ARE in the glossary — just list
+  candidates. Examples: ["CLA", "DCO", "MFA", "RAG", "SAML"]
+
+---
+
 ### Output format
 Return a single JSON object:
 ```json
@@ -211,12 +308,25 @@ Return a single JSON object:
       "source_message_id": "<msg_id, e.g. msg-0>",
       "author_id": "<user id>",
       "author_name": "<display name>",
-      "message_ts": "<timestamp>"
+      "message_ts": "<timestamp>",
+      "rationale": "<optional — decisions only>",
+      "alternatives_considered": ["<optional — decisions only>"],
+      "consequences_open": ["<optional — decisions only>"],
+      "numeric_values": [
+        {{"label": "<noun>", "value": "<display>", "raw_value": <number>, "unit": "<unit or null>"}}
+      ],
+      "sentiment": "<optional — opinions/recommendations only>",
+      "glossary_terms": ["<optional — acronyms/domain terms>"]
     }}
   ],
   "skip_reason": null
 }}
 ```
+
+The Phase 3 enrichment fields (`rationale`, `alternatives_considered`,
+`consequences_open`, `numeric_values`, `sentiment`, `glossary_terms`)
+are ALL OPTIONAL — omit them entirely when they don't apply. Never emit
+empty placeholder strings or fabricated values just to populate the field.
 
 If the entire batch contains no extractable facts (only greetings, noise, or off-topic content),
 return `{{"facts": [], "skip_reason": "<brief reason>"}}`.

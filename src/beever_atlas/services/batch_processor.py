@@ -13,7 +13,7 @@ import logging
 import random
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import json
@@ -49,9 +49,10 @@ async def _get_limiter(provider: str) -> AsyncLimiter:
     return _provider_limiters[provider]
 
 
-# ── Provider outage circuit breaker ──────────────────────────────────────────
-_consecutive_503_count: int = 0
-_consecutive_503_lock: asyncio.Lock = asyncio.Lock()
+# ``_consecutive_503_count`` and ``_consecutive_503_lock`` have been removed —
+# the breaker now lives in ``services/circuit_breaker.py`` and is injected
+# via :class:`BatchProcessor.__init__`. Tests that previously depended on
+# resetting these module-globals can drop their workaround fixture.
 
 # ContextVar so callbacks in workers 2/3 can read the current batch index.
 _batch_idx_var: contextvars.ContextVar[int] = contextvars.ContextVar("batch_idx", default=0)
@@ -214,13 +215,27 @@ class BatchResult:
     total_relationships: int = 0
     batch_breakdowns: list[BatchBreakdown] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
+    # Weaviate UUIDs for every fact persisted across all batches.
+    # Populated on the success path so ExtractionWorker can hand them to
+    # WikiMaintainer without a follow-up Weaviate scan.
+    fact_ids: list[str] = field(default_factory=list)
+
+
+if TYPE_CHECKING:
+    from beever_atlas.services.circuit_breaker import CircuitBreaker
 
 
 class BatchProcessor:
     """Chunks messages into batches and runs each through the ingestion pipeline."""
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, breaker: "CircuitBreaker | None" = None) -> None:
+        # Inject the CircuitBreaker so test fixtures can hand in a fresh
+        # instance and there are no module-globals to bleed across tests.
+        # Default singleton is shared with ExtractionWorker so a 503 storm
+        # trips one breaker that both call sites observe.
+        from beever_atlas.services.circuit_breaker import get_circuit_breaker
+
+        self._breaker = breaker or get_circuit_breaker()
 
     async def process_messages(
         self,
@@ -315,22 +330,22 @@ class BatchProcessor:
                     _semaphore_wait_s,
                 )
                 # ── Circuit breaker: fail fast if provider is down ────────────
-                global _consecutive_503_count
-                async with _consecutive_503_lock:
-                    _current_count = _consecutive_503_count
-                _threshold = settings.llm_outage_breaker_threshold
-                try:
-                    _breaker_tripped = _current_count >= _threshold
-                except TypeError:
-                    _breaker_tripped = False
-                if _breaker_tripped:
+                # The injected breaker replaces the old module-globals.
+                # The half-open recovery path is automatic — if the breaker is
+                # open but the cooldown has elapsed, allow() transitions to
+                # half_open and returns True, letting one probe through.
+                if not await self._breaker.allow():
+                    snapshot = self._breaker.snapshot()
                     logger.error(
-                        "BatchProcessor: provider outage breaker tripped count=%d threshold=%d",
-                        _current_count,
-                        _threshold,
+                        "BatchProcessor: provider outage breaker tripped "
+                        "consecutive=%d threshold=%d state=%s",
+                        snapshot.consecutive_failures,
+                        snapshot.threshold,
+                        snapshot.state,
                     )
                     raise ProviderOutageError(
-                        f"Provider outage: {_current_count} consecutive Gemini 5xx failures"
+                        f"Provider outage: {snapshot.consecutive_failures} "
+                        f"consecutive Gemini 5xx failures"
                     )
                 # ─────────────────────────────────────────────────────────────
 
@@ -374,7 +389,7 @@ class BatchProcessor:
                         current_stage=f"Step 7/7 — Batch {batch_index} complete",
                         batch_result=asdict(breakdown),
                     )
-                    return breakdown, {}, False
+                    return breakdown, {}, False, []
 
                 # Embedding similarity pre-computation is deferred: entity_tags
                 # are not available on raw messages before extraction runs.
@@ -1182,8 +1197,7 @@ class BatchProcessor:
                                 exc_info=False,
                             )
                         # Reset breaker on any successful batch
-                        async with _consecutive_503_lock:
-                            _consecutive_503_count = 0
+                        await self._breaker.record_success()
                         break  # success
                     except (
                         ServerError,
@@ -1210,8 +1224,7 @@ class BatchProcessor:
                             # Sleep and retry happen at the top of the next loop iteration
                         else:
                             # Terminal failure after all retries — increment breaker counter once
-                            async with _consecutive_503_lock:
-                                _consecutive_503_count += 1
+                            await self._breaker.record_failure(exc)
                             raise
                     except Exception as exc:
                         # Catch ValidationError (truncated LLM JSON) and similar parse failures.
@@ -1292,11 +1305,16 @@ class BatchProcessor:
                         weaviate_ids = persist_result.get("weaviate_ids") or []
                         for idx, fd in enumerate(embedded_facts_raw):
                             fact_channel = fd.get("channel_id") or channel_id
-                            msg_ts = fd.get("message_ts", "")
+                            # Content-derived deterministic ID for the
+                            # contradiction-detector fallback path. Mirrors the
+                            # persister so re-runs map to the same fact_id.
+                            entity_names = fd.get("entity_tags") or []
                             fact_id = (
                                 weaviate_ids[idx]
                                 if idx < len(weaviate_ids)
-                                else AtomicFact.deterministic_id("slack", fact_channel, msg_ts, idx)
+                                else AtomicFact.deterministic_id(
+                                    fd.get("memory_text", ""), entity_names
+                                )
                             )
                             persisted_facts.append(
                                 AtomicFact(
@@ -1396,7 +1414,8 @@ class BatchProcessor:
                     batch_facts,
                     batch_entities,
                 )
-                return breakdown, batch_stage_timings, entities_persisted
+                batch_weaviate_ids: list[str] = list(persist_result.get("weaviate_ids") or [])
+                return breakdown, batch_stage_timings, entities_persisted, batch_weaviate_ids
 
         # Launch all batches with bounded concurrency via as_completed.
         # Results stream in completion order; each task returns (batch_idx, payload)
@@ -1437,7 +1456,7 @@ class BatchProcessor:
                 result.errors.append({"batch_num": batch_index, "error": err_text})
                 result.batch_breakdowns.append(failed_breakdown)
             else:
-                breakdown, batch_timings, entities_persisted = raw
+                breakdown, batch_timings, entities_persisted, batch_weaviate_ids = raw
                 result.batch_breakdowns.append(breakdown)
                 if breakdown.error:
                     result.errors.append({"batch_num": batch_index, "error": breakdown.error})
@@ -1445,6 +1464,7 @@ class BatchProcessor:
                     result.total_facts += breakdown.facts_count
                     result.total_entities += breakdown.entities_count
                     result.total_relationships += breakdown.relationships_count
+                    result.fact_ids.extend(batch_weaviate_ids)
                     for stage_key, duration in batch_timings.items():
                         cumulative_timings[stage_key] = (
                             cumulative_timings.get(stage_key, 0.0) + duration

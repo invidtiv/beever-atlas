@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
 
 from beever_atlas.infra.auth import require_bridge, require_user, require_user_loader
 from beever_atlas.infra.loader_url_headers import LoaderUrlSecurityHeadersMiddleware
@@ -45,6 +46,7 @@ from beever_atlas.api.dev import router as dev_router
 from beever_atlas.api.loader_token import router as loader_token_router
 from beever_atlas.api.loaders import router as loader_router
 from beever_atlas.api.admin import router as admin_router
+from beever_atlas.api.sources import router as sources_router
 from beever_atlas.infra.config import get_settings
 from beever_atlas.infra.health import health_registry, register_health_checks
 from beever_atlas.llm.provider import init_llm_provider
@@ -158,6 +160,20 @@ async def lifespan(app: FastAPI):
     init_llm_provider(settings)
     await _migrate_env_connection(stores, settings)
 
+    # Derive the file-proxy / media-proxy host allowlist from active
+    # PlatformConnection records — e.g. a self-hosted Mattermost on
+    # ``team.example.com`` is auto-allowed once the operator finishes
+    # the connection wizard. Removes the need to also set
+    # ``FILE_PROXY_HOST_ALLOWLIST_EXTRA`` for the same hostname.
+    try:
+        from beever_atlas.infra.platform_hosts import refresh_runtime_proxy_hosts
+
+        await refresh_runtime_proxy_hosts(stores)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "lifespan: failed to derive proxy hosts from connections (non-fatal)"
+        )
+
     # Start the sync scheduler
     from beever_atlas.services.scheduler import SyncScheduler, init_scheduler
 
@@ -166,7 +182,275 @@ async def lifespan(app: FastAPI):
         await scheduler.startup()
         init_scheduler(scheduler)
     except Exception as exc:
-        logging.getLogger(__name__).warning("SyncScheduler startup failed (non-fatal): %s", exc)
+        import traceback as _tb
+
+        logging.getLogger(__name__).warning(
+            "SyncScheduler startup failed (non-fatal): %s: %s\n%s",
+            type(exc).__name__,
+            exc,
+            _tb.format_exc(),
+        )
+
+    # Wire the WikiMaintainer singleton + subscribe it to ExtractionWorker
+    # events. Must happen AFTER ``scheduler.startup()`` because the
+    # ExtractionWorker singleton is registered by
+    # ``SyncScheduler._register_extraction_worker_jobs``. When auto mode is
+    # configured, every successful extraction batch fans out to
+    # ``WikiMaintainer.on_extraction_done`` so affected wiki pages refresh
+    # incrementally without waiting on a full consolidation pass.
+    try:
+        import asyncio as _asyncio
+
+        from beever_atlas.services.extraction_worker import get_extraction_worker
+        from beever_atlas.services.wiki_maintainer import (
+            WikiMaintainer,
+            init_wiki_maintainer,
+        )
+        from beever_atlas.wiki.page_store import WikiPageStore
+
+        page_store = WikiPageStore(db=stores.mongodb.db)
+        await page_store.ensure_indexes()
+        # Pass the Neo4j-backed graph store to the maintainer so the
+        # ``wiki-llm-native-redesign`` cross-link upsert path can write
+        # ``WikiPage`` nodes + ``REFERENCES`` edges. NullGraphStore /
+        # NebulaStore (no parity yet) hit a hasattr-gated no-op inside
+        # ``WikiMaintainer._upsert_wiki_graph`` so this is safe regardless
+        # of ``GRAPH_BACKEND``.
+        maintainer = WikiMaintainer(
+            page_store=page_store,
+            graph_store=stores.graph,
+        )
+        init_wiki_maintainer(maintainer)
+
+        worker = get_extraction_worker()
+        if worker is not None:
+            _env_default_mode = settings.wiki_maintenance_mode
+
+            async def _resolve_and_run(channel_id: str, fact_ids: list[str]) -> None:
+                # Per-channel mode resolution happens AT FIRE TIME (not at
+                # lifespan init) so an operator's UI toggle takes effect on
+                # the very next extraction batch without a server restart.
+                # The resolution falls through: channel.wiki.maintenance_mode
+                # → env (``WIKI_MAINTENANCE_MODE``) → ``"manual"``.
+                mode = _env_default_mode
+                try:
+                    from beever_atlas.services.policy_resolver import (
+                        resolve_effective_policy,
+                    )
+
+                    effective = await resolve_effective_policy(channel_id)
+                    channel_mode = effective.wiki.maintenance_mode
+                    if channel_mode in ("auto", "manual"):
+                        mode = channel_mode
+                except Exception as exc:  # noqa: BLE001 — never block the maintainer
+                    logging.getLogger(__name__).debug(
+                        "wiki_maintainer mode resolution failed for channel=%s err=%s "
+                        "(falling back to env default %s)",
+                        channel_id,
+                        exc,
+                        _env_default_mode,
+                    )
+
+                # Auto-initial-build hook: in auto mode, the very first
+                # extraction batch on a channel with no wiki kicks off the
+                # canonical from-scratch builder once. The maintainer is
+                # incremental and cannot produce the initial structure
+                # plan, so without this hook a brand-new channel sits at
+                # "no wiki yet" until the user clicks Generate. The hook
+                # short-circuits the maintainer call for THIS batch when
+                # it fires; subsequent events fall through to incremental.
+                if mode == "auto":
+                    try:
+                        from beever_atlas.infra.config import (
+                            get_settings as _gs,
+                        )
+                        from beever_atlas.services.wiki_auto_builder import (
+                            maybe_trigger_initial_build,
+                        )
+                        from beever_atlas.wiki.cache import WikiCache as _WC
+
+                        _cache = _WC(_gs().mongodb_uri)
+                        # Pass target_lang=None so the builder's own
+                        # per-channel language-resolution logic runs.
+                        # ``maybe_trigger_initial_build`` resolves None
+                        # to ``settings.default_target_language`` for
+                        # the cache lookups internally.
+                        kicked_off = await maybe_trigger_initial_build(
+                            channel_id,
+                            None,
+                            cache=_cache,
+                        )
+                        if kicked_off:
+                            return
+                    except Exception as exc:  # noqa: BLE001
+                        logging.getLogger(__name__).warning(
+                            "wiki_auto_initial_build hook failed channel=%s err=%s — "
+                            "falling through to incremental maintainer",
+                            channel_id,
+                            exc,
+                        )
+
+                await maintainer.on_extraction_done(channel_id, fact_ids, mode=mode)
+
+            def _on_done_log_exc(task: _asyncio.Task) -> None:
+                """Surface any unhandled exception from the fire-and-forget task.
+
+                Without this callback, a top-level error inside
+                ``_resolve_and_run`` (e.g. an ``ImportError`` raised
+                BEFORE its own try/except) would go to asyncio's default
+                exception handler and be easy to miss. Routing it through
+                our structured logger keeps it visible.
+                """
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is None:
+                    return
+                logging.getLogger(__name__).warning(
+                    "wiki_maintainer fan-out task raised: %s",
+                    exc,
+                    exc_info=exc,
+                )
+
+            def _on_extraction_done(channel_id: str, fact_ids: list[str]):
+                # Fire-and-forget so the worker's batch loop is never
+                # blocked by maintainer LLM calls. Per-page exceptions are
+                # already swallowed inside ``on_extraction_done``;
+                # ``_on_done_log_exc`` covers the rare top-level failure
+                # path (import errors, etc.).
+                task = _asyncio.create_task(_resolve_and_run(channel_id, fact_ids))
+                task.add_done_callback(_on_done_log_exc)
+
+            worker.subscribe_extraction_done(_on_extraction_done)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("WikiMaintainer init failed (non-fatal): %s", exc)
+
+    # Wire consolidation to ExtractionWorker.on_extraction_done so that
+    # topic_clusters and channel_summary are built after actual facts land
+    # in Weaviate (not at sync-return time when facts=0).
+    #
+    # Bug A fix: only register in decoupled mode.  In legacy mode
+    # (DECOUPLE_EXTRACTION=false) the ExtractionWorker still exists and emits
+    # on_extraction_done events for inline batches.  Without this gate the
+    # subscriber would fire consolidation on top of the SyncRunner path,
+    # running it twice per sync.
+    #
+    # Bug B fix: two-flag debounce ("running" + "pending") instead of one.
+    # The old single-flag pattern dropped every event after the first,
+    # so a 7-batch fanout ran consolidation exactly once with only batch-1's
+    # facts.  The new pattern guarantees: at most 1 in-flight + at most 1
+    # queued follow-up.  After the in-flight finishes it drains the pending
+    # flag and runs once more, incorporating all facts from the remaining batches.
+    #
+    # Bug C fix: the subscriber calls consolidate_only() instead of
+    # on_ingestion_complete().  on_ingestion_complete() increments the
+    # AFTER_N_SYNCS counter — calling it once per batch would tick the counter
+    # N times per logical sync.  consolidate_only() calls _spawn_consolidation
+    # directly without touching the counter.  The counter is incremented exactly
+    # once per sync in SyncRunner._run_sync (legacy path) which is correct.
+    _consolidation_settings = get_settings()
+    if _consolidation_settings.decouple_extraction:
+        try:
+            import asyncio as _asyncio
+
+            from beever_atlas.services.extraction_worker import (
+                get_extraction_worker as _get_extraction_worker,
+            )
+
+            _consolidation_worker = _get_extraction_worker()
+            if _consolidation_worker is not None:
+                # Two-flag debounce per channel.
+                # _consolidation_running: channel_id -> True while a task is executing.
+                # _consolidation_pending: channel_id -> True when >=1 event arrived
+                #   while a task was already running (collapsed to one follow-up run).
+                _consolidation_running: dict[str, bool] = {}
+                _consolidation_pending: dict[str, bool] = {}
+
+                async def _run_consolidation_after_extraction(
+                    channel_id: str,
+                ) -> None:
+                    """Policy-gated consolidation via consolidate_only (no counter tick)."""
+                    from beever_atlas.services.pipeline_orchestrator import (
+                        consolidate_only as _consolidate_only,
+                    )
+                    from beever_atlas.services.policy_resolver import (
+                        resolve_effective_policy as _rp,
+                    )
+
+                    # Policy gate: only fire for consolidation-triggering strategies.
+                    try:
+                        effective = await _rp(channel_id)
+                        strategy = effective.consolidation.strategy
+                        # Import here to avoid circular at module load time.
+                        from beever_atlas.models.sync_policy import ConsolidationStrategy
+
+                        if strategy not in (
+                            ConsolidationStrategy.AFTER_EVERY_SYNC,
+                            ConsolidationStrategy.AFTER_N_SYNCS,
+                        ):
+                            return
+                    except Exception as exc:  # noqa: BLE001
+                        logging.getLogger(__name__).debug(
+                            "consolidation policy resolution failed channel=%s: %s — skipping",
+                            channel_id,
+                            exc,
+                        )
+                        return
+
+                    await _consolidate_only(channel_id)
+
+                async def _run_with_debounce(channel_id: str) -> None:
+                    """At most 1 in-flight + 1 queued follow-up per channel.
+
+                    If a consolidation is already running when we arrive, we set
+                    the pending flag and return immediately.  The in-flight task
+                    will see the flag on its next loop iteration and run once more
+                    after it finishes, picking up all facts from intervening batches.
+                    """
+                    if _consolidation_running.get(channel_id):
+                        # Collapse all concurrent arrivals into one follow-up.
+                        _consolidation_pending[channel_id] = True
+                        return
+                    _consolidation_running[channel_id] = True
+                    try:
+                        while True:
+                            # Clear pending BEFORE running so any new arrivals
+                            # during this run will set it again and be caught.
+                            _consolidation_pending.pop(channel_id, None)
+                            await _run_consolidation_after_extraction(channel_id)
+                            # If another batch arrived while we were running,
+                            # loop once more; otherwise we're done.
+                            if not _consolidation_pending.pop(channel_id, False):
+                                break
+                    finally:
+                        _consolidation_running.pop(channel_id, None)
+
+                def _on_extraction_done_consolidation(channel_id: str, fact_ids: list[str]) -> None:
+                    # Fire-and-forget, same pattern as WikiMaintainer subscriber.
+                    # fact_ids is intentionally unused here: consolidate_only calls
+                    # _spawn_consolidation which reads directly from Weaviate — the
+                    # full accumulated fact set, not just this batch's ids.
+                    task = _asyncio.create_task(_run_with_debounce(channel_id))
+
+                    def _log_exc(t: _asyncio.Task) -> None:
+                        if t.cancelled():
+                            return
+                        exc = t.exception()
+                        if exc is not None:
+                            logging.getLogger(__name__).warning(
+                                "consolidation fan-out task raised channel=%s: %s",
+                                channel_id,
+                                exc,
+                                exc_info=exc,
+                            )
+
+                    task.add_done_callback(_log_exc)
+
+                _consolidation_worker.subscribe_extraction_done(_on_extraction_done_consolidation)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Consolidation-after-extraction wiring failed (non-fatal): %s", exc
+            )
 
     # Initialize outbound MCP registry — non-blocking, skips unreachable servers
     from beever_atlas.agents.mcp_registry import init_mcp_registry
@@ -205,7 +489,40 @@ app = FastAPI(
 # Per-IP rate limit. Limiter instance lives in infra.rate_limit so route
 # modules can share it; here we wire it into the FastAPI app.
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+def _push_source_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Custom 429 response for ``/api/sources/{source_id}/events``.
+
+    Other rate-limited routes use slowapi's default handler (plain text
+    body); the push endpoint surfaces the documented JSON shape so
+    OpenClaw / Hermes clients can react programmatically.
+    """
+    if request.url.path.startswith("/api/sources/") and request.url.path.endswith("/events"):
+        # Best-effort retry hint derived from the limit window. ``per`` is
+        # in seconds (slowapi's parsed limit). Default to 60 if unknown.
+        retry_after = 60
+        try:
+            limit = getattr(exc, "limit", None)
+            per = getattr(getattr(limit, "limit", None), "per", None) or getattr(limit, "per", None)
+            if per:
+                retry_after = int(per)
+        except Exception:  # noqa: BLE001
+            pass
+        source_id = request.path_params.get("source_id", "unknown")
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "rate_limited",
+                "source_id": source_id,
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+    return _rate_limit_exceeded_handler(request, exc)
+
+
+app.add_exception_handler(RateLimitExceeded, _push_source_rate_limit_handler)
 
 # CORS for React dev server and production
 _settings = get_settings()
@@ -271,6 +588,11 @@ app.include_router(loader_router, dependencies=_loader_auth)
 # token via the legacy `?access_token=` query param would be a bootstrap
 # loop). Mounted without `_auth` to avoid running require_user twice.
 app.include_router(loader_token_router)
+# Push-source ingest. Auth is per-source HMAC (verified inside the
+# handler), so this router mounts WITHOUT the Bearer-token ``_auth``
+# dependency. Unsigned or wrong-signature requests get 401 from the
+# HMAC verifier before they touch the store.
+app.include_router(sources_router)
 
 # Secure MCP mount (openspec change atlas-mcp-server). The ASGI app was
 # built at module-load time above so its lifespan could be chained into
@@ -283,6 +605,21 @@ if _mcp_asgi is not None:
     logging.getLogger(__name__).info("MCP endpoint mounted at /mcp with auth middleware")
 
 register_health_checks()
+
+
+@app.get("/health", include_in_schema=False)
+async def liveness() -> dict[str, str]:
+    """Lightweight liveness probe — no auth, no DB checks.
+
+    Conventional k8s / Docker / monitoring-tool default endpoint. Pairs
+    with the deep ``/api/health`` (which dials every store and is
+    auth-rate-limited). Returning 200 here silences the relentless 404
+    noise that browser extensions and monitoring agents generate when
+    they probe ``/health`` against any backend on localhost. Use this
+    for "is the process alive" checks; use ``/api/health`` when you
+    need component-level status.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/api/health", response_model=HealthResponse)

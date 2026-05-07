@@ -3,6 +3,34 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class NumericValueExtraction(BaseModel):
+    """One structured numeric value pulled from a fact's text.
+
+    Defined as an explicit pydantic model (rather than a free-form
+    ``dict``) so the JSON schema emitted to Gemini does NOT contain
+    ``additionalProperties: true``, which Gemini's schema-constrained
+    decoding rejects. The fields mirror the Phase 3 spec:
+    ``label`` / ``value`` / ``raw_value`` / ``unit``.
+    """
+
+    label: str
+    """Noun describing what's being counted (e.g. 'stars',
+    'impressions', 'paid-media equivalent')."""
+
+    value: str
+    """Display form preserved from the source text (e.g. ``'2,396'``,
+    ``'534k'``, ``'HK$130k'``)."""
+
+    raw_value: float | int | None = None
+    """Numeric form for sorting / trend analysis. ``None`` when the
+    extractor couldn't normalise the display form (e.g., unusual
+    formatting)."""
+
+    unit: str | None = None
+    """Unit / currency / qualifier (``'USD'``, ``'HKD'``, ``'stars'``,
+    ``'%'``). ``None`` when no unit applies."""
+
+
 class ExtractedFact(BaseModel):
     """A single discrete fact extracted from one Slack message."""
 
@@ -47,6 +75,40 @@ class ExtractedFact(BaseModel):
     (e.g. "en", "zh-HK", "ja"). Preserved so wiki/QA rendering can translate
     on demand. Defaults to "en" for backwards compatibility with pre-change data.
     """
+
+    # ---- Phase 3 extraction enrichment (all OPTIONAL) ---------------------
+    # The LLM may omit any of these fields entirely; defaults below ensure
+    # pydantic accepts the JSON without complaint. Consumers fall back to
+    # legacy regex/null behavior when the field is empty.
+    rationale: str | None = None
+    """For ``fact_type == "decision"``: single-sentence 'because'
+    justification. Null when no explicit justification appeared in the
+    source."""
+
+    alternatives_considered: list[str] = Field(default_factory=list)
+    """For ``fact_type == "decision"``: alternatives weighed and
+    rejected (1-3 words each). Empty list when no alternatives were
+    discussed."""
+
+    consequences_open: list[str] = Field(default_factory=list)
+    """For ``fact_type == "decision"``: open questions about downstream
+    effects (1 sentence each). Empty list when none surfaced."""
+
+    numeric_values: list[NumericValueExtraction] = Field(default_factory=list)
+    """Structured numeric extractions. Cap 5 items per fact. Empty list
+    when no significant numbers (≥100, currency, or %) appear. Uses an
+    explicit ``NumericValueExtraction`` schema (not free-form dict) so
+    Gemini schema-constrained decoding doesn't trip on
+    ``additionalProperties: true``."""
+
+    sentiment: str | None = None
+    """For ``fact_type in {"opinion", "recommendation"}``: one of
+    ``"neutral" | "concerning" | "positive" | "recommendation"``. Null
+    for non-opinion facts or when uncertain."""
+
+    glossary_terms: list[str] = Field(default_factory=list)
+    """Acronyms (3+ uppercase letters) or domain terms appearing in the
+    fact text. Empty list when none detected."""
 
 
 class FactExtractionResult(BaseModel):

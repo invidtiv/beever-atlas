@@ -30,6 +30,13 @@ class ConsolidationResult:
     facts_clustered: int = 0
     summaries_generated: int = 0
     errors: list[str] = field(default_factory=list)
+    # Fact ids whose cluster was created or updated during this run.
+    # Populated by ``_incremental_cluster`` (membership delta) and
+    # ``_generate_summaries`` (summary refresh). The maintainer hook
+    # reads this list to route precisely-affected pages — replaces the
+    # legacy ``cache.mark_all_stale(channel_id)`` shotgun. Order is
+    # insertion-stable, deduplicated.
+    touched_fact_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -127,16 +134,32 @@ class ConsolidationService:
             logger.error("Consolidation error for %s: %s", channel_id, exc, exc_info=True)
             result.errors.append(str(exc))
 
-        # Mark wiki as stale after consolidation
+        # Notify the WikiMaintainer that consolidation finished. Replaces the
+        # legacy ``cache.mark_all_stale(channel_id)`` hammer. The populated
+        # ``touched_fact_ids`` is the precise set of facts whose grouping
+        # OR summary changed during this run — the maintainer routes those
+        # ids to affected pages (auto fires LLM rewrites, manual marks
+        # them dirty). Empty list is the no-op path (no clusters touched).
+        # Resolve maintenance_mode from settings so the manual-mode path
+        # actually marks pages dirty (the historic ``[]`` payload silently
+        # made this a no-op).
         try:
-            from beever_atlas.infra.config import get_settings
-            from beever_atlas.wiki.cache import WikiCache
+            from beever_atlas.services.wiki_maintainer import get_wiki_maintainer
 
-            settings = get_settings()
-            cache = WikiCache(settings.mongodb_uri)
-            await cache.mark_all_stale(channel_id)
-        except Exception:
-            logger.warning("Failed to mark wiki stale for channel %s", channel_id)
+            maintainer = get_wiki_maintainer()
+            if maintainer is not None:
+                mode = getattr(self._settings, "wiki_maintenance_mode", "manual") or "manual"
+                await maintainer.on_consolidation_complete(
+                    channel_id,
+                    fact_ids=list(result.touched_fact_ids),
+                    mode=mode,
+                )
+        except Exception as exc:  # noqa: BLE001 — never block consolidation on the maintainer
+            logger.warning(
+                "wiki maintainer on_consolidation_complete failed for channel=%s: %s",
+                channel_id,
+                exc,
+            )
 
         return result
 
@@ -272,6 +295,19 @@ class ConsolidationService:
 
         result.clusters_created += len(created_ids)
         result.clusters_updated += len(updated_ids)
+
+        # Spec: ``every fact_id whose cluster was created or updated`` — for
+        # each touched cluster (in either bucket), every member id is a
+        # fact whose grouping changed. Use an insertion-ordered dedupe via
+        # dict so the maintainer hook can rely on stable ordering for
+        # deterministic test fixtures.
+        local_ids: dict[str, None] = {fid: None for fid in result.touched_fact_ids}
+        for cluster in existing_clusters:
+            if cluster.id not in touched_cluster_ids:
+                continue
+            for mid in cluster.member_ids:
+                local_ids[mid] = None
+        result.touched_fact_ids = list(local_ids.keys())
 
         return created_ids, updated_ids
 
@@ -1136,6 +1172,13 @@ class ConsolidationService:
             ctx = await self._build_cluster_context(members, channel_id)
             contexts.append((cluster, members, ctx))
 
+        # Per-run dedupe set + ordered list for ``touched_fact_ids``.
+        # Populated inside ``_summarize_one`` after the upsert succeeds so
+        # a cluster whose summary failed does NOT contribute its members
+        # to the maintainer's routing set.
+        summary_seen: set[str] = set(result.touched_fact_ids)
+        summary_touched_order: list[str] = []
+
         async def _summarize_one(
             cluster: TopicCluster,
             members: list[AtomicFact],
@@ -1234,6 +1277,18 @@ class ConsolidationService:
 
                     await self._weaviate.upsert_cluster(cluster)
                     result.summaries_generated += 1
+                    # Spec: append every fact_id whose cluster's summary
+                    # changed. ``members`` is the prefetched batch of up
+                    # to 50 facts the summary was built from. Append-on-
+                    # success (D5 — partial failures shrink the routed
+                    # set, never inflate it). asyncio cannot preempt
+                    # mid-loop here because there's no await between the
+                    # set check and the list append, so concurrent
+                    # ``_summarize_one`` calls cannot race.
+                    for m in members:
+                        if m.id and m.id not in summary_seen:
+                            summary_seen.add(m.id)
+                            summary_touched_order.append(m.id)
                 except Exception as exc:
                     logger.warning(
                         "Failed to generate summary for cluster %s: %s",
@@ -1245,6 +1300,12 @@ class ConsolidationService:
         await asyncio.gather(
             *[_summarize_one(cluster, members, ctx) for cluster, members, ctx in contexts]
         )
+
+        # Merge the summary-touched ids into ``result.touched_fact_ids``.
+        # The set view (``summary_seen``) was seeded with the existing
+        # touched ids so this loop only appends genuinely new entries.
+        for fid in summary_touched_order:
+            result.touched_fact_ids.append(fid)
 
     async def _generate_channel_summary(
         self,

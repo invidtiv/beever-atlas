@@ -3,9 +3,11 @@ import {
   BrowserRouter,
   Routes,
   Route,
+  Navigate,
   useLocation,
   useNavigationType,
 } from "react-router-dom";
+
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
@@ -18,11 +20,12 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { NotFound } from "@/pages/NotFound";
+import { PushSources } from "@/pages/admin/PushSources";
+import { WikiDrift } from "@/pages/admin/WikiDrift";
 import { AskSessionsProvider } from "@/contexts/AskSessionsContext";
 import { TierBrowser } from "@/components/memories/TierBrowser";
 import { WikiTab } from "@/components/channel/WikiTab";
 import { MessagesTab } from "@/components/channel/MessagesTab";
-import { GraphTab } from "@/components/graph/GraphTab";
 import { ChannelSettingsTab } from "@/components/channel/ChannelSettingsTab";
 import { SyncHistoryTab } from "@/components/channel/SyncHistoryTab";
 import { useTheme } from "@/hooks/useTheme";
@@ -77,9 +80,22 @@ function AppShell() {
               <Route path="/channels/:id" element={<ChannelWorkspace />}>
                 <Route index element={<ChannelDefaultRedirect />} />
                 <Route path="wiki" element={<WikiTab />} />
+                <Route path="wiki/:slug" element={<WikiTab />} />
+                {/* Legacy redirects — the wiki + entity graphs now live
+                    inside their parent tabs via ?view=graph so existing
+                    deep-links and toolbar bookmarks keep working.
+                    These remain MORE SPECIFIC than ``wiki/:slug`` so
+                    React Router matches them first. */}
+                <Route
+                  path="wiki/graph"
+                  element={<Navigate to="../wiki?view=graph" replace />}
+                />
+                <Route
+                  path="graph"
+                  element={<Navigate to="../memories?view=graph" replace />}
+                />
                 <Route path="messages" element={<MessagesTab />} />
                 <Route path="memories" element={<TierBrowser />} />
-                <Route path="graph" element={<GraphTab />} />
                 <Route path="sync-history" element={<SyncHistoryTab />} />
                 <Route path="settings" element={<ChannelSettingsTab />} />
               </Route>
@@ -87,6 +103,8 @@ function AppShell() {
               <Route path="/ask/:sessionId" element={<AskPage />} />
               <Route path="/activity" element={<ActivityPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/admin/sources" element={<PushSources />} />
+              <Route path="/admin/wiki-drift" element={<WikiDrift />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="*" element={<NotFound />} />
             </Routes>

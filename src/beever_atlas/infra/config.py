@@ -415,6 +415,168 @@ class Settings(BaseSettings):
         alias="BEEVER_LOADER_RAW_KEY_FALLBACK",
     )
 
+    # Dual-read fallback for channel messages.
+    # When True, ``GET /api/channels/{channel_id}/messages`` reads from the
+    # durable ``channel_messages`` collection populated by the sync runner.
+    # Falls back to ``adapter.fetch_history`` when the store is empty for that
+    # channel OR a sync is currently running (so partial rows are not surfaced
+    # mid-flight). Default OFF — staging soak before flipping in production.
+    # See ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/message-store/``
+    # → "Dual-read fallback during migration".
+    read_from_message_store: bool = Field(default=False, alias="READ_FROM_MESSAGE_STORE")
+
+    # Read-side flag for the file-imports branch in ``api/channels.py``.
+    # When True AND ``channel_messages`` carries rows for the requested
+    # file channel (``source_id="file"``), the messages tab serves data
+    # from the durable Message Store. Otherwise falls back to the legacy
+    # ``imported_messages`` collection. Default OFF — staging soak after
+    # the migration script runs before flipping in production.
+    read_file_imports_from_channel_messages: bool = Field(
+        default=False, alias="READ_FILE_IMPORTS_FROM_CHANNEL_MESSAGES"
+    )
+
+    # Dual-write window for file imports.
+    # When True, ``api/imports.commit_import`` writes new file-import rows
+    # to BOTH ``channel_messages`` (the new home) and ``imported_messages``
+    # (legacy, kept for instant rollback). Default ON for the soak window;
+    # flip OFF after the read flag has been ON in production for one week
+    # with zero ``channel_messages_fallback`` (reason="empty_store") log
+    # lines. ``channel_messages`` writes are unconditional regardless of
+    # this flag — only the legacy collection write is gated.
+    write_dual_file_imports: bool = Field(default=True, alias="WRITE_DUAL_FILE_IMPORTS")
+
+    # Background extraction worker flag.
+    # When True, ``services/sync_runner.py`` skips the inline
+    # ``BatchProcessor.process_messages()`` call after upserting messages
+    # to ``channel_messages``. The background ExtractionWorker registered
+    # by the scheduler claims the rows in the next tick (default 30 s) and
+    # runs the 6-stage ADK pipeline asynchronously. This is the primary
+    # lever that makes a Gemini 503 storm survivable — sync (fetch + persist)
+    # finishes in seconds; extraction proceeds in the background and retries
+    # with exponential backoff. Default OFF — staging soak (48 h) before
+    # flipping in production. Rollback is reversible: flipping OFF returns to
+    # inline extraction; the worker idles harmlessly with no rows to claim.
+    decouple_extraction: bool = Field(default=False, alias="DECOUPLE_EXTRACTION")
+
+    # Tuning knobs (worker tick interval, stale-recovery window, max
+    # retries, breaker cooldown, LLM failover enablement, fallback
+    # model map) intentionally NOT env-configurable. They live as
+    # module constants near the code that uses them
+    # (``services/extraction_worker.py``, ``services/circuit_breaker.py``,
+    # ``llm/provider.py``). Operator-tunable env vars are reserved for
+    # behavior that an on-call would actually flip during an incident
+    # — capacity planning belongs in reviewed PRs.
+
+    # Per-page wiki page-store flag.
+    # When True, ``WikiCache.get_page`` reads from the ``wiki_pages``
+    # collection (one document per (channel_id, target_lang, page_id)).
+    # When False, falls back to the legacy ``wiki_cache`` flat-pages-subdoc
+    # schema. Writes always go to the new collection so flipping the flag
+    # back to OFF after a soak doesn't lose page edits made under the new
+    # path. Default OFF — staging soak (48 h) before flipping in production.
+    # Per-page incremental update via WikiMaintainer requires PER_PAGE_WIKI=True.
+    per_page_wiki: bool = Field(default=False, alias="PER_PAGE_WIKI")
+
+    # WikiMaintainer mode.
+    # ``manual``: maintainer marks affected pages is_dirty=True on
+    # extraction events; user clicks "Maintain Wiki" to drain the
+    # dirty queue on demand. Default — conservative for soak.
+    # ``auto``: Karpathy-style — maintainer auto-fires per-page LLM
+    # rewrite on every extraction event. Flip to ``auto`` only after
+    # the 2-week A/B comparison confirms incremental quality matches
+    # full-regenerate quality on three real channels.
+    wiki_maintenance_mode: str = Field(default="manual", alias="WIKI_MAINTENANCE_MODE")
+
+    # Auto-trigger an initial wiki build the first time a channel crosses
+    # the fact-count threshold under ``WIKI_MAINTENANCE_MODE=auto``. Without
+    # this, a brand-new channel sits at "no wiki yet" until the user
+    # manually clicks Generate — surprising for the Karpathy-style "wiki
+    # is alive" framing. The maintainer is incremental-only and cannot
+    # produce the initial structure plan; this flag bridges that gap.
+    # Disable to revert to the manual-first-build flow.
+    wiki_auto_initial_build: bool = Field(default=True, alias="WIKI_AUTO_INITIAL_BUILD")
+
+    # Minimum extracted-fact count before auto-initial-build fires. A
+    # one-fact wiki is worse than no wiki — wait for enough signal to
+    # produce a useful structure plan. The check runs on every
+    # ``on_extraction_done`` event for channels with no wiki, so the build
+    # fires on the first event that crosses this threshold.
+    wiki_auto_initial_build_threshold: int = Field(
+        default=10, alias="WIKI_AUTO_INITIAL_BUILD_THRESHOLD"
+    )
+
+    # Wiki page-voice drift A/B comparator.
+    # When True, every successful ``WikiMaintainer.apply_update`` ALSO
+    # schedules a fire-and-forget ``compare_apply_update_vs_regenerate``
+    # task that builds the regenerate-from-scratch wiki page for the same
+    # ``(channel_id, page_id, target_lang)`` and emits a structured
+    # ``wiki_drift_report`` log line + persists a row to the
+    # ``wiki_drift_reports`` Mongo collection. Default OFF — the comparator
+    # doubles LLM cost on the affected page so we only enable it during the
+    # 2-week soak that gates flipping ``WIKI_MAINTENANCE_MODE=auto`` to
+    # default ON. The maintainer's primary path is unaffected when this
+    # flag is OFF.
+    wiki_drift_ab: bool = Field(default=False, alias="WIKI_DRIFT_AB")
+
+    # Per-(channel, page) rate-limit window for the drift comparator.
+    # The maintainer skips a comparator invocation when the same
+    # ``(channel_id, page_id)`` was last compared less than this many
+    # seconds ago. 60s default keeps soak data dense without doubling LLM
+    # cost on a busy channel; soak operators may tune to 30s (denser
+    # samples) or 300s (cheaper) without redeploy.
+    wiki_drift_ab_rate_limit_seconds: int = Field(
+        default=60, alias="WIKI_DRIFT_AB_RATE_LIMIT_SECONDS"
+    )
+
+    # LLM-native wiki redesign (change ``wiki-llm-native-redesign``).
+    # When True, the WikiMaintainer dispatches per-page-kind synthesis
+    # prompts (topic / entity / decisions / faq / action_items) instead
+    # of the legacy single ``_render_apply_update_prompt`` template,
+    # parses ``[[wikilink]]`` cross-references, and emits per-kind
+    # ``kind_schema`` payloads for the MCP read tools. When False, the
+    # maintainer falls through to the legacy single-prompt path —
+    # behaviour is byte-identical to pre-redesign so existing installs
+    # are unaffected. Default OFF; flips ON in fresh-install ``.env.example``
+    # only after the soak runbook closes (see §9.3 of the change tasks).
+    wiki_llm_native_redesign: bool = Field(default=False, alias="WIKI_LLM_NATIVE_REDESIGN")
+
+    # ``llm-wiki-folder-structure`` Phase B+ — enables the structure
+    # planner pass that decides folder boundaries between gather and
+    # compile. Default ON so the wiki tree always groups topics into
+    # navigable folders rather than degenerating to a flat 50-item
+    # sidebar after a regular Update. The planner is skipped automatically
+    # for sparse channels via ``wiki_min_topics_for_folders``, and the
+    # ``?mode=reorganize`` query still forces a re-plan from scratch
+    # regardless of this flag. Set ``WIKI_FOLDER_PLANNER=false`` to
+    # restore the legacy flat behaviour.
+    wiki_folder_planner: bool = Field(default=True, alias="WIKI_FOLDER_PLANNER")
+
+    # Below this many topic clusters the planner skips folder creation
+    # entirely — sparse channels read better as a flat list, and the
+    # heuristic candidate signals don't accumulate enough evidence to
+    # be reliable. Operators can lower it for testing on small
+    # channels but the default is conservative.
+    wiki_min_topics_for_folders: int = Field(default=8, alias="WIKI_MIN_TOPICS_FOR_FOLDERS")
+
+    # Per-kind drift-A/B sample rate (§8.1). The legacy ``WIKI_DRIFT_AB``
+    # rate-limiter applies only to the legacy single-prompt comparison;
+    # this knob governs the redesign-vs-legacy A/B that runs alongside.
+    # 0.05 = 5% of apply_update calls trigger the per-kind comparison —
+    # statistically sufficient given typical page-touch frequency, and
+    # avoids doubling LLM cost on every rewrite. 0.0 disables the
+    # per-kind sampler entirely.
+    wiki_drift_ab_per_kind_sample_rate: float = Field(
+        default=0.05, alias="WIKI_DRIFT_AB_PER_KIND_SAMPLE_RATE"
+    )
+
+    # Fact-overlap threshold for the page-merge proposal pass. The
+    # maintainer compares ``last_facts_seen`` between every pair of
+    # pages on each ``on_extraction_done`` and surfaces a merge proposal
+    # when Jaccard similarity exceeds this threshold. Operator approves
+    # via the curation UI (no auto-merge — proposals only). 0.70 starts
+    # conservative; tune up if false-positive rate exceeds 1/week.
+    wiki_page_merge_threshold: float = Field(default=0.70, alias="WIKI_PAGE_MERGE_THRESHOLD")
+
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared

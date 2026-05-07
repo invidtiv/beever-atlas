@@ -35,6 +35,10 @@ export interface AskResponse {
 
 export interface WikiCitation {
   id: string;
+  /** Underlying AtomicFact.id (e.g., "f_abc123"). Narrative inline
+   *  citation chips look up popover content by this field, since the
+   *  v3 prompt emits `[f_xxx]` markers in paragraph text. */
+  fact_id?: string;
   author: string;
   channel: string;
   timestamp: string;
@@ -56,7 +60,7 @@ export interface WikiPage {
   id: string;
   slug: string;
   title: string;
-  page_type: "fixed" | "topic" | "sub-topic";
+  page_type: "fixed" | "topic" | "sub-topic" | "folder";
   parent_id: string | null;
   section_number: string;
   content: string;
@@ -65,6 +69,40 @@ export interface WikiPage {
   last_updated: string;
   citations: WikiCitation[];
   children: WikiPageRef[];
+  /** SHA-256 of sorted child slugs (folder pages only). Used by the
+   *  maintainer to skip re-synthesis when membership is unchanged. */
+  children_fingerprint?: string | null;
+  /** True for planner-produced folders (vs. hand-curated, future). */
+  is_synthetic?: boolean;
+  /** Adaptive page module plan (``adaptive-wiki-page-content`` change).
+   *  Each entry is at minimum ``{id, anchor}`` with optional per-module
+   *  data payload. Empty array = legacy page; renderer falls back to
+   *  the single-template flow over ``content``. */
+  modules?: WikiPageModule[];
+  /** Multi-section narrative article body produced by the v3
+   *  ``MODULE_COMPILE_PROMPT_V3``. Mirrors the persistence-layer
+   *  field. The layout reads this to mount the sticky TOC; the
+   *  ``NarrativeArticleModule`` reads the same payload via its
+   *  ``module.data.sections`` slice. Empty array means the page
+   *  predates narrative generation OR the validator rejected the
+   *  LLM output (graceful fallback to module-only rendering). */
+  narrative_sections?: Array<{
+    anchor: string;
+    heading: string;
+    paragraphs?: Array<{ text: string; citations?: string[]; is_inference?: boolean }>;
+    citations?: string[];
+    visual?: { kind: string; content: unknown } | null;
+    citation_coverage?: number;
+  }>;
+}
+
+/** One entry in the adaptive page module plan. The ``data`` payload
+ *  shape varies per module type — frontend module renderers cast it
+ *  to their expected shape. */
+export interface WikiPageModule {
+  id: string;
+  anchor: string;
+  data?: Record<string, unknown>;
 }
 
 export interface WikiPageNode {
@@ -72,9 +110,14 @@ export interface WikiPageNode {
   title: string;
   slug: string;
   section_number: string;
-  page_type: "fixed" | "topic" | "sub-topic";
+  page_type: "fixed" | "topic" | "sub-topic" | "folder";
   memory_count: number;
   children: WikiPageNode[];
+  /** True for planner-produced folders (vs. hand-curated, future). */
+  is_synthetic?: boolean;
+  /** Optional 1-2 sentence summary surfaced on the Overview's topic
+   *  card grid so each card shows context without a click-through. */
+  summary?: string;
 }
 
 export interface WikiStructure {
@@ -534,6 +577,8 @@ export interface ConsolidationConfig {
 
 export type WikiGenerationStrategy = "after_every_sync" | "after_consolidation" | "scheduled" | "manual";
 
+export type WikiMaintenanceMode = "auto" | "manual" | "inherit";
+
 export interface WikiConfig {
   enabled: boolean | null;
   generation_strategy: WikiGenerationStrategy | null;
@@ -541,6 +586,7 @@ export interface WikiConfig {
   auto_regenerate_on_stale: boolean | null;
   min_facts_for_generation: number | null;
   topic_subpage_threshold: number | null;
+  maintenance_mode?: WikiMaintenanceMode | null;
 }
 
 export interface ChannelPolicyResponse {
