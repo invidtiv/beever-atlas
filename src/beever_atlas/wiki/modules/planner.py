@@ -24,10 +24,28 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from beever_atlas.wiki.modules import MODULE_CATALOG, is_known_module
 
 logger = logging.getLogger(__name__)
+
+
+_VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com")
+
+
+def _is_video_host(url: str) -> bool:
+    """Return True iff ``url``'s hostname is a known video-host or its
+    subdomain. Hostname-anchored to close the
+    ``codeql:py/incomplete-url-substring-sanitization`` finding —
+    a substring check ``"youtube.com" in url`` would falsely match
+    ``https://attacker.example/?youtube.com``.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _VIDEO_HOSTS)
 
 
 @dataclass
@@ -207,8 +225,7 @@ def compute_signals(
                 media_by_kind["gallery"].append(m)
         elif (
             kind == "video"
-            or "youtube.com" in url
-            or "vimeo.com" in url
+            or _is_video_host(url)
             or url.endswith((".mp4", ".webm"))
         ):
             media_by_kind["video"].append(m)

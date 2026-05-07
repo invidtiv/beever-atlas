@@ -23,6 +23,21 @@ than raising.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
+
+def _safe_hostname(url: str) -> str:
+    """Return the lower-cased hostname of ``url`` or ``""`` on parse
+    failure / opaque inputs. Hostname-anchored host-checks close the
+    ``codeql:py/incomplete-url-substring-sanitization`` finding
+    that ``"youtube.com" in url`` raises (the substring check would
+    falsely match ``https://attacker.example/?youtube.com``).
+    """
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
 import importlib
 import inspect
 import json
@@ -320,9 +335,10 @@ def _extract_media_for_module(
             url = (m.get("url") or "").lower()
             kind = (m.get("kind") or "").lower()
             video_kind: str | None = None
-            if "youtube.com" in url or "youtu.be" in url:
+            host = _safe_hostname(url)
+            if host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be":
                 video_kind = "youtube"
-            elif "vimeo.com" in url:
+            elif host == "vimeo.com" or host.endswith(".vimeo.com"):
                 video_kind = "vimeo"
             elif kind == "video" or url.endswith((".mp4", ".webm")):
                 video_kind = "native"

@@ -860,8 +860,24 @@ async def get_wiki_page_by_slug(
     if page is None:
         raise HTTPException(status_code=404, detail=f"No wiki page slug={slug!r}")
     if page.merged_into:
+        # Validate the merge target slug before embedding into the
+        # redirect URL — closes
+        # ``codeql:py/url-redirection-from-remote`` by ensuring we
+        # only redirect to slugs that look like our internal slug
+        # shape (alphanumeric + hyphen + underscore + colon, no path
+        # traversal characters). The merge_into field is set by an
+        # authenticated merge endpoint that already validates the
+        # source slug, so this is defence-in-depth.
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9_:-]{1,128}", page.merged_into):
+            raise HTTPException(
+                status_code=500,
+                detail="Invalid merge target slug — refusing to redirect",
+            )
+        target = quote(page.merged_into, safe="")
         return RedirectResponse(  # type: ignore[return-value]
-            url=f"/api/channels/{channel_id}/wiki/pages-by-slug/{page.merged_into}",
+            url=f"/api/channels/{channel_id}/wiki/pages-by-slug/{target}",
             status_code=301,
         )
     return page.model_dump(mode="json")

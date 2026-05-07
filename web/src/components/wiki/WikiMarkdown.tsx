@@ -39,7 +39,17 @@ function detectMediaType(url: string, alt?: string): "image" | "pdf" | "video" |
   // the media kind even when the URL is opaque (Mattermost ID-only
   // file URLs have no extension).
   if ((alt || "").startsWith("📄") || lower.match(/\.(pdf)(\?|$)/) || lower.includes("pdf")) return "pdf";
-  if ((alt || "").startsWith("🎥") || lower.match(/\.(mp4|mov|webm|avi)(\?|$)/) || lower.includes("video") || lower.includes("youtube.com") || lower.includes("youtu.be") || lower.includes("vimeo.com")) return "video";
+  // Parse the URL once; falls back to "" so the lower-case substring
+  // checks below still run on opaque/relative inputs. The hostname
+  // anchored check (host === / endsWith ".host") closes the
+  // ``codeql:js/incomplete-url-substring-sanitization`` finding —
+  // ``"youtube.com" in url`` would otherwise match
+  // ``https://attacker.example/?youtube.com``.
+  let host = "";
+  try { host = new URL(url, window.location.href).hostname.toLowerCase(); } catch { /* invalid URL */ }
+  const isYouTube = host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be";
+  const isVimeo = host === "vimeo.com" || host.endsWith(".vimeo.com");
+  if ((alt || "").startsWith("🎥") || lower.match(/\.(mp4|mov|webm|avi)(\?|$)/) || lower.includes("video") || isYouTube || isVimeo) return "video";
   if ((alt || "").startsWith("🖼") || lower.includes("image")) return "image";
   return "link";
 }
