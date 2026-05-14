@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -141,6 +142,67 @@ async def get_wiki_page(
     if page is None:
         raise HTTPException(status_code=404, detail=f"Page {page_id!r} not found")
     return page
+
+
+@router.get("/entity-pages")
+async def list_entity_pages(
+    channel_id: str,
+    target_lang: str | None = Query(default=None),
+    include_archived: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> dict:
+    """Debug view: list raw ``kind=entity`` wiki pages for a channel.
+
+    Post wiki-redesign-gap-fill the per-entity page set is being cleaned up:
+    the archive script flips ``archived=true`` on legacy rows. This endpoint
+    filters those out by default so operators see the post-cleanup surface.
+    Pass ``?include_archived=true`` to inspect archived rows during the
+    retention window. The default response includes ``archived_count`` so
+    operators can confirm the archive script ran.
+    """
+    await assert_channel_access(principal, channel_id)
+    cache = _get_cache()
+    await cache._ensure_db()
+    lang = await _resolve_target_lang(channel_id, target_lang)
+
+    from beever_atlas.wiki.page_store import WikiPageStore
+
+    page_store = WikiPageStore(db=cache._db)
+    pages = await page_store.list_pages_by_kind(
+        channel_id=channel_id,
+        kind="entity",
+        target_lang=lang,
+        scope="all",
+        include_archived=include_archived,
+    )
+    archived_count = 0
+    if not include_archived:
+        all_pages = await page_store.list_pages_by_kind(
+            channel_id=channel_id,
+            kind="entity",
+            target_lang=lang,
+            scope="all",
+            include_archived=True,
+        )
+        archived_count = sum(1 for p in all_pages if getattr(p, "archived", False))
+    return {
+        "channel_id": channel_id,
+        "target_lang": lang,
+        "count": len(pages),
+        "archived_count": archived_count,
+        "include_archived": include_archived,
+        "pages": [
+            {
+                "page_id": p.page_id,
+                "title": p.title or p.page_id,
+                "slug": p.slug,
+                "fact_count": len(p.last_facts_seen or []),
+                "archived": bool(getattr(p, "archived", False)),
+                "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+            }
+            for p in pages
+        ],
+    }
 
 
 @router.get("/structure")
@@ -351,6 +413,52 @@ async def get_wiki_status(
     return status
 
 
+@router.post("/regenerate-overview", status_code=202)
+async def regenerate_overview(
+    channel_id: str,
+    principal: Principal = Depends(require_user),
+) -> dict:
+    """Force-restart a stuck auto-overview build.
+
+    Backs the WikiTab "Retry overview generation" affordance shown when
+    the loading screen has been stuck for too long (e.g. a hung Gemini
+    call upstream of the subscriber's timeout). The handler is
+    idempotent — calling it while a build is genuinely running will
+    drop the in-flight state but the subscriber's gate-check inside
+    ``on_extraction_done`` re-verifies before scheduling new work, so
+    two parallel builds cannot fire from a fat-fingered double-click.
+    """
+    await assert_channel_access(principal, channel_id)
+    from beever_atlas.services.auto_overview_subscriber import (
+        get_auto_overview_subscriber,
+    )
+
+    subscriber = get_auto_overview_subscriber()
+    if subscriber is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AutoOverviewSubscriber not initialised — restart the worker.",
+        )
+
+    logger.info(
+        "wiki_regenerate_overview principal=%s channel=%s — force_reset + re-trigger",
+        getattr(principal, "id", "unknown"),
+        channel_id,
+    )
+    subscriber.force_reset(channel_id)
+    # Re-trigger generation as a fire-and-forget task. The empty
+    # fact_ids list is fine — the gate logic doesn't require facts to
+    # act, it only cares about the extraction-done / overview-row /
+    # threshold gates. ``on_extraction_done`` awaits the full build
+    # inline (multi-minute), so we must NOT await it here or the
+    # endpoint would block the user's retry click for the entire
+    # rebuild.
+    import asyncio as _asyncio
+
+    _asyncio.create_task(subscriber.on_extraction_done(channel_id, fact_ids=[]))
+    return {"status": "triggered", "channel_id": channel_id}
+
+
 @router.post("/refresh", status_code=202)
 async def refresh_wiki(
     channel_id: str,
@@ -367,32 +475,27 @@ async def refresh_wiki(
             "Each value maps to a distinct user-facing button."
         ),
     ),
-    restructure: bool = Query(
+    force: bool = Query(
         default=False,
         description=(
-            "[DEPRECATED — use ``mode`` instead] When true, force the "
-            "structure planner to run. Kept for backward compat with "
-            "callers still on the legacy ``?restructure=true`` flag — "
-            "treated as ``mode=reorganize``."
+            "When true, bypass the build-input hash skip (wiki-redesign-gap-fill "
+            "task 3.6). Use this when a prompt edit landed but the corpus "
+            "is unchanged — without ``force=true`` the Builder would reuse "
+            "the prior cache."
         ),
     ),
     principal: Principal = Depends(require_user),
 ) -> dict:
     """Trigger async wiki generation for a channel.
 
-    ``mode`` is the new contract; ``restructure`` is kept as a legacy
-    alias for backward compat. When both are supplied, ``mode`` wins.
-    Unknown ``mode`` values fall back to ``update`` (defensive default
-    so a stale frontend never escalates a request unintentionally).
+    Unknown ``mode`` values fall back to ``update`` (defensive default so
+    a stale frontend never escalates a request unintentionally).
     """
     await assert_channel_access(principal, channel_id)
     from beever_atlas.wiki.builder import WikiBuilder
 
-    # Resolve effective mode. Legacy ``restructure=true`` → reorganize.
     valid_modes = {"update", "reorganize", "rebuild"}
     effective_mode = mode if mode in valid_modes else "update"
-    if effective_mode == "update" and restructure:
-        effective_mode = "reorganize"
 
     stores = get_stores()
     cache = _get_cache()
@@ -443,6 +546,11 @@ async def refresh_wiki(
         target_lang=lang,
     )
 
+    # Rebuild wipes the cache, so the build-input hash check finds nothing
+    # to compare against — force_recompile is implied. For update +
+    # reorganize, the operator must opt-in via ``force=true``.
+    force_recompile = force or (effective_mode == "rebuild")
+
     background_tasks.add_task(
         _run_generation,
         builder,
@@ -451,12 +559,13 @@ async def refresh_wiki(
         lang,
         force_restructure,
         wipe_before_run,
+        force_recompile,
     )
     return {
         "status": "started",
         "channel_id": channel_id,
         "mode": effective_mode,
-        "restructure": force_restructure,
+        "force_recompile": force_recompile,
     }
 
 
@@ -467,7 +576,10 @@ async def _run_generation(
     target_lang: str = "en",
     force_restructure: bool = False,
     wipe_before_run: bool = False,
+    force_recompile: bool = False,
 ) -> None:
+    from beever_atlas.capabilities.errors import WikiNotReadyError
+
     try:
         # Wipe is performed HERE (inside the background task) rather than
         # synchronously in the request handler. This eliminates the
@@ -496,6 +608,24 @@ async def _run_generation(
             channel_id,
             target_lang=target_lang,
             force_restructure=force_restructure,
+            force_recompile=force_recompile,
+        )
+    except WikiNotReadyError as exc:
+        # Consolidation was still in progress when the wiki refresh ran.
+        # Surface as a retriable "not ready" status so the frontend can
+        # show "Wiki generation still warming up — retry in a moment"
+        # rather than a generic failure banner.
+        logger.warning(
+            "Wiki generation not ready channel=%s: %s — consolidation still in progress",
+            channel_id,
+            exc,
+        )
+        await cache.set_generation_status(
+            channel_id,
+            status="not_ready",
+            stage="error",
+            error=str(exc),
+            target_lang=target_lang,
         )
     except Exception as exc:
         logger.error("Wiki generation failed channel=%s: %s", channel_id, exc, exc_info=True)
@@ -632,6 +762,17 @@ class _MergeBody(BaseModel):
     source_slug: str = Field(min_length=1, max_length=256)
 
 
+class _CurationBody(BaseModel):
+    """PATCH /pages/{slug}/curation body.
+
+    The ``Literal`` type makes Pydantic reject any other value with a 422
+    before the handler runs. The endpoint also re-checks at runtime as
+    defense-in-depth so the page-store layer never sees a bad value.
+    """
+
+    curation_mode: Literal["auto", "manual", "frozen"] = Field(default="auto")
+
+
 def _slugify_title(title: str) -> str:
     """Thin wrapper over the shared ``beever_atlas.wiki.slugify.slugify``.
 
@@ -724,6 +865,106 @@ async def hide_wiki_page(
     if updated is None:
         raise HTTPException(status_code=404, detail=f"No wiki page slug={slug!r}")
     return updated.model_dump(mode="json")
+
+
+@router.patch("/pages/{slug}/curation")
+async def update_curation_mode(
+    channel_id: str,
+    slug: str,
+    body: _CurationBody,
+    target_lang: str | None = Query(default=None),
+    principal: Principal = Depends(require_user),
+) -> dict:
+    """Set per-page curation mode to auto / manual / frozen.
+
+    Curation is metadata, not content — ``version`` is NOT bumped, only
+    ``updated_at``. The maintainer reads ``curation_mode`` on every
+    ``apply_update`` to decide whether to skip the LLM call (frozen),
+    mark dirty without rewriting (manual), or rewrite normally (auto).
+    """
+    if body.curation_mode not in {"auto", "manual", "frozen"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"curation_mode must be one of 'auto'|'manual'|'frozen', got {body.curation_mode!r}"
+            ),
+        )
+    await assert_channel_access(principal, channel_id)
+    lang = await _resolve_target_lang(channel_id, target_lang)
+    store = await _load_page_store()
+    updated = await store.update_curation_mode(
+        channel_id, slug, body.curation_mode, target_lang=lang
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"No wiki page slug={slug!r}")
+    return {
+        "slug": updated.slug,
+        "curation_mode": updated.curation_mode,
+        "updated_at": (updated.updated_at.isoformat() if updated.updated_at else None),
+    }
+
+
+@router.post("/apply-pending-updates")
+async def apply_pending_updates(
+    channel_id: str,
+    target_lang: str | None = Query(default=None),
+    principal: Principal = Depends(require_user),
+) -> dict:
+    """Flush manual-mode pages with pending dirty facts.
+
+    Walks every ``curation_mode="manual" AND is_dirty=true`` page in the
+    channel and triggers a maintainer rewrite. Pages flush one-at-a-time
+    via the existing maintainer pacing primitives — no rate-limit storm.
+    Auto-mode dirty pages are NOT flushed by this endpoint; they ride
+    the normal debounce path.
+
+    Mirrors :meth:`WikiMaintainer.maintain_now` but scoped to manual-mode
+    dirty pages only — the maintainer's per-page gate normally short-circuits
+    on ``curation_mode="manual"``, so the operator-triggered flush
+    temporarily bumps each page to ``auto`` for the duration of its rewrite
+    and restores ``manual`` afterwards via try/finally so failure mid-flight
+    cannot leave a page in auto state.
+    """
+    await assert_channel_access(principal, channel_id)
+    lang = await _resolve_target_lang(channel_id, target_lang)
+    store = await _load_page_store()
+    manual_dirty = await store.list_manual_dirty_pages(channel_id, target_lang=lang)
+    if not manual_dirty:
+        return {"flushed": 0, "pages": []}
+
+    from beever_atlas.services.wiki_maintainer import get_wiki_maintainer
+
+    maintainer = get_wiki_maintainer()
+    if maintainer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="WikiMaintainer is not initialised — restart the worker.",
+        )
+
+    # The maintainer doesn't track which facts triggered the dirty flag,
+    # so we compute new_fact_ids the same way ``maintain_now`` does:
+    # load every fact for the channel and diff against
+    # ``page.last_facts_seen``. This matches the well-tested production
+    # debounce path.
+    channel_facts = await maintainer._load_facts(channel_id, None)  # noqa: SLF001
+    all_fact_ids = {str(f.get("id") or "") for f in channel_facts}
+    flushed: list[str] = []
+    for page in manual_dirty:
+        already_seen = set(page.last_facts_seen)
+        new_fact_ids = sorted(fid for fid in all_fact_ids if fid and fid not in already_seen)
+        try:
+            await store.update_curation_mode(channel_id, page.slug, "auto", target_lang=lang)
+            applied = await maintainer.apply_update(
+                channel_id,
+                page.page_id,
+                new_fact_ids,
+                target_lang=lang,
+            )
+            if applied:
+                flushed.append(page.page_id)
+        finally:
+            await store.update_curation_mode(channel_id, page.slug, "manual", target_lang=lang)
+    return {"flushed": len(flushed), "pages": flushed}
 
 
 @router.post("/pages/{slug}/split", status_code=201)

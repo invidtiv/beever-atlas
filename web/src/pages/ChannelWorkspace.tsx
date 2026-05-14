@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useConnectionMap } from "@/hooks/useConnectionMap";
+import { useRecentChannels } from "@/hooks/useRecentChannels";
 import { ChannelBreadcrumb } from "@/components/channel/Breadcrumb";
 import { SyncButton } from "@/components/channel/SyncButton";
 import { SyncProgress } from "@/components/channel/SyncProgress";
@@ -120,9 +121,49 @@ export function ChannelWorkspace() {
   });
   const [refreshing, setRefreshing] = useState(false);
   const [loadingChannel, setLoadingChannel] = useState(!routeState?.channel_name);
+  // Monitor collapse state lives here so the workspace layout can react
+  // to it — when collapsed, the monitor renders as a compact strip
+  // and the wiki content below stays visible; when expanded on the
+  // wiki tab, the monitor fills the page fullscreen and the body is
+  // hidden. Hydrated from the same localStorage key SyncProgressV2
+  // wrote to in earlier uncontrolled mode.
+  const [monitorCollapsed, setMonitorCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      const raw = window.localStorage.getItem("beever.monitor.collapsed");
+      return raw === "true";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "beever.monitor.collapsed",
+        JSON.stringify(monitorCollapsed),
+      );
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [monitorCollapsed]);
   const { getWorkspaceName } = useConnectionMap();
+  const { trackVisit } = useRecentChannels();
 
   const activeTab = getCurrentTab(location.pathname);
+
+  // Track this channel as a recent visit so the dashboard's "Pick up
+  // where you left off" section surfaces it next time the user lands
+  // on /home. Single fire per channel resolution — trackVisit dedupes
+  // by channel_id internally, so a tab switch within the workspace
+  // doesn't bump the same entry repeatedly.
+  useEffect(() => {
+    if (!id || !channel?.name) return;
+    trackVisit({
+      channel_id: id,
+      name: channel.name,
+      platform: channel.platform || "unknown",
+    });
+  }, [id, channel?.name, channel?.platform, trackVisit]);
 
   useEffect(() => {
     if (!id) return;
@@ -254,6 +295,26 @@ export function ChannelWorkspace() {
 
   const instructions = platformInstructions[channel?.platform ?? "slack"] ?? platformInstructions.slack;
 
+  // A sync is considered active when state is syncing/error OR while
+  // the EXTRACTING phase is still pending/in_flight. Once extraction
+  // completes (extracting=done), the wiki is browsable in the
+  // background and the monitor auto-hides — the user no longer needs
+  // to see the progress bar even if wiki_maintenance/overview_wiki
+  // are still finalizing in the background. This drops the "monitor
+  // bar still here when wiki is generated" complaint from UI testing.
+  const _phaseByName = Object.fromEntries(
+    (syncState.phases ?? []).map((p) => [p.name, p]),
+  );
+  const _extracting = _phaseByName["extracting"]?.state;
+  const _fetched = _phaseByName["fetched"]?.state;
+  const pipelineActive =
+    syncState.state === "syncing" ||
+    syncState.state === "error" ||
+    _fetched === "in_flight" ||
+    _fetched === "pending" ||
+    _extracting === "in_flight" ||
+    _extracting === "pending";
+
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Compact channel bar: title + tabs in one layer */}
@@ -381,10 +442,52 @@ export function ChannelWorkspace() {
         </div>
       </div>
 
-      {/* Sync progress bar — always visible when syncing */}
-      <div className="shrink-0">{id && <SyncProgress syncState={syncState} isSyncing={isSyncing} channelId={id} />}</div>
+      {/* Sync progress monitor placement:
+       *  - Wiki tab + EXPANDED + active sync → fullscreen monitor;
+       *    body content hidden so the monitor fills the page.
+       *  - Wiki tab + COLLAPSED → compact strip; Outlet visible below.
+       *  - Non-wiki tabs → always compact; Outlet visible.
+       *  No active sync → no monitor; Outlet has full content area.
+       *
+       *  Note: ``pipelineActive`` also serves as a connectivity proof —
+       *  an in-flight sync implies the bot IS in the channel, so we
+       *  must NOT render "Channel Not Connected" while pipeline runs
+       *  even if ``isMember`` is still false (stale or unsynced). */}
+      {(() => {
+        if (!id || !pipelineActive) return null;
+        const fullscreen = activeTab === "wiki" && !monitorCollapsed;
+        if (fullscreen) {
+          return (
+            <div className="flex-1 min-h-0 flex flex-col px-4 sm:px-6 pt-3 pb-3">
+              <SyncProgress
+                syncState={syncState}
+                isSyncing={isSyncing}
+                channelId={id}
+                collapsed={monitorCollapsed}
+                onCollapsedChange={setMonitorCollapsed}
+              />
+            </div>
+          );
+        }
+        return (
+          <div className="shrink-0">
+            <SyncProgress
+              syncState={syncState}
+              isSyncing={isSyncing}
+              channelId={id}
+              collapsed={monitorCollapsed}
+              onCollapsedChange={setMonitorCollapsed}
+            />
+          </div>
+        );
+      })()}
 
-      {/* Content */}
+      {/* Content area decision tree:
+       *  1) Channel still loading → loading spinner
+       *  2) Fullscreen monitor active → render nothing (monitor fills)
+       *  3) Member OR pipeline active → Outlet (a running sync proves
+       *     the channel is connected, so don't show the empty state)
+       *  4) Otherwise → "Channel Not Connected" hero */}
       {loadingChannel ? (
         <div className="flex items-center justify-center flex-1 min-h-0 p-6">
           <div className="flex flex-col items-center gap-3 text-muted-foreground/50">
@@ -392,7 +495,7 @@ export function ChannelWorkspace() {
             <span className="text-sm">Loading channel...</span>
           </div>
         </div>
-      ) : isMember ? (
+      ) : (activeTab === "wiki" && !monitorCollapsed && pipelineActive) ? null : (isMember || pipelineActive) ? (
         <div className="flex-1 min-h-0 relative bg-muted/10 overflow-hidden" key={activeTab}>
           <Outlet
             context={{

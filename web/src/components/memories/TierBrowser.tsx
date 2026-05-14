@@ -8,6 +8,7 @@ import { useChannelMemoryCount } from "@/hooks/useChannelMemoryCount";
 import { api, ApiError } from "@/lib/api";
 import { MemoryFilters } from "./MemoryFilters";
 import { FactCard } from "./FactCard";
+import { Pagination } from "./Pagination";
 import { SummaryCard } from "./SummaryCard";
 import { ClusterCard } from "./ClusterCard";
 import { MemoryGraphView } from "./MemoryGraphView";
@@ -121,7 +122,18 @@ export function TierBrowser() {
     setSearchParams(updated, { replace: true });
   };
 
-  const { facts, filters, setFilters, isLoading, refetch: refetchFacts } = useMemories(channelId);
+  const {
+    facts,
+    total: factsTotal,
+    page: factsPage,
+    pages: factsPages,
+    pageSize: factsPageSize,
+    goToPage: goToFactsPage,
+    filters,
+    setFilters,
+    isLoading,
+    refetch: refetchFacts,
+  } = useMemories(channelId);
   const { clusters, isLoading: clustersLoading, error: clustersError, refetch: refetchTopics } = useTopics(channelId);
   const { summary, isLoading: summaryLoading, error: summaryError, refetch: refetchSummary } = useChannelSummary(channelId);
   const { hasMemories, isLoading: isMemoryCountLoading, refetch: refetchMemoryCount } = useChannelMemoryCount(channelId);
@@ -278,7 +290,7 @@ export function TierBrowser() {
             sections={[
               { id: "tier0-summary", label: "Channel", icon: Layers },
               { id: "tier1-topics", label: "Topics", icon: FileText, count: clusters.length },
-              { id: "tier2-facts", label: "Atomic facts", icon: Zap, count: facts.length },
+              { id: "tier2-facts", label: "Atomic facts", icon: Zap, count: factsTotal },
             ]}
           />
         </div>
@@ -393,28 +405,51 @@ export function TierBrowser() {
             </p>
           </div>
           <span className="text-sm text-muted-foreground">
-            {facts.length} matching facts
+            {factsTotal.toLocaleString()} matching facts
           </span>
         </div>
 
         <MemoryFilters filters={filters} setFilters={setFilters} />
 
-        {facts.length === 0 ? (
+        {factsTotal === 0 ? (
           <div className="rounded-xl border border-dashed border-border px-5 py-10 text-center text-sm text-muted-foreground">
             No memories yet. Sync this channel to start extracting knowledge.
           </div>
         ) : (
-          <div className="space-y-3">
-            {facts.map((fact, idx) => (
-              <div
-                key={fact.id}
-                className="motion-safe:animate-rise-in"
-                style={{ animationDelay: `${Math.min(idx, 10) * 35}ms` }}
-              >
-                <FactCard fact={fact} />
-              </div>
-            ))}
-          </div>
+          <>
+            <Pagination
+              page={factsPage}
+              pages={factsPages}
+              total={factsTotal}
+              pageSize={factsPageSize}
+              onPage={goToFactsPage}
+              disabled={isLoading}
+            />
+            <div className="space-y-3">
+              {facts.map((fact, idx) => (
+                <div
+                  key={fact.id}
+                  className="motion-safe:animate-rise-in"
+                  style={{ animationDelay: `${Math.min(idx, 10) * 35}ms` }}
+                >
+                  <FactCard fact={fact} />
+                </div>
+              ))}
+            </div>
+            <Pagination
+              page={factsPage}
+              pages={factsPages}
+              total={factsTotal}
+              pageSize={factsPageSize}
+              onPage={(p: number) => {
+                goToFactsPage(p);
+                document
+                  .getElementById("tier2-facts")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+              disabled={isLoading}
+            />
+          </>
         )}
       </div>
         </div>

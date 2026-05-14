@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from beever_atlas.adapters.base import NormalizedMessage
 from beever_atlas.services.batch_processor import BatchProcessor
+from beever_atlas.services.pipeline_events import get_pipeline_events
 
 if TYPE_CHECKING:
     from beever_atlas.services.circuit_breaker import CircuitBreaker
@@ -32,12 +33,29 @@ logger = logging.getLogger(__name__)
 
 
 ExtractionDoneCallback = Callable[[str, list[str]], Awaitable[None] | None]
-"""Signature for ``on_extraction_done`` subscribers (channel_id, fact_ids).
+"""DEPRECATED. Signature for ``on_extraction_done`` subscribers.
 
-:class:`WikiMaintainer` subscribes to this event to route freshly-extracted
-facts to affected wiki pages. The worker fans out via ``asyncio.gather`` and
-tolerates per-callback failures so one buggy subscriber cannot block
-extraction progress.
+Kept as a transitional alias during the ``memory-then-wiki-pipeline-realignment``
+deprecation window. New code should subscribe via
+:meth:`ExtractionWorker.subscribe_memory_changed` (accumulator) +
+:meth:`ExtractionWorker.subscribe_memory_settled` (terminal trigger).
+"""
+
+MemoryChangedCallback = Callable[[str, list[str]], Awaitable[None] | None]
+"""``memory_changed`` subscriber signature ``(channel_id, fact_ids)``.
+
+Accumulator-only — handlers route facts into durable per-page accumulators
+and do NOT take terminal actions (LLM rewrites, builder runs). Terminal
+actions wait for the corresponding :data:`MemorySettledCallback`.
+"""
+
+MemorySettledCallback = Callable[[str], Awaitable[None] | None]
+"""``memory_settled`` subscriber signature ``(channel_id,)``.
+
+Fired ONLY when the channel's extraction queue transitions to empty
+(``pending+extracting=0``). Idempotent — multiple emits for the same
+drained channel are safe. Subscribers take terminal action on this
+event (flush wiki dirty queue, run auto-overview, etc.).
 """
 
 
@@ -92,19 +110,24 @@ def _doc_to_normalized_message(doc: dict[str, Any]) -> NormalizedMessage | None:
         return None
 
 
-_RETRY_BACKOFF_SCHEDULE: list[int] = [30, 60, 120, 240, 480]
+_RETRY_BACKOFF_SCHEDULE: list[int] = [5, 30, 90, 180, 360]
 """Exponential backoff per attempt (seconds). Capped at the tail
-for attempts beyond the schedule. Combined with ``_MAX_RETRIES``,
-gives the system ~17 minutes of soft retries before a row stays
-``failed`` permanently."""
+for attempts beyond the schedule. First retry intentionally short (5s)
+for transient hiccups; later attempts climb sharply for real
+rate-limit windows. Mirrors ``batch_processor._LLM_RETRY_BACKOFF``
+(commit 84c4413) — the two schedules must move together; if one
+changes, change the other. (Architect-agent audit caught the drift
+between this file and batch_processor.py — both now aligned.)"""
 
 _MAX_RETRIES: int = len(_RETRY_BACKOFF_SCHEDULE)
 """Max retry attempts before a failed row stays failed permanently.
 Tied to the backoff schedule length so the two cannot drift."""
 
-_TICK_SECONDS: int = 30
-"""Default scheduler tick interval. Operators don't tune this — if
-30s is wrong for some deployment, change it here and redeploy."""
+_TICK_SECONDS: int = 10
+"""Default scheduler tick interval. Reduced from 30s to 10s in
+``memory-then-wiki-pipeline-realignment`` — combined with the
+``kick()`` event channel, the worker now responds to new pending
+rows within 1-2 seconds typically; the tick is the safety floor."""
 
 _STALE_SECONDS: int = 600
 """Stale-extracting recovery threshold. A row stuck in ``extracting``
@@ -143,7 +166,7 @@ class ExtractionWorker:
         self,
         batch_processor: BatchProcessor | None = None,
         semaphore_size: int | None = None,
-        settle_seconds: int = 5,
+        settle_seconds: int = 2,
         stale_seconds: int = 600,
         breaker: "CircuitBreaker | None" = None,
     ) -> None:
@@ -163,6 +186,27 @@ class ExtractionWorker:
         self._settle_seconds = settle_seconds
         self._stale_seconds = stale_seconds
         self._on_extraction_done: list[ExtractionDoneCallback] = []
+        # memory-then-wiki-pipeline-realignment — two-event contract.
+        # ``memory_changed`` is the accumulator (fires per batch);
+        # ``memory_settled`` is the terminal trigger (fires when the
+        # channel's queue drains). See design.md D1.
+        self._on_memory_changed: list[MemoryChangedCallback] = []
+        self._on_memory_settled: list[MemorySettledCallback] = []
+        # Channels whose queue was non-empty at the start of the
+        # current tick; used to detect the "transitioned to empty"
+        # edge and emit memory_settled exactly once per drain.
+        self._channels_with_pending_pre_tick: set[str] = set()
+        # memory-then-wiki-pipeline-realignment — kick channel.
+        # SyncRunner sets this event after a sync upserts new pending
+        # rows; the worker's run loop awaits it (with a tick-interval
+        # timeout) so the first claim fires immediately instead of
+        # waiting for the next 10s tick boundary. ``asyncio.Event`` is
+        # idempotent — back-to-back sets coalesce into one wakeup.
+        self._kick_event: asyncio.Event | None = None
+        # Total kicks received since process start — surfaced in
+        # ``metrics_snapshot`` so operators can verify SyncRunner is
+        # actually kicking after upserts.
+        self._kick_received_count: int = 0
         # Rolling-window metrics for the admin observability endpoint
         # (production-wiring §20). Each entry is a per-tick record:
         # ``(monotonic_ts, claimed, succeeded, failed)``. Trimmed to the
@@ -170,6 +214,12 @@ class ExtractionWorker:
         # window we summarise — a tick is at most every ``_TICK_SECONDS``,
         # so 10 min ≈ 20 entries).
         self._tick_records: list[tuple[float, int, int, int]] = []
+        # Phase 0 / Task 1.2 — separate, capped ring used by the smoothed
+        # ETA calculator (Phase 3). Holds ``(monotonic_ts, succeeded,
+        # failed)`` for the most recent 60 ticks. Distinct from
+        # ``_tick_records`` (which uses a 60-min wall-clock cutoff for
+        # claim-rate maths) so the ETA window can be tuned independently.
+        self._tick_samples: list[tuple[float, int, int]] = []
         # Most recent failed-row records (capped at 10) for the admin
         # endpoint's ``recent_failures`` field. Each entry is
         # ``{message_id, channel_id, error_class, ts}``.
@@ -180,28 +230,134 @@ class ExtractionWorker:
     # ------------------------------------------------------------------
 
     def subscribe_extraction_done(self, callback: ExtractionDoneCallback) -> None:
-        """Register a coroutine called after each successful batch.
+        """DEPRECATED. Register a callback under the legacy combined event.
 
-        Subscribers receive ``(channel_id, fact_ids)``. Synchronous
-        callbacks are tolerated. :class:`WikiMaintainer` uses this to fire
-        :meth:`WikiMaintainer.on_extraction_done` so wiki pages refresh
-        incrementally instead of waiting on full consolidation.
+        Kept as a transitional alias during the
+        ``memory-then-wiki-pipeline-realignment`` deprecation window. New
+        consumers should call :meth:`subscribe_memory_changed` and/or
+        :meth:`subscribe_memory_settled` directly.
+
+        Internally the legacy callbacks are invoked from
+        :meth:`_emit_extraction_done` which still fires per batch
+        (accumulator semantics — terminal callers receive both legacy
+        callback AND ``memory_settled`` events).
         """
         self._on_extraction_done.append(callback)
 
+    def subscribe_memory_changed(self, callback: MemoryChangedCallback) -> None:
+        """Register a callback fired AFTER every per-channel batch.
+
+        Accumulator-only. Subscribers MUST NOT take terminal action
+        (LLM calls, builder runs) on this event — route facts into
+        durable per-page accumulators (see ``wiki_dirty_queue``) and
+        wait for :meth:`subscribe_memory_settled`.
+        """
+        self._on_memory_changed.append(callback)
+
+    def kick(self) -> None:
+        """Wake the worker's run loop immediately.
+
+        Called by ``SyncRunner`` (or any upstream producer) after new
+        pending rows land in ``channel_messages``. Lazily initialises
+        the ``asyncio.Event`` on first call so the constructor stays
+        loop-free for non-async test fixtures. Multiple kicks coalesce
+        into one wakeup — the run loop processes them in a single tick.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — kicks from sync code (e.g., tests) are
+            # absorbed as a counter bump but won't wake an unstarted loop.
+            self._kick_received_count += 1
+            return
+        if self._kick_event is None:
+            self._kick_event = asyncio.Event()
+        self._kick_event.set()
+        self._kick_received_count += 1
+
+    async def wait_for_kick(self, timeout: float) -> bool:
+        """Await the next kick (or timeout). Returns True if kicked.
+
+        Run loops call this with ``timeout=_TICK_SECONDS`` so the worker
+        wakes on either the kick OR the tick floor. The event is
+        cleared after wait returns so the next call blocks again.
+        """
+        if self._kick_event is None:
+            self._kick_event = asyncio.Event()
+        try:
+            await asyncio.wait_for(self._kick_event.wait(), timeout=timeout)
+            kicked = True
+        except TimeoutError:
+            kicked = False
+        self._kick_event.clear()
+        return kicked
+
+    def subscribe_memory_settled(self, callback: MemorySettledCallback) -> None:
+        """Register a callback fired when the channel's queue drains.
+
+        Terminal trigger — subscribers take action (flush, build) on
+        this event. Idempotent: re-fires if the channel re-enters and
+        drains again.
+        """
+        self._on_memory_settled.append(callback)
+
+    async def _safe_invoke(
+        self,
+        cb: Callable[..., Awaitable[None] | None],
+        *args: Any,
+    ) -> None:
+        """Invoke ``cb`` swallowing exceptions so one bad subscriber
+        cannot crash siblings or block the worker tick.
+
+        Logs with structured context for observability.
+        """
+        try:
+            result = cb(*args)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 — one bad subscriber must not stall extraction
+            logger.exception(
+                "ExtractionWorker: subscriber raised cb=%s args_head=%s",
+                getattr(cb, "__name__", repr(cb)),
+                repr(args[:2]) if args else "()",
+            )
+
     async def _emit_extraction_done(self, channel_id: str, fact_ids: list[str]) -> None:
+        """DEPRECATED legacy emission.
+
+        Invokes the legacy ``on_extraction_done`` subscribers via
+        fire-and-forget tasks. ALSO fans out to ``memory_changed``
+        subscribers so the new accumulator path receives a parallel
+        notification during the deprecation window. ``memory_settled``
+        is NOT emitted here — it fires exactly once per drain in
+        :meth:`tick` so per-batch over-firing is impossible.
+        """
         for cb in self._on_extraction_done:
-            try:
-                result = cb(channel_id, fact_ids)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:  # noqa: BLE001 — one bad subscriber must not stall extraction
-                logger.exception(
-                    "ExtractionWorker: on_extraction_done subscriber raised "
-                    "for channel=%s fact_count=%d (continuing)",
-                    channel_id,
-                    len(fact_ids),
-                )
+            asyncio.create_task(self._safe_invoke(cb, channel_id, fact_ids))
+        # Dual-emit so subscribers that have already migrated to
+        # ``memory_changed`` get the new event AND legacy callers keep
+        # working unchanged. Removed after the deprecation window.
+        for cb in self._on_memory_changed:
+            asyncio.create_task(self._safe_invoke(cb, channel_id, fact_ids))
+
+    async def _emit_memory_changed(self, channel_id: str, fact_ids: list[str]) -> None:
+        """Fire ``memory_changed`` to all subscribers via create_task.
+
+        Each subscriber runs in its own task so the worker tick is
+        never blocked on subscriber I/O. Exceptions are swallowed and
+        logged per subscriber.
+        """
+        for cb in self._on_memory_changed:
+            asyncio.create_task(self._safe_invoke(cb, channel_id, fact_ids))
+
+    async def _emit_memory_settled(self, channel_id: str) -> None:
+        """Fire ``memory_settled`` to all subscribers via create_task.
+
+        Idempotent — terminal subscribers (maintainer flush, auto
+        overview) are themselves idempotent.
+        """
+        for cb in self._on_memory_settled:
+            asyncio.create_task(self._safe_invoke(cb, channel_id))
 
     # ------------------------------------------------------------------
     # Public lifecycle methods (called by SyncScheduler)
@@ -247,6 +403,17 @@ class ExtractionWorker:
         for doc in claimed:
             by_channel.setdefault(doc.get("channel_id", ""), []).append(doc)
         counters["channels"] = len(by_channel)
+
+        # Phase 0 / Task 1.3 — pipeline event: queue fetch for each channel.
+        try:
+            for ch_id, docs in by_channel.items():
+                get_pipeline_events().record(
+                    channel_id=ch_id,
+                    stage="fetch",
+                    label=f"Claimed {len(docs)} pending rows",
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
         async def _process_channel(ch_id: str, docs: list[dict[str, Any]]) -> tuple[int, int]:
             assert self._semaphore is not None
@@ -307,6 +474,25 @@ class ExtractionWorker:
             ok, fail = result
             counters["succeeded"] += ok
             counters["failed"] += fail
+
+        # Re-derive the user-facing sync_jobs row's progress from the
+        # extraction-status counts on channel_messages. The decoupled
+        # worker uses a synthetic sync_job_id so BatchProcessor's
+        # ``update_sync_progress`` calls land on a row that nobody
+        # reads — without this refresh, ``processed_messages`` stays
+        # at 0 and ``current_stage`` stays empty for the entire run.
+        # Done once per tick (not per batch) to bound mongo write load.
+        for ch_id in by_channel.keys():
+            try:
+                await stores_ref.mongodb.refresh_sync_progress_for_channel(ch_id)
+            except Exception:
+                # Progress refresh is best-effort observability — never
+                # let a transient mongo blip break the worker tick.
+                logger.exception(
+                    "ExtractionWorker: refresh_sync_progress_for_channel raised channel=%s",
+                    ch_id,
+                )
+
         logger.info(
             "ExtractionWorker: tick complete claimed=%d succeeded=%d failed=%d channels=%d",
             counters["claimed"],
@@ -314,6 +500,26 @@ class ExtractionWorker:
             counters["failed"],
             counters["channels"],
         )
+        # memory-then-wiki-pipeline-realignment — settlement detection.
+        # For each channel touched in this tick, check whether its queue
+        # has transitioned to empty. If so, emit ``memory_settled``.
+        # Idempotent — a channel that was empty before the tick gets no
+        # event; one that drains DURING the tick fires exactly once. A
+        # channel that re-enters pending mid-tick is correctly skipped
+        # (pending+extracting>0) and the next tick will detect when it
+        # actually drains.
+        for ch_id in list(by_channel.keys()):
+            try:
+                counts = await stores_ref.mongodb.count_channel_messages_by_status(ch_id)
+                pending = int(counts.get("pending", 0))
+                extracting = int(counts.get("extracting", 0))
+                if pending == 0 and extracting == 0:
+                    await self._emit_memory_settled(ch_id)
+            except Exception:  # noqa: BLE001 — settlement is best-effort observability
+                logger.exception(
+                    "ExtractionWorker: memory_settled detection failed channel=%s",
+                    ch_id,
+                )
         self._record_tick_metrics(counters)
         return counters
 
@@ -336,6 +542,37 @@ class ExtractionWorker:
         )
         cutoff = now - 60 * 60  # 60 minutes
         self._tick_records = [r for r in self._tick_records if r[0] >= cutoff]
+        # Phase 0 / Task 1.2 — separate, count-bounded ring for the
+        # smoothed-ETA calculator (Phase 3). 60 samples gives the EWMA
+        # enough history to absorb a single retry burst without thrashing.
+        self._tick_samples.append(
+            (
+                now,
+                counters.get("succeeded", 0),
+                counters.get("failed", 0),
+            )
+        )
+        if len(self._tick_samples) > 60:
+            self._tick_samples = self._tick_samples[-60:]
+
+    def tick_samples_snapshot(self) -> list[tuple[float, int, int]]:
+        """Return a copy of the recent tick samples for the ETA calculator.
+
+        Each entry is ``(monotonic_ts, succeeded, failed)``. Most-recent
+        last (append order). Returned as a fresh list so the caller can
+        safely iterate without holding any lock against the worker.
+        """
+        return list(self._tick_samples)
+
+    def tick_samples_for_eta(self) -> list[tuple[float, int]]:
+        """Return ``(monotonic_ts, succeeded)`` pairs for the ETA calculator.
+
+        Phase 3 / Task 4.1.2 — the smoothed ETA only counts successful
+        claims toward throughput; failed rows will be retried and don't
+        represent forward progress. The full triple lives behind
+        :meth:`tick_samples_snapshot` for any caller that needs both.
+        """
+        return [(ts, succ) for (ts, succ, _fail) in self._tick_samples]
 
     def _record_failure(self, *, message_id: str, channel_id: str, error_class: str) -> None:
         """Record a per-row failure for the admin endpoint's recent_failures.
@@ -396,6 +633,11 @@ class ExtractionWorker:
             "success_rate_5min": round(success_rate, 4),
             "breaker_state": breaker_state,
             "recent_failures": list(self._recent_failures),
+            # memory-then-wiki-pipeline-realignment — kick counter so
+            # operators can verify SyncRunner is calling ``kick()`` after
+            # each new upsert. A value that stays at 0 during active sync
+            # indicates a wiring regression.
+            "kick_received_count": self._kick_received_count,
         }
 
     async def sweep_stale(self) -> int:
@@ -447,6 +689,21 @@ class ExtractionWorker:
             return 0, 0
 
         sync_job_id = f"worker:{channel_id}:{int(time.time() * 1000)}"
+        # Read the user-facing sync_jobs row's ``batches_completed`` once
+        # per tick to use as the global ``batch_index_offset``. Without
+        # this, every worker tick restarts batch_idx at 1, so the UI's
+        # batch chips churn (Batch 1 in tick A is different messages than
+        # Batch 1 in tick B). The offset shifts this tick's internal
+        # batches to global positions ``offset+1..offset+K``.
+        try:
+            batch_index_offset = await stores.mongodb.get_user_facing_batches_completed(channel_id)
+        except Exception:
+            logger.exception(
+                "ExtractionWorker: failed to read batches_completed offset "
+                "channel=%s — defaulting to 0",
+                channel_id,
+            )
+            batch_index_offset = 0
         started = time.monotonic()
         try:
             result = await self._batch_processor.process_messages(
@@ -455,6 +712,7 @@ class ExtractionWorker:
                 channel_name=channel_name,
                 sync_job_id=sync_job_id,
                 ingestion_config=None,
+                batch_index_offset=batch_index_offset,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -467,27 +725,106 @@ class ExtractionWorker:
                 stores, keys_with_attempts, error=f"{type(exc).__name__}: {exc}"
             )
             return 0, len(valid_keys)
+        finally:
+            # Drain any sync_summary metric bucket that process_messages may
+            # have left behind on the exception path. Idempotent: returns
+            # {} when the success path already popped the bucket.
+            try:
+                from beever_atlas.services.batch_processor import _drain_sync_metrics
+
+                _drain_sync_metrics(channel_id, sync_job_id)
+            except Exception:  # noqa: BLE001
+                pass
 
         duration_ms = int((time.monotonic() - started) * 1000)
+        # NOTE: post-tick aggregation of batches_completed +
+        # batch_results was removed — BatchProcessor now writes per
+        # batch directly to the user-facing channel row (see
+        # ``batch_processor.py`` near ``increment_batches_completed``).
+        # This gives the UI live MetricsBar updates instead of waiting
+        # for the entire tick (10+ batches, 5-15 min) to finish.
         if result.errors:
-            err_summary = "; ".join(
-                str(e.get("error") or "unknown")[:100] for e in result.errors[:3]
-            )
-            await self._finalize_failed(
-                stores,
-                keys_with_attempts,
-                error=f"batch_errors={len(result.errors)}: {err_summary}",
-            )
-            failed_count = len(valid_keys)
+            # Phase 1.1 / Task 2.1.3 — per-sub-batch attribution (decision
+            # D1). Walk the BatchBreakdowns and partition ``valid_keys``
+            # into the rows that belong to a succeeding sub-batch versus
+            # those that belong to a failing sub-batch. Sub-batch
+            # granularity is the unit at which the LLM call succeeds or
+            # fails, so this is the finest split that doesn't require
+            # per-row provenance tracking inside BatchProcessor.
+            succeeded_keys: list[tuple[str, str, str]] = []
+            failed_keys: list[tuple[str, str, str]] = []
+            bd_errors: list[str] = []
+            breakdowns = list(getattr(result, "batch_breakdowns", None) or [])
+            for bd in breakdowns:
+                bd_keys = list(getattr(bd, "keys", None) or [])
+                if getattr(bd, "error", None) is None:
+                    succeeded_keys.extend(bd_keys)
+                else:
+                    failed_keys.extend(bd_keys)
+                    bd_errors.append(str(getattr(bd, "error", "unknown"))[:100])
+
+            # Edge case: no breakdown carried any keys (older format or a
+            # deep error path). Fall through to the legacy all-or-nothing
+            # behavior so we don't drop rows into limbo. The stale-recovery
+            # sweep is the safety net beyond that.
+            if not succeeded_keys and not failed_keys:
+                err_summary = "; ".join(
+                    str(e.get("error") or "unknown")[:100] for e in result.errors[:3]
+                )
+                await self._finalize_failed(
+                    stores,
+                    keys_with_attempts,
+                    error=f"batch_errors={len(result.errors)}: {err_summary}",
+                )
+                failed_count = len(valid_keys)
+                logger.warning(
+                    "ExtractionWorker: extraction_batch_complete "
+                    "channel=%s rows=%d duration_ms=%d status=failed errors=%d "
+                    "(legacy all-or-nothing path — breakdowns missing keys)",
+                    channel_id,
+                    failed_count,
+                    duration_ms,
+                    len(result.errors),
+                )
+                return 0, failed_count
+
+            if succeeded_keys:
+                await stores.mongodb.finalize_extraction_status_bulk(
+                    keys=succeeded_keys, new_status="done"
+                )
+            if failed_keys:
+                attempt_count_of = {k: a for k, a in keys_with_attempts}
+                fail_pairs = [(k, attempt_count_of.get(k, 0)) for k in failed_keys]
+                err_summary = "; ".join(bd_errors[:3]) if bd_errors else "unknown"
+                await self._finalize_failed(
+                    stores,
+                    fail_pairs,
+                    error=f"sub_batch_errors={len(failed_keys)}: {err_summary}",
+                )
+
+            # Notify subscribers with whatever fact_ids the succeeding
+            # sub-batches produced — partial success still has signal.
+            if succeeded_keys:
+                fact_ids: list[str] = list(getattr(result, "fact_ids", None) or [])
+                # memory-then-wiki-pipeline-realignment — accumulator path
+                # fires per batch. ``_emit_extraction_done`` ALSO fans out
+                # to memory_changed subscribers during the deprecation
+                # window; emitting both keeps legacy callers + new callers
+                # working without double-counting on memory_changed
+                # subscribers (they only fire once via _emit_extraction_done).
+                await self._emit_extraction_done(channel_id, fact_ids)
+
             logger.warning(
-                "ExtractionWorker: extraction_batch_complete "
-                "channel=%s rows=%d duration_ms=%d status=failed errors=%d",
+                "ExtractionWorker: extraction_batch_complete channel=%s rows=%d "
+                "succeeded=%d failed=%d duration_ms=%d sub_batch_errors=%d",
                 channel_id,
-                failed_count,
+                len(valid_keys),
+                len(succeeded_keys),
+                len(failed_keys),
                 duration_ms,
                 len(result.errors),
             )
-            return 0, failed_count
+            return len(succeeded_keys), len(failed_keys)
 
         # Success path: bulk-mark done, then notify subscribers.
         modified = await stores.mongodb.finalize_extraction_status_bulk(

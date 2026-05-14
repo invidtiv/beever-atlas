@@ -194,6 +194,23 @@ class WikiPageStore:
                 unique=True,
                 name="wiki_redirects_compound_unique",
             )
+        # ``unified-llm-wiki-graph-redesign`` indexes:
+        # ``parent_id`` for multi-level Topic hierarchy traversal — the
+        # WikiTab sidebar resolves children of a folder via this index.
+        # Sparse because root-level pages have parent_id=null.
+        await self._collection.create_index(
+            [("channel_id", 1), ("target_lang", 1), ("parent_id", 1)],
+            sparse=True,
+            name="wiki_pages_parent_id",
+        )
+        # ``archived`` for cleanup-phase queries. Sparse because almost
+        # every page has archived=false; only legacy entity-page rows
+        # set archived=true after the migration tags them.
+        await self._collection.create_index(
+            [("channel_id", 1), ("archived", 1)],
+            sparse=True,
+            name="wiki_pages_archived",
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -592,6 +609,7 @@ class WikiPageStore:
         kind: str | None = None,
         target_lang: str = "en",
         scope: str = "human",
+        include_archived: bool = False,
     ) -> list[WikiPage]:
         """List pages with optional ``kind`` filter and visibility ``scope``.
 
@@ -600,6 +618,10 @@ class WikiPageStore:
         not appear in human nav. ``scope="all"`` includes everything;
         callers MUST verify the caller has the appropriate permission
         before requesting it.
+
+        ``include_archived`` defaults to False so the wiki-redesign-gap-fill
+        archive script's ``archived=true`` rows are filtered out by default.
+        Pass ``True`` to inspect cleanup state from the debug surface.
         """
         if self._collection is None:
             return []
@@ -612,7 +634,73 @@ class WikiPageStore:
             # carries the canonical content).
             query["pin_state.hidden"] = {"$ne": True}
             query["merged_into"] = None
+        if not include_archived:
+            query["archived"] = {"$ne": True}
         cursor = self._collection.find(query).sort("updated_at", -1)
+        pages: list[WikiPage] = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            pages.append(WikiPage.model_validate(doc))
+        return pages
+
+    async def update_curation_mode(
+        self,
+        channel_id: str,
+        slug: str,
+        curation_mode: str,
+        target_lang: str = "en",
+    ) -> WikiPage | None:
+        """Set ``wiki_pages.curation_mode`` for one page by slug.
+
+        ``curation_mode`` is validated by the caller (``Literal["auto",
+        "manual", "frozen"]``). Curation is metadata, not content, so
+        ``version`` is NOT bumped; ``updated_at`` is touched so any
+        list-by-recency view reflects the operator action.
+        """
+        if self._collection is None:
+            return None
+        if curation_mode not in {"auto", "manual", "frozen"}:
+            return None
+        result = await self._collection.find_one_and_update(
+            {
+                "channel_id": channel_id,
+                "target_lang": target_lang,
+                "slug": slug,
+            },
+            {
+                "$set": {
+                    "curation_mode": curation_mode,
+                    "updated_at": datetime.now(tz=UTC).isoformat(),
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if result is None:
+            return None
+        result.pop("_id", None)
+        return WikiPage.model_validate(result)
+
+    async def list_manual_dirty_pages(
+        self,
+        channel_id: str,
+        target_lang: str = "en",
+    ) -> list[WikiPage]:
+        """Return every page where ``curation_mode="manual" AND is_dirty``.
+
+        Used by the WikiTab "Apply Pending Updates" button to count how
+        many pages have pending operator-approved rewrites and to drive
+        the manual-flush endpoint.
+        """
+        if self._collection is None:
+            return []
+        cursor = self._collection.find(
+            {
+                "channel_id": channel_id,
+                "target_lang": target_lang,
+                "curation_mode": "manual",
+                "is_dirty": True,
+            }
+        )
         pages: list[WikiPage] = []
         async for doc in cursor:
             doc.pop("_id", None)

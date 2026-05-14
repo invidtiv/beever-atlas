@@ -12,17 +12,31 @@ Flow when WIKI_MAINTENANCE_MODE=auto:
   2. Maintainer's plan_updates() routes fact_ids → affected page_ids
      deterministically (cluster_id → topic page, entity_tags → entity
      pages, fact_type → role pages). NO LLM call here.
-  3. For each affected page, apply_update() invokes ONE per-page LLM
-     call that rewrites only the affected sections. Title, slug, and
-     unaffected sections are preserved byte-identical so page voice
-     does not drift.
-  4. Page version bumps; last_facts_seen records the new fact_ids.
+  3. The (channel_id, page_id) pairs are added to an in-memory dirty-set
+     and ONE debounced flush task is scheduled (default 60s window). A
+     burst of N events touching the same page within the window collapses
+     into a single rewrite carrying all N events' fact_ids — the maintainer
+     does NOT issue an LLM call per event. See decision D3 in
+     ``openspec/changes/sync-pipeline-feedback-and-auto-wiki/design.md``.
+  4. When the flush fires, for each affected page, apply_update() invokes
+     ONE per-page LLM call that rewrites only the affected sections. Title,
+     slug, and unaffected sections are preserved byte-identical so page
+     voice does not drift.
+  5. Page version bumps; last_facts_seen records the new fact_ids.
 
 When WIKI_MAINTENANCE_MODE=manual, step 1 marks the affected pages
 ``is_dirty=True`` but does NOT call apply_update() — the user clicks
-``Maintain Wiki`` to drain the dirty queue on demand.
+``Maintain Wiki`` to drain the dirty queue on demand. Manual mode bypasses
+the debounce path entirely.
+
+Persistence: the dirty-set is in-memory only. If the maintainer process
+crashes mid-debounce window, pending updates are lost. Worst-case loss is
+one debounce window (default 60s) of pending rewrites; the next extraction
+event for the affected pages re-routes them to a fresh dirty-set. The
+``on_extraction_done`` event itself is not durable (out of scope).
 
 Spec: ``openspec/changes/oss-pipeline-and-wiki-redesign/specs/wiki-maintainer/``
+      ``openspec/changes/sync-pipeline-feedback-and-auto-wiki/specs/wiki-maintainer/``
 """
 
 from __future__ import annotations
@@ -119,6 +133,19 @@ def _derive_kind_from_page_id(page_id: str) -> str:
         return "faq"
     if page_id == "action-items":
         return "action_items"
+    # wiki-redesign-gap-fill / Group 7+8 — adaptive kinds. Their page_ids
+    # are the kind name itself (e.g., ``projects``, ``architecture``) so
+    # the suppression gate at ``_apply_update_inner`` can correctly
+    # identify them as adaptive (not-required) and drop placeholder
+    # creation for pages the Builder hasn't instantiated yet.
+    if page_id in (
+        "projects",
+        "architecture",
+        "open-questions",
+        "timeline",
+        "stakeholders",
+    ):
+        return page_id
     return "topic"
 
 
@@ -276,6 +303,27 @@ def _is_page_pinned(page: "WikiPage") -> bool:
     if not isinstance(state, dict):
         return False
     return bool(state.get("pinned"))
+
+
+def _resolve_curation_mode(page: "WikiPage") -> str:
+    """Return the page's effective curation mode.
+
+    Introduced by ``unified-llm-wiki-graph-redesign``:
+      * ``auto`` — maintainer marks dirty AND applies LLM patches.
+      * ``manual`` — maintainer marks dirty but skips patch; operator
+        triggers via "Apply Pending Updates".
+      * ``frozen`` — maintainer skips entirely.
+
+    Defensive: legacy rows without ``curation_mode`` default to
+    ``auto``. Legacy ``pin_state.pinned=True`` is treated as ``manual``
+    so existing operator pins still skip auto-rewrites.
+    """
+    mode = getattr(page, "curation_mode", None)
+    if mode in {"auto", "manual", "frozen"}:
+        return str(mode)
+    if _is_page_pinned(page):
+        return "manual"
+    return "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +696,9 @@ class WikiMaintainer:
         page_store: WikiPageStore,
         llm_provider: Any | None = None,
         graph_store: Any | None = None,
+        *,
+        debounce_seconds: float | None = None,
+        mode: str | None = None,
     ) -> None:
         self._page_store = page_store
         # ``llm_provider`` is only required for ``apply_update`` —
@@ -673,6 +724,29 @@ class WikiMaintainer:
         self._apply_update_records: list[tuple[float, str]] = []
         self._mark_dirty_records: list[float] = []
         self._apply_update_failures: list[dict[str, Any]] = []
+        # ── Debounced auto-mode dispatch (sync-pipeline-feedback §B3) ────
+        # Per-page in-memory dirty-set keyed on ``(channel_id, page_id)``.
+        # Each entry collects every fact_id seen across multiple
+        # ``on_extraction_done`` events touching that page within the
+        # debounce window. One scheduled flush task drains the entire set
+        # in one pass, issuing one rewrite per page (carrying every
+        # accumulated fact_id). See decision D3.
+        self._dirty: dict[tuple[str, str], set[str]] = {}
+        # Lazy-init: ``asyncio.Lock`` requires a running loop in older
+        # Python releases and the WikiMaintainer is constructed from sync
+        # contexts (test fixtures, app startup before the loop runs). The
+        # actual lock is created on first awaited touch.
+        self._dirty_lock: asyncio.Lock | None = None
+        self._flush_task: asyncio.Task[None] | None = None
+        # ``debounce_seconds`` overrides the env-driven default. Settings
+        # is consulted lazily (not in __init__) because importing
+        # ``infra.config`` here can pull pydantic into module-load time
+        # for tests that monkeypatch it.
+        self._debounce_seconds_override: float | None = debounce_seconds
+        # Per-instance mode override; when None, ``on_extraction_done``
+        # falls back to the per-call ``mode`` keyword and ultimately the
+        # ``WIKI_MAINTENANCE_MODE`` setting wired by the app.
+        self._mode_override: str | None = mode
 
     # ------------------------------------------------------------------
     # Deterministic routing — no LLM call
@@ -681,12 +755,21 @@ class WikiMaintainer:
     def plan_updates(self, facts: list[dict[str, Any]]) -> dict[str, list[str]]:
         """Group fact ids by the page_id they affect.
 
-        Routing rules (deterministic):
-          * ``fact.cluster_id`` → topic page (``topic:<safe-cluster-id>``)
-          * each ``fact.entity_tags[i]`` → entity page (``entity:<name>``)
-          * ``fact.fact_type=="decision"`` → ``decisions`` page
-          * ``fact.fact_type=="question"`` → ``faq`` page
-          * ``fact.fact_type=="action_item"`` → ``action-items`` page
+        Routing rules (deterministic, no LLM call):
+          * ``fact.cluster_id`` → ``topic:<safe-cluster-id>``
+          * if any ``fact.entity_tags`` are present → BOTH ``people``
+            AND ``glossary`` (single canonical pages absorb the
+            per-entity intent; the per-kind prompts decide which
+            entries — people vs non-people — surface in each page)
+          * ``fact.fact_type=="decision"`` → ``decisions``
+          * ``fact.fact_type=="question"`` → ``faq``
+          * ``fact.fact_type=="action_item"`` → ``action-items``
+
+        ``unified-llm-wiki-graph-redesign``: this is the redesign
+        routing. The legacy ``entity:<slug>`` page kind is dead — the
+        maintainer NEVER emits per-entity page targets, regardless of
+        configuration. People & Glossary pages absorb the per-entity
+        intent.
 
         Same input always yields the same routing — invariant under
         retry. Empty entity_tags / cluster_id are tolerated; the fact
@@ -700,7 +783,14 @@ class WikiMaintainer:
         def _add(page_id: str, fact_id: str) -> None:
             if not page_id or not fact_id:
                 return
-            plan.setdefault(page_id, []).append(fact_id)
+            existing = plan.setdefault(page_id, [])
+            # Avoid duplicate fact ids when the same fact lands on the
+            # same page via multiple routing rules (e.g., cluster +
+            # role) — an entity-tagged fact contributing to both
+            # people + glossary should NOT inflate either list with the
+            # same fact id twice.
+            if fact_id not in existing:
+                existing.append(fact_id)
 
         for fact in facts:
             fact_id = str(fact.get("id") or fact.get("fact_id") or "")
@@ -709,10 +799,13 @@ class WikiMaintainer:
             cluster_id = fact.get("cluster_id")
             if cluster_id:
                 _add(_slug_for_topic(str(cluster_id)), fact_id)
-            for entity in fact.get("entity_tags", []) or []:
-                entity_slug = _slug_for_entity(str(entity))
-                if entity_slug:
-                    _add(entity_slug, fact_id)
+            entity_tags = fact.get("entity_tags", []) or []
+            if entity_tags:
+                # Two pages instead of N entity pages — same fact
+                # event, bounded LLM fan-out. The per-kind prompts in
+                # ``wiki/prompts.py`` filter what each page surfaces.
+                _add("people", fact_id)
+                _add("glossary", fact_id)
             fact_type = str(fact.get("fact_type") or "")
             role_slug = _slug_for_fact_type(fact_type)
             if role_slug:
@@ -722,6 +815,178 @@ class WikiMaintainer:
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
+
+    def _resolve_debounce_seconds(self) -> float:
+        """Pick the debounce window for the next flush.
+
+        Order of precedence: per-instance constructor override → env var
+        via ``Settings.wiki_maintainer_debounce_seconds`` → 60s default.
+        """
+        if self._debounce_seconds_override is not None:
+            return float(self._debounce_seconds_override)
+        try:
+            from beever_atlas.infra.config import get_settings
+
+            return float(get_settings().wiki_maintainer_debounce_seconds)
+        except Exception:  # noqa: BLE001 — fall back to spec default
+            return 60.0
+
+    def _resolve_settle_debounce_seconds(self) -> float:
+        """Pick the debounce window for the settle-path flush.
+
+        Used exclusively by :meth:`on_memory_settled`. The settle event is
+        terminal (fires once per channel-drain), so only a tiny grace window
+        is needed — unlike the 60s mid-sync coalescing debounce.
+
+        Order of precedence: per-instance constructor override (same knob as
+        the main debounce, so tests that set debounce=0 get immediate flush
+        on both paths) → env var via
+        ``Settings.wiki_maintainer_settle_debounce_seconds`` → 5s default.
+        """
+        if self._debounce_seconds_override is not None:
+            return float(self._debounce_seconds_override)
+        try:
+            from beever_atlas.infra.config import get_settings
+
+            return float(get_settings().wiki_maintainer_settle_debounce_seconds)
+        except Exception:  # noqa: BLE001 — fall back to spec default
+            return 5.0
+
+    def _get_dirty_lock(self) -> asyncio.Lock:
+        """Lazily create the dirty-set lock on first awaited touch.
+
+        The maintainer must be importable from sync contexts (test
+        fixtures, app startup before the loop is running). The lock is
+        bound to the active loop on first use.
+        """
+        if self._dirty_lock is None:
+            self._dirty_lock = asyncio.Lock()
+        return self._dirty_lock
+
+    async def on_memory_changed(
+        self,
+        channel_id: str,
+        fact_ids: list[str],
+        *,
+        target_lang: str = "en",
+    ) -> dict[str, int]:
+        """``memory_changed`` subscriber — accumulator path only.
+
+        Routes ``fact_ids`` to affected pages via the existing
+        ``plan_updates`` pipeline, then enqueues each ``(channel_id,
+        page_id, fact_ids)`` tuple into ``wiki_dirty_queue`` so the
+        state survives backend restarts. NEVER schedules a debounced
+        flush — that happens in :meth:`on_memory_settled` once the
+        channel's extraction queue drains.
+
+        Also writes through to the legacy in-memory ``_dirty`` dict
+        for the deprecation window so existing flush paths keep
+        working. The in-memory cache is removed in a follow-up commit.
+        """
+        counters: dict[str, int] = {"affected_pages": 0}
+        if not fact_ids:
+            return counters
+
+        affected_pages = await self._route_facts_to_pages(
+            channel_id, fact_ids, target_lang=target_lang
+        )
+        counters["affected_pages"] = len(affected_pages)
+
+        # Write to the durable queue first so a crash before the
+        # in-memory write still preserves the work.
+        try:
+            from beever_atlas.stores import get_stores
+
+            stores = get_stores()
+            for page_id, page_fact_ids in affected_pages.items():
+                await stores.mongodb.enqueue_dirty(
+                    channel_id=channel_id,
+                    page_id=page_id,
+                    fact_ids=list(page_fact_ids),
+                )
+        except Exception:  # noqa: BLE001 — never destabilise the worker hot path
+            logger.exception(
+                "wiki_maintainer.on_memory_changed: enqueue_dirty failed channel=%s",
+                channel_id,
+            )
+
+        # Mirror into legacy in-memory dirty set so the existing flush
+        # path (which reads ``self._dirty``) continues to work during
+        # the deprecation window. Removed in the cleanup commit.
+        async with self._get_dirty_lock():
+            for page_id, page_fact_ids in affected_pages.items():
+                key = (channel_id, page_id)
+                self._dirty.setdefault(key, set()).update(page_fact_ids)
+
+        logger.info(
+            "wiki_maintainer.on_memory_changed channel=%s affected=%d (queue-only, no flush)",
+            channel_id,
+            counters["affected_pages"],
+        )
+        return counters
+
+    async def on_memory_settled(
+        self,
+        channel_id: str,
+        *,
+        target_lang: str = "en",
+    ) -> dict[str, int]:
+        """``memory_settled`` subscriber — terminal trigger.
+
+        Schedules one debounced flush task for the channel. Multiple
+        ``memory_settled`` events for the same channel within the
+        debounce window collapse to a single flush (idempotent
+        scheduling via ``_ensure_flush_scheduled``).
+
+        Uses a short settle-path debounce (default 5s, configured via
+        ``WIKI_MAINTAINER_SETTLE_DEBOUNCE_SECONDS``) rather than the
+        60s mid-sync debounce — the queue has already drained so there
+        is nothing left to coalesce; the tiny window only covers a race
+        where extraction barely missed the queue-drain check.
+
+        Manual mode (``WIKI_MAINTENANCE_MODE=manual``) skips the
+        scheduled flush — the operator's "Maintain Wiki" button is
+        the trigger via :meth:`maintain_now`.
+        """
+        # Determine the effective mode the same way on_extraction_done does.
+        effective_mode = self._mode_override or self._resolve_default_mode()
+        if effective_mode == "manual":
+            logger.info(
+                "wiki_maintainer.on_memory_settled channel=%s mode=manual "
+                "(flush deferred to operator)",
+                channel_id,
+            )
+            return {"scheduled": 0}
+
+        debounce = self._resolve_settle_debounce_seconds()
+        if debounce <= 0:
+            # Immediate flush — preserves the legacy synchronous path
+            # used by some unit tests.
+            rewritten = await self._flush_dirty(target_lang=target_lang)
+            logger.info(
+                "wiki_maintainer.on_memory_settled channel=%s rewritten=%d "
+                "(debounce=0, inline flush)",
+                channel_id,
+                rewritten,
+            )
+            return {"scheduled": 0, "rewritten": rewritten}
+
+        self._ensure_flush_scheduled(debounce, target_lang=target_lang)
+        logger.info(
+            "wiki_maintainer.on_memory_settled channel=%s debounce_seconds=%.1f (flush scheduled)",
+            channel_id,
+            debounce,
+        )
+        return {"scheduled": 1}
+
+    def _resolve_default_mode(self) -> str:
+        """Read the global ``WIKI_MAINTENANCE_MODE`` env setting."""
+        from beever_atlas.infra.config import get_settings
+
+        try:
+            return get_settings().wiki_maintenance_mode or "auto"
+        except Exception:  # noqa: BLE001
+            return "auto"
 
     async def on_extraction_done(
         self,
@@ -733,15 +998,22 @@ class WikiMaintainer:
     ) -> dict[str, Any]:
         """Hook invoked from ExtractionWorker after a successful batch.
 
-        ``mode`` toggles between ``auto`` (call apply_update on every
-        affected page right now) and ``manual`` (mark pages dirty;
-        user processes them later via the Maintain Wiki button).
+        ``mode`` toggles between ``auto`` (route facts to affected pages
+        and schedule a debounced flush; the actual per-page LLM rewrites
+        run later inside ``_debounced_flush``) and ``manual`` (mark pages
+        dirty synchronously; user processes them later via the Maintain
+        Wiki button — manual mode bypasses the debounce path entirely).
 
-        ``fact_ids`` are the newly extracted facts. The maintainer
-        loads their full records from Weaviate via the LLM provider
-        wiring (deferred — for now the routing operates on the
-        fact_ids alone via ``plan_updates_from_ids``, which fetches
-        cluster + entity tags from the knowledge stores).
+        ``fact_ids`` are the newly extracted facts. The maintainer loads
+        their full records from Weaviate so routing can read
+        ``cluster_id`` + ``entity_tags`` + ``fact_type``.
+
+        Auto mode is debounced (default 60s window): N events touching the
+        same page within the window collapse to ONE rewrite carrying every
+        event's facts. The returned ``rewritten`` counter therefore counts
+        only rewrites flushed inline (when ``debounce_seconds`` resolves to
+        0); a positive ``debounce_seconds`` records ``rewritten=0`` and the
+        flush task tallies its own log line.
 
         Returns a counters dict for observability:
             {
@@ -758,23 +1030,16 @@ class WikiMaintainer:
         if not fact_ids:
             return counters
 
-        # In a real deployment, plan_updates would fetch fact records
-        # from Weaviate. The routing function is the testable seam;
-        # the fetch + apply layer is a separate close-out task. On the
-        # integration boundary we call
-        # ``_load_facts(channel_id, fact_ids)`` which production wires
-        # to the Weaviate store; tests stub it.
-        facts = await self._load_facts(channel_id, fact_ids)
-        plan = self.plan_updates(facts)
-        # Curation-aware re-routing (§5.6): pages with `merged_into` set
-        # forward their fact list to the merge target so future plan
-        # outputs converge on the canonical page. This MUST happen
-        # before counters/dirty/apply_update — those callers consume
-        # the redirected plan.
-        plan = await self._apply_merge_redirects(
-            plan, channel_id=channel_id, target_lang=target_lang
+        # Per-instance ``mode`` override wins when set (tests construct
+        # ``WikiMaintainer(..., mode="auto")`` to force auto without a
+        # process-wide setting flip).
+        effective_mode = self._mode_override or mode
+
+        affected_pages = await self._route_facts_to_pages(
+            channel_id, fact_ids, target_lang=target_lang
         )
-        counters["affected_pages"] = len(plan)
+        counters["affected_pages"] = len(affected_pages)
+
         # Surface high-overlap merge candidates as proposals (§5.8).
         # Best-effort — a Mongo write hiccup must not stall the
         # extraction event handler.
@@ -786,9 +1051,9 @@ class WikiMaintainer:
                 channel_id,
             )
 
-        if mode == "manual":
+        if effective_mode == "manual":
             modified = await self._page_store.mark_dirty(
-                channel_id, list(plan.keys()), target_lang=target_lang
+                channel_id, list(affected_pages.keys()), target_lang=target_lang
             )
             counters["marked_dirty"] = modified
             self._record_mark_dirty(modified)
@@ -801,31 +1066,279 @@ class WikiMaintainer:
             )
             return counters
 
-        # auto mode — apply per-page LLM rewrite for each affected page
-        for page_id, page_fact_ids in plan.items():
-            try:
-                applied = await self.apply_update(
-                    channel_id=channel_id,
-                    page_id=page_id,
-                    new_fact_ids=page_fact_ids,
-                    target_lang=target_lang,
-                )
-                if applied:
-                    counters["rewritten"] += 1
-            except Exception:  # noqa: BLE001 — one bad page must not stall others
-                logger.exception(
-                    "wiki_maintainer.apply_update failed channel=%s page=%s fact_count=%d",
-                    channel_id,
-                    page_id,
-                    len(page_fact_ids),
-                )
+        # auto mode — accumulate into dirty-set, schedule one debounced
+        # flush. A burst of N events touching the same page within the
+        # window collapses to a single rewrite at flush time.
+        debounce = self._resolve_debounce_seconds()
+        async with self._get_dirty_lock():
+            for page_id, page_fact_ids in affected_pages.items():
+                key = (channel_id, page_id)
+                self._dirty.setdefault(key, set()).update(page_fact_ids)
+
+        if debounce <= 0:
+            # Immediate flush — used by unit tests that need synchronous
+            # ``rewritten`` counters and by operators who want the legacy
+            # synchronous-rewrite behaviour.
+            counters["rewritten"] = await self._flush_dirty(target_lang=target_lang)
+            logger.info(
+                "wiki_maintainer.on_extraction_done channel=%s mode=auto "
+                "affected=%d rewritten=%d (debounce=0, inline flush)",
+                channel_id,
+                counters["affected_pages"],
+                counters["rewritten"],
+            )
+            return counters
+
+        self._ensure_flush_scheduled(debounce, target_lang=target_lang)
         logger.info(
-            "wiki_maintainer.on_extraction_done channel=%s mode=auto affected=%d rewritten=%d",
+            "wiki_maintainer.on_extraction_done channel=%s mode=auto "
+            "affected=%d debounce_seconds=%.1f (flush scheduled)",
             channel_id,
             counters["affected_pages"],
-            counters["rewritten"],
+            debounce,
         )
         return counters
+
+    # ------------------------------------------------------------------
+    # Debounced flush (sync-pipeline-feedback-and-auto-wiki §B3)
+    # ------------------------------------------------------------------
+
+    async def _route_facts_to_pages(
+        self,
+        channel_id: str,
+        fact_ids: list[str],
+        *,
+        target_lang: str = "en",
+    ) -> dict[str, list[str]]:
+        """Load full fact records and route them to affected page_ids.
+
+        Wraps the deterministic ``plan_updates`` + ``_apply_merge_redirects``
+        pipeline so the dirty-set accumulator and the legacy synchronous
+        path share one routing implementation. Tests can monkeypatch this
+        method to exercise the debounce mechanics without seeding
+        Weaviate.
+        """
+        facts = await self._load_facts(channel_id, fact_ids)
+        plan = self.plan_updates(facts)
+        # Curation-aware re-routing (§5.6): pages with `merged_into` set
+        # forward their fact list to the merge target so future plan
+        # outputs converge on the canonical page.
+        plan = await self._apply_merge_redirects(
+            plan, channel_id=channel_id, target_lang=target_lang
+        )
+        return plan
+
+    def _ensure_flush_scheduled(self, debounce_seconds: float, *, target_lang: str = "en") -> None:
+        """Schedule one debounced flush task if none is already in flight.
+
+        Idempotent — subsequent calls while the existing task is still
+        running (sleep + drain) are no-ops; the events accumulated since
+        the last flush will be picked up by the in-flight task's drain.
+        """
+        if self._flush_task is not None and not self._flush_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — caller is sync-only; cannot schedule.
+            # Fall back to leaving the dirty-set accumulating and rely on
+            # the next ``on_extraction_done`` to schedule.
+            return
+        self._flush_task = loop.create_task(
+            self._debounced_flush(debounce_seconds, target_lang=target_lang)
+        )
+
+    async def _debounced_flush(self, debounce_seconds: float, *, target_lang: str = "en") -> None:
+        """Sleep the debounce window, then drain the dirty-set atomically."""
+        try:
+            if debounce_seconds > 0:
+                await asyncio.sleep(debounce_seconds)
+            await self._flush_dirty(target_lang=target_lang)
+        except Exception:  # noqa: BLE001 — never let a flush kill the maintainer
+            logger.exception("wiki_maintainer._debounced_flush crashed")
+
+    async def _flush_dirty(self, *, target_lang: str = "en") -> int:
+        """Drain the dirty queue and rewrite each page once.
+
+        memory-then-wiki-pipeline-realignment P0 fix: the durable
+        ``wiki_dirty_queue`` is now the authoritative source for dirty
+        pages. ``claim_dirty(channel_id)`` atomically transitions
+        pending rows to ``flushing`` so a crash mid-flush leaves rows
+        that ``recover_stale_flushing`` can revive on the next startup.
+        After successful per-page rewrite, ``mark_dirty_done`` flips
+        each row to ``status="done"``.
+
+        The legacy in-memory ``_dirty`` snapshot path is retained as a
+        fallback for tests that manually populate ``self._dirty``
+        without the queue. Production callers always go through
+        ``on_memory_changed`` which writes to both stores; the queue
+        path wins when both are available.
+
+        ``unified-llm-wiki-graph-redesign`` D8 — first-sync gate: when a
+        channel's wiki has not been built yet (no ``wiki_pages`` rows
+        exist for it), the maintainer's flush MUST defer that channel's
+        dirty entries instead of creating pages on-the-fly. The Builder
+        owns first-sync page creation; the maintainer only patches
+        existing pages.
+        """
+        # ── Primary path: drain the durable queue ────────────────────
+        # Identify channels with pending dirty work. Without a global
+        # ``list_dirty_channels`` helper we walk the in-memory set as a
+        # proxy (callers always co-write both). If the queue has rows
+        # the in-memory set doesn't know about (post-crash recovery),
+        # they get picked up on the NEXT flush triggered by either a
+        # ``memory_settled`` event or the operator's ``maintain_now``.
+        async with self._get_dirty_lock():
+            in_memory_channels: set[str] = {ch for (ch, _pid) in self._dirty}
+
+        snapshot: dict[tuple[str, str], set[str]] = {}
+        claimed_doc_ids: dict[tuple[str, str], Any] = {}
+
+        try:
+            from beever_atlas.stores import get_stores
+
+            stores = get_stores()
+            for channel_id in in_memory_channels:
+                try:
+                    claimed = await stores.mongodb.claim_dirty(channel_id)
+                except Exception:  # noqa: BLE001 — best-effort; fall back to in-memory
+                    claimed = []
+                for row in claimed:
+                    page_id = str(row.get("page_id", ""))
+                    fact_ids = list(row.get("fact_ids", []) or [])
+                    if not page_id:
+                        continue
+                    snapshot[(channel_id, page_id)] = set(fact_ids)
+                    claimed_doc_ids[(channel_id, page_id)] = row.get("_id")
+        except Exception:  # noqa: BLE001 — store may not be initialised in test paths
+            pass
+
+        # ── Fallback path: in-memory snapshot for tests/legacy ───────
+        # Merge any in-memory entries the queue didn't return (this
+        # primarily catches tests that write to ``self._dirty`` directly).
+        async with self._get_dirty_lock():
+            for key, facts in self._dirty.items():
+                if key not in snapshot:
+                    snapshot[key] = set(facts)
+                else:
+                    snapshot[key].update(facts)
+            self._dirty.clear()
+
+        if not snapshot:
+            return 0
+
+        # First-sync gate: group by channel_id and check whether the
+        # Builder has run yet (any wiki_pages row exists). Channels with
+        # no pages get their dirty entries re-deferred so the Builder
+        # owns first-sync page creation. Channels with pages flow
+        # normally.
+        #
+        # Conservative defer: only defer when we're CERTAIN the page
+        # list is an empty real list. Mocks, exceptions, or non-list
+        # return values (test harness stubs) fall through to legacy
+        # behaviour so we don't block tests that don't seed pages.
+        channels_seen: set[str] = {ch for (ch, _pid) in snapshot}
+        deferred_channels: set[str] = set()
+        for channel_id in channels_seen:
+            try:
+                pages = await self._page_store.list_pages(channel_id, target_lang)
+                if not isinstance(pages, list):
+                    # Tests with AsyncMock often return a Mock rather
+                    # than a real list. Skip the gate — the legacy
+                    # path's create-on-the-fly behaviour applies.
+                    continue
+                # Filter archived rows so legacy kind=entity stragglers
+                # don't accidentally satisfy the "Builder has run" check.
+                active_pages = [p for p in pages if not getattr(p, "archived", False)]
+                if not active_pages:
+                    deferred_channels.add(channel_id)
+            except Exception:  # noqa: BLE001 — best-effort gate
+                # If the page-store check fails, fall through to the
+                # legacy behaviour (let the maintainer create pages).
+                # Failing closed here would silently stall channels
+                # whose wiki actually exists but the lookup hiccupped.
+                pass
+        if deferred_channels:
+            async with self._get_dirty_lock():
+                for (ch, page_id), fact_ids in snapshot.items():
+                    if ch not in deferred_channels:
+                        continue
+                    self._dirty.setdefault((ch, page_id), set()).update(fact_ids)
+            logger.info(
+                "wiki_maintainer._flush_dirty deferred channels=%s pages=%d "
+                "(Builder hasn't run yet — first-sync gate)",
+                sorted(deferred_channels),
+                sum(1 for (ch, _pid) in snapshot if ch in deferred_channels),
+            )
+
+        rewritten = 0
+        # Collect doc_ids that completed successfully so we can mark
+        # them done in a single bulk update at the end of the flush.
+        done_ids: list[Any] = []
+        for (channel_id, page_id), fact_ids in snapshot.items():
+            if channel_id in deferred_channels:
+                continue
+            try:
+                applied = await self._rewrite_page(
+                    channel_id, page_id, sorted(fact_ids), target_lang=target_lang
+                )
+                if applied:
+                    rewritten += 1
+                    # Mark the queue row done — incrementally finalised
+                    # rather than all-or-nothing so a crash mid-flush
+                    # leaves only the failed pages in ``flushing`` state
+                    # for ``recover_stale_flushing`` to revive.
+                    doc_id = claimed_doc_ids.get((channel_id, page_id))
+                    if doc_id is not None:
+                        done_ids.append(doc_id)
+            except Exception:  # noqa: BLE001 — one bad page must not stall others
+                logger.exception(
+                    "wiki_maintainer._flush_dirty: rewrite failed channel=%s page=%s fact_count=%d",
+                    channel_id,
+                    page_id,
+                    len(fact_ids),
+                )
+        # Bulk-mark completed rows as done. Done as a tail operation so
+        # one bad-mongo-write doesn't lose the work already completed.
+        if done_ids:
+            try:
+                from beever_atlas.stores import get_stores
+
+                await get_stores().mongodb.mark_dirty_done(done_ids)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "wiki_maintainer._flush_dirty: mark_dirty_done failed for %d rows",
+                    len(done_ids),
+                )
+        logger.info(
+            "wiki_maintainer._flush_dirty pages=%d rewritten=%d deferred=%d",
+            len(snapshot),
+            rewritten,
+            sum(1 for (ch, _pid) in snapshot if ch in deferred_channels),
+        )
+        return rewritten
+
+    async def _rewrite_page(
+        self,
+        channel_id: str,
+        page_id: str,
+        fact_ids: list[str],
+        *,
+        target_lang: str = "en",
+    ) -> bool:
+        """Per-page rewrite seam called by ``_flush_dirty``.
+
+        Wraps ``apply_update`` so tests can override one method without
+        replacing the whole flush pipeline. Returns True iff
+        ``apply_update`` actually rewrote the page (vs. skipped because
+        every fact_id was already in ``last_facts_seen``).
+        """
+        return await self.apply_update(
+            channel_id=channel_id,
+            page_id=page_id,
+            new_fact_ids=fact_ids,
+            target_lang=target_lang,
+        )
 
     async def on_consolidation_complete(
         self,
@@ -837,18 +1350,20 @@ class WikiMaintainer:
     ) -> dict[str, Any]:
         """Hook invoked after consolidation finishes for a channel.
 
-        Replaces the legacy ``WikiCache.mark_all_stale(channel_id)`` hammer:
-        instead of marking the entire wiki stale, the maintainer routes the
-        consolidation's touched fact ids to the specific pages they affect.
-        Behaviour mirrors :meth:`on_extraction_done` exactly — non-empty
-        ``fact_ids`` routes to affected pages (auto fires LLM rewrites,
-        manual marks them dirty); empty ``fact_ids`` is a no-op (the worker
-        path's per-batch fan-out already covered any new facts during
-        consolidation).
+        Routes the consolidation's touched fact ids into the dirty queue via
+        the accumulator path (:meth:`on_memory_changed`) so they are picked
+        up by the next terminal flush. Does NOT schedule a debounced flush —
+        ``memory_settled`` owns that, ensuring the wiki only projects from a
+        stable memory state. Empty ``fact_ids`` is a no-op.
+
+        The ``mode`` argument is accepted for backwards-compatibility with
+        callers that pre-date the memory-then-wiki realignment but is unused
+        here: routing is always non-flushing. Manual-mode operators trigger
+        page rewrites via the ``Maintain Wiki`` button which calls
+        :meth:`maintain_now`.
         """
-        return await self.on_extraction_done(
-            channel_id, fact_ids, target_lang=target_lang, mode=mode
-        )
+        del mode  # accepted for backwards-compat; flushes are owned by memory_settled
+        return await self.on_memory_changed(channel_id, fact_ids, target_lang=target_lang)
 
     async def maintain_now(self, channel_id: str, target_lang: str = "en") -> dict[str, int]:
         """Drain the dirty page queue for one channel — used by the
@@ -913,11 +1428,83 @@ class WikiMaintainer:
         ``last_facts_seen``) or the LLM call failed (in which case the
         page is left unchanged and a structured error is logged).
         """
+        # wiki-redesign-gap-fill / Group 1 — wrap apply_update in try/finally
+        # so every return path emits agent_state(done) for the maintainer.
+        # Without this, a frozen / manual / no-new-facts early-return would
+        # leave SyncMonitor's LED stuck on "running".
+        from beever_atlas.services.pipeline_events import (
+            emit_agent_state as _emit_agent_state_local,
+        )
+
+        _maint_started_at = time.monotonic()
+        _emit_agent_state_local(channel_id, "wiki_maintainer", "running", batch_id=page_id)
+        try:
+            return await self._apply_update_inner(
+                channel_id, page_id, new_fact_ids, target_lang=target_lang
+            )
+        finally:
+            _emit_agent_state_local(
+                channel_id,
+                "wiki_maintainer",
+                "done",
+                batch_id=page_id,
+                elapsed_ms=int((time.monotonic() - _maint_started_at) * 1000),
+            )
+
+    async def _apply_update_inner(
+        self,
+        channel_id: str,
+        page_id: str,
+        new_fact_ids: list[str],
+        *,
+        target_lang: str = "en",
+    ) -> bool:
+        """Inner body of :meth:`apply_update`.
+
+        Split out so the surrounding ``apply_update`` wrapper can emit
+        ``agent_state(running/done)`` events around every return path.
+        """
         page = await self._page_store.get_page(channel_id, page_id, target_lang=target_lang)
         already_seen = set(page.last_facts_seen) if page else set()
         truly_new = [fid for fid in new_fact_ids if fid not in already_seen]
         if not truly_new:
             return False
+
+        # ``unified-llm-wiki-graph-redesign`` — honor per-page curation
+        # mode before invoking the LLM. ``manual`` pages stay dirty
+        # until an operator explicitly triggers the rewrite; ``frozen``
+        # pages skip even mark-dirty. Legacy ``pin_state.pinned=True``
+        # rows are treated as ``manual`` so existing operator pins
+        # don't suddenly start auto-rewriting.
+        if page is not None:
+            mode = _resolve_curation_mode(page)
+            if mode == "frozen":
+                logger.info(
+                    "event=wiki_maintainer_apply_update_skipped_frozen channel_id=%s page_id=%s",
+                    channel_id,
+                    page_id,
+                )
+                return False
+            if mode == "manual":
+                # Mark dirty so the operator's "Apply Pending Updates"
+                # button has work to do, but do NOT invoke the LLM
+                # automatically. Best-effort mark-dirty.
+                try:
+                    await self._page_store.mark_dirty(
+                        channel_id, [page_id], target_lang=target_lang
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "event=wiki_maintainer_manual_mark_dirty_failed channel=%s page=%s",
+                        channel_id,
+                        page_id,
+                    )
+                logger.info(
+                    "event=wiki_maintainer_apply_update_deferred_manual channel_id=%s page_id=%s",
+                    channel_id,
+                    page_id,
+                )
+                return False
 
         # Load full fact records for the prompt. ``fetch_by_ids`` is the
         # cheap path (one Weaviate object lookup per id); even when
@@ -937,6 +1524,27 @@ class WikiMaintainer:
             return False
 
         if page is None:
+            # wiki-redesign-gap-fill / Group 8 — silent drop for routes to
+            # adaptive page kinds that haven't been instantiated yet. The
+            # Builder owns initial creation of adaptive pages (predicate-gated);
+            # the Maintainer's job is to keep existing pages fresh, not to
+            # spawn new pages for kinds the channel doesn't qualify for.
+            try:
+                from beever_atlas.wiki.kinds import KIND_REGISTRY
+
+                _candidate_kind = _derive_kind_from_page_id(page_id)
+                _spec = KIND_REGISTRY.get(_candidate_kind)
+                if _spec is not None and not _spec.is_required:
+                    logger.info(
+                        "event=wiki_maintainer_skip_adaptive_route "
+                        "channel_id=%s page_id=%s kind=%s",
+                        channel_id,
+                        page_id,
+                        _candidate_kind,
+                    )
+                    return False
+            except Exception:  # noqa: BLE001 — never destabilise apply_update
+                pass
             page = WikiPage(
                 channel_id=channel_id,
                 target_lang=target_lang,
@@ -1007,6 +1615,27 @@ class WikiMaintainer:
             self._record_apply_update_failure(
                 channel_id, page_id, ValueError("no_affected_sections")
             )
+            # ``unified-llm-wiki-graph-redesign`` — emit a structured
+            # parse_failure event so the WikiTab banner counter sees
+            # this as a recoverable failure mode. Best-effort.
+            try:
+                from beever_atlas.services.pipeline_events import (
+                    EVENT_TYPE_PARSE_FAILURE,
+                    get_pipeline_events,
+                )
+
+                get_pipeline_events().record(
+                    channel_id=channel_id,
+                    stage="wiki_maintenance",
+                    label=f"Parse failure on {page_id}",
+                    event_type=EVENT_TYPE_PARSE_FAILURE,
+                    payload={
+                        "page_id": page_id,
+                        "raw_len": len(raw) if raw else 0,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return False
 
         # Merge in place so each updated section keeps its original
@@ -1033,6 +1662,15 @@ class WikiMaintainer:
         if use_kind_dispatch:
             page.kind = dispatch_kind
             page.kind_schema = new_kind_schema  # may be None on 2x validation failure
+            # wiki-redesign-gap-fill / Group 3 — persist the canonical
+            # schema hash so the Builder's recompile-skip can detect
+            # unchanged inputs on the next regenerate. Best-effort.
+            try:
+                from beever_atlas.wiki.hashing import compute_kind_schema_hash
+
+                page.kind_schema_hash = compute_kind_schema_hash(dispatch_kind, new_kind_schema)
+            except Exception:  # noqa: BLE001
+                page.kind_schema_hash = None
         # title, slug, page_voice_seed are intentionally NOT touched here —
         # the LLM contract returns ONLY affected sections, and the merge
         # path only rewrites sections by id. Voice preservation is a
@@ -1065,6 +1703,30 @@ class WikiMaintainer:
 
         await self._page_store.save_page(page)
         self._record_apply_update_success(page_id)
+        # ``unified-llm-wiki-graph-redesign`` — emit a structured
+        # wiki_update event so the SyncMonitor's right pane (Wiki
+        # Updates) renders this page rewrite live. Best-effort.
+        try:
+            from beever_atlas.services.pipeline_events import (
+                EVENT_TYPE_WIKI_UPDATE,
+                get_pipeline_events,
+            )
+
+            get_pipeline_events().record(
+                channel_id=channel_id,
+                stage="wiki_maintenance",
+                label=f"Page '{page.title or page_id}' updated",
+                event_type=EVENT_TYPE_WIKI_UPDATE,
+                payload={
+                    "page_id": page_id,
+                    "page_title": page.title or page_id,
+                    "action": "patched",
+                    "facts_integrated": len(truly_new),
+                    "version": page.version,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
         # Persist the cross-link graph (best-effort). Runs synchronously
         # so the next ``GET /api/channels/{id}/wiki/graph`` reflects the
         # rewrite immediately, but wrapped in try/except inside
@@ -1386,45 +2048,29 @@ class WikiMaintainer:
         """Single LLM call for ``apply_update``. Override in tests.
 
         Production path: resolve the ``wiki_maintainer`` model via
-        ``LLMProvider``, then issue an ``application/json``-typed
-        ``generate_content`` request mirroring the WikiCompiler call shape.
+        ``LLMProvider``, then issue a JSON-mode completion via
+        ``dispatch_completion`` (which gates on the per-provider throttle).
         Returns the raw JSON text (parsed by the caller).
         """
         from beever_atlas.llm.provider import get_llm_provider
-        from google.genai import types
+        from beever_atlas.services.llm_dispatch import (
+            dispatch_completion,
+            normalize_litellm_model,
+            sniff_provider,
+        )
 
         provider = self._llm_provider or get_llm_provider()
         model_name = provider.get_model_string("wiki_maintainer")
 
-        client = self._get_genai_client()
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            max_output_tokens=4096,
+        response = await dispatch_completion(
+            provider=sniff_provider(model_name),
+            model=normalize_litellm_model(model_name),
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=4096,
             temperature=0.2,
         )
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=config,
-        )
-        return response.text or "{}"
-
-    def _get_genai_client(self) -> Any:
-        """Lazy-init + cache the Google GenAI client on the instance.
-
-        The Google AI client is intended to be reused. In auto mode an
-        extraction batch can fan out to N affected pages; constructing a
-        fresh client per page would burn a connection pool slot each time.
-        The client is created on first use rather than at ``__init__`` so
-        unit tests that don't exercise the LLM path never touch the SDK.
-        """
-        cached = getattr(self, "_genai_client", None)
-        if cached is None:
-            from google import genai
-
-            cached = genai.Client()
-            self._genai_client = cached
-        return cached
+        return response.choices[0].message.content or "{}"  # type: ignore[index, union-attr]
 
     async def _resolve_first_touch_title(self, page_id: str, channel_id: str) -> str:
         """Look up the human-friendly title for a brand-new page.

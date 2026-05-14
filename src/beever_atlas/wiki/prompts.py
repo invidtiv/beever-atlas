@@ -102,10 +102,11 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 4. **Overview** — 2-3 sentences summarizing this topic: what it covers, why it matters, and its current state (AFTER the diagram and table)
 5. **Decisions & outcomes** — if decisions exist, show as GFM table with columns: Decision, Status, Made By, Date. Use status badges: ✅ active, ❌ superseded, ⏳ pending. Skip if no decisions.
 6. **Contributors** — bullet list of people involved with their roles (decision maker, contributor, expert, mentioned)
-7. **Tools & resources** — if technologies/tools exist, bullet list. Skip if none.
-8. **Current state & open questions** — what's resolved vs. still open. Use bullet points. Each open question MUST include when it was first raised (e.g., "(raised Jan 2026)") so readers can assess staleness.
-9. **Media & Resources** — if media exists, each item MUST have a brief description line explaining what it shows/contains BEFORE the embed/link. **For IMAGES** (URLs ending in .png/.jpg/.jpeg/.gif/.webp/.svg, OR URLs from `files.mattermost.com` / `files.slack.com` / image-hosting domains), use IMAGE syntax `![Alt text](url)` — NOT link syntax `[Title](url)` — so the wiki renders an inline preview. **For PDFs and links**, use link syntax `[Title](url)`. **For VIDEOS** (URLs from youtube.com / vimeo.com or ending in .mp4/.webm), use link syntax `[Video title](url)` and the renderer will detect + embed. Do NOT use bare bullet points with just a link. Skip if none.
-10. **See Also** — if related topics exist (use the `related_topics` data block — each entry has `title` and `id`), list them as MARKDOWN LINKS so the UI can route to the destination. **MAX 5 entries.** Each line: `- **[Title](/wiki/<slug>)** — one-line reason this topic is related (shared people, shared entities, downstream dependency, etc.)`. The `<slug>` is the part of the related topic's id AFTER the `topic-` prefix (e.g., id `topic-auth-migration` → `[Title](/wiki/auth-migration)`). Pick the 5 most strongly related — DO NOT dump every other topic in the wiki. Skip the section entirely when no truly related topics exist (a wall of weakly-related links is worse than no links).
+7. **Key Systems** — if non-people entities of type system / service / product / tool drive this topic, list them as a GFM table with columns: Name, Channel-context definition, Role in this topic. Use the `key_entities_json` data block to source these — only include entities the channel actually discusses with substance, NOT every mention. Skip when ≤2 such entities exist.
+8. **Tools & resources** — if technologies/tools exist, bullet list. Skip if none.
+9. **Current state & open questions** — what's resolved vs. still open. Use bullet points. Each open question MUST include when it was first raised (e.g., "(raised Jan 2026)") so readers can assess staleness.
+10. **Media & Resources** — if media exists, each item MUST have a brief description line explaining what it shows/contains BEFORE the embed/link. **For IMAGES** (URLs ending in .png/.jpg/.jpeg/.gif/.webp/.svg, OR URLs from `files.mattermost.com` / `files.slack.com` / image-hosting domains), use IMAGE syntax `![Alt text](url)` — NOT link syntax `[Title](url)` — so the wiki renders an inline preview. **For PDFs and links**, use link syntax `[Title](url)`. **For VIDEOS** (URLs from youtube.com / vimeo.com or ending in .mp4/.webm), use link syntax `[Video title](url)` and the renderer will detect + embed. Do NOT use bare bullet points with just a link. Skip if none.
+11. **See Also / Cross-references** — if related topics exist (use the `related_topics` data block — each entry has `title` and `id`), list them as MARKDOWN LINKS so the UI can route to the destination. **MAX 5 entries.** Each line: `- **[Title](/wiki/<slug>)** — one-line reason this topic is related (shared people, shared entities, downstream dependency, etc.)`. The `<slug>` is the part of the related topic's id AFTER the `topic-` prefix (e.g., id `topic-auth-migration` → `[Title](/wiki/auth-migration)`). When you reference a related Topic, People, or Glossary page in any prose section above, ALSO inline a `[[Page Title]]` wikilink so the cross-reference resolver picks it up for the wiki graph. **ONLY emit `[[Page Title]]` wikilinks for titles in the `compiled_topic_titles_json` list below — every other topic was dropped by the threshold gate and has no page; pointing at it produces a red broken link.** Pick the 5 most strongly related — DO NOT dump every other topic in the wiki. Skip the section entirely when no truly related topics exist (a wall of weakly-related links is worse than no links).
 
 ## Writing style
 - **Synthesize, don't narrate.** Write "The team adopted a wiki-first architecture for 10x cost reduction [1]" — NOT "Thomas Chong shared that the wiki-first architecture offers cost reduction [1]".
@@ -159,6 +160,8 @@ Knowledge graph relationships in this topic: {key_relationships_json}
 All facts (for citation sourcing): {member_facts_json}
 Media: {media_json}
 Related topics (for "See Also" section): {related_topics_json}
+
+Compiled topic titles (the ONLY valid targets for `[[Page Title]]` wikilinks — any other title was dropped by the threshold gate and has no page; pointing at it produces a red broken link): {compiled_topic_titles_json}
 """
 
 # ---------------------------------------------------------------------------
@@ -223,8 +226,9 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 1. **Contributor network** — ```mermaid diagram showing key people and their connections. Use relationship edges to show who collaborates with whom, who made which decisions, and expertise areas. THIS MUST BE THE VERY FIRST CONTENT ELEMENT.
 2. **Activity chart** — ```chart bar chart showing contribution level per person
 3. **Overview** — 1-2 sentences describing the contributor landscape in this channel (AFTER the diagram and chart)
-4. **Contributors table** — GFM table with columns: Name, Role/Expertise, Topics Active In, Key Contributions, Decisions Made
-5. **Collaboration patterns** — bullet points on notable collaboration patterns, expertise clusters, and knowledge areas
+4. **Contributors table** — GFM table with columns: Name, Role/Expertise, Topics Active In, Key Contributions, Decisions Made. In the "Topics Active In" column use `[[Topic Title]]` wikilinks. **ONLY reference topic titles from the `compiled_topic_titles` list below — any other title has no page and will appear as a red broken link.**
+5. **Profiles** — for each top contributor (max 8), a `### <Name>` sub-section containing FOUR labelled bullets: **Owns** (systems/projects/docs they own), **Decides** (decisions they have made), **Contributes** (artifacts/RFCs/contributions), **Topic activity** (per-topic counts as a one-line list, e.g. "GPU Procurement: 12 · AI Solutions: 3 · Confidential Containers: 1"). Each bullet should answer the reader's question "what does this person OWN, DECIDE, and CONTRIBUTE?" — not "what facts mention them". If a person has nothing in a category, omit that bullet (do not pad). Wikilink topic names with `[[Topic Title]]` so navigation lands on the right Topic page. **ONLY use topic titles from the `compiled_topic_titles` list below — every other topic was dropped by the threshold gate and has no page; using it produces a red broken link.**
+6. **Collaboration patterns** — bullet points on notable collaboration patterns, expertise clusters, and knowledge areas
 
 ## Writing style
 - Describe what each person DOES and KNOWS — not what they "shared" or "posted". Write "Thomas Chong drives architecture decisions for Beever Atlas [1]" — NOT "Thomas Chong shared several messages about architecture [1]".
@@ -252,6 +256,8 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 People (with relationship edges): {persons_json}
 Contributor context: {top_people_json}
 Relationship edges (from knowledge graph): {relationship_edges_json}
+
+Compiled topic titles (the ONLY valid targets for `[[Topic Title]]` wikilinks — any other title was dropped by the threshold gate and has no page; pointing at it produces a red broken link): {compiled_topic_titles_json}
 """
 
 DECISIONS_PROMPT = """You are a knowledge wiki compiler. Create a **Decisions** page.
@@ -415,8 +421,9 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Content structure (follow this order strictly)
 1. **Relationship diagram** — if 5+ terms exist, include a ```mermaid diagram showing how terms relate to each other (which terms are used together, which are sub-concepts of others). THIS MUST BE THE VERY FIRST CONTENT ELEMENT (skip if fewer than 5 terms — start with Introduction instead).
 2. **Introduction** — 1 sentence: "Key terms, acronyms, and concepts used in this channel."
-3. **Terms table** — GFM table with columns: Term, Definition, First Mentioned By, Related Topics. Sort alphabetically. In the "First Mentioned By" column, write "—" when the source is unknown; NEVER write placeholder markers like `(Implicit)`, `(Inferred)`, `(Unknown)`, `(N/A)`, or any parenthesized guess.
-4. **Category breakdown** — if terms naturally group into categories (e.g., technical terms, process terms, domain terms), add a brief categorized list after the table
+3. **Terms table** — GFM table with columns: Term, Definition, First Mentioned By, Related Topics. Sort alphabetically. In the "First Mentioned By" column, write "—" when the source is unknown; NEVER write placeholder markers like `(Implicit)`, `(Inferred)`, `(Unknown)`, `(N/A)`, or any parenthesized guess. The Related Topics column MUST contain wikilinks: `[[Topic Title]]` for each related topic so navigation lands on the right Topic page. **ONLY reference topic titles from the `compiled_topic_titles` list below — every other topic was dropped by the threshold gate and has no page; pointing at it produces a red broken link.** If none of the compiled topics relate to a term, write `—` in that cell.
+4. **Term details** — for each significant non-people entity (max 12; products, systems, services, concepts), a `### <Term>` sub-section. Each contains: a 1–2 sentence channel-context definition (NOT a generic Wikipedia gloss), a "Used in" line listing the Topic pages where the term shows up as `[[Topic Title]]` wikilinks, and an optional "See also" line with cross-references to other glossary terms. **Same constraint: ONLY use titles from `compiled_topic_titles` for `[[...]]` references.** This section absorbs the per-entity profile work the deprecated `entity:<thing>` page kind used to do — channel readers and agents land here for "what is X in this channel".
+5. **Category breakdown** — if terms naturally group into categories (e.g., technical terms, process terms, domain terms), add a brief categorized list after the table
 
 ## Writing style
 - Define each term in the context of THIS CHANNEL, not as a generic dictionary entry. Bad: "Neo4j is a graph database management system." Good: "Neo4j is used as the primary knowledge graph store for Beever Atlas, storing entity relationships extracted from channel conversations."
@@ -440,6 +447,7 @@ Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 ## Data
 Glossary terms: {glossary_terms_json}
 Channel context: {channel_description}
+Compiled topic titles (the ONLY valid targets for `[[Topic Title]]` wikilinks — any other title was dropped by the threshold gate and has no page): {compiled_topic_titles_json}
 """
 
 RESOURCES_PROMPT = """You are a knowledge wiki compiler. Create a **Resources & Media** page cataloging all shared files, images, documents, and links.
@@ -509,13 +517,15 @@ SUBTOPIC_PROMPT = """You are a knowledge wiki compiler. Create a **Sub-Topic** p
 
 Return JSON: {{"content": "markdown string", "summary": "1-2 sentence summary"}}
 
-## Content structure (follow this order strictly — TL;DR FIRST, then DIAGRAM, then text)
+## Content structure (follow this order strictly — TL;DR FIRST, then PARENT CONTEXT, then DIAGRAM, then text)
 1. **TL;DR** — A single bold sentence summarizing the key insight of this sub-topic. THIS MUST BE THE VERY FIRST LINE.
-2. **Concept diagram** — ```mermaid diagram showing key entities and relationships within this sub-topic.
-3. **Key Facts** — GFM table with columns: Fact, Source, Type, Importance — the most important facts with [N] citations
-4. **Overview** — 2-3 sentences on what this sub-topic covers and how it relates to the parent topic (AFTER diagram and table)
-5. **Details** — bullet points expanding on the key facts, decisions, and context
-6. **Contributors** — bullet list of people involved, if relevant. Skip if not meaningful.
+2. **Parent context** — A SHORT paragraph (1-2 sentences) anchored to the parent topic via `[[Parent Title]]` wikilink. Use the `parent_title` data block as the wikilink target. Example: `This sub-topic deep-dives into one slice of [[Parent Title]] — specifically <what this slice covers>.` **ONLY emit `[[Title]]` wikilinks for titles in the `compiled_topic_titles_json` list below — any other title was dropped by the threshold gate and has no page; pointing at it produces a red broken link.** When the `parent_title` itself is not in that list, write the parent name as plain text instead of a wikilink.
+3. **Sub-topic scope** — A short paragraph stating what this sub-topic covers vs. its siblings. Be explicit about boundaries: what's IN scope, what's OUT (covered by sibling sub-topics or the parent). Example: `Scope: <X>. Out of scope (covered elsewhere): <Y> (parent), <Z> (sibling sub-topic).`
+4. **Concept diagram** — ```mermaid diagram showing key entities and relationships within this sub-topic.
+5. **Key Facts** — GFM table with columns: Fact, Source, Type, Importance — the most important facts with [N] citations
+6. **Overview** — 2-3 sentences on what this sub-topic covers and how it relates to the parent topic (AFTER diagram and table)
+7. **Details** — bullet points expanding on the key facts, decisions, and context
+8. **Contributors** — bullet list of people involved, if relevant. Skip if not meaningful.
 
 ## Writing style
 - **Synthesize, don't narrate.** State insights and conclusions directly. Write "Agents fail primarily due to inadequate memory, not limited context [1]" — NOT "Jacky Chan shared an article saying agents fail due to memory [1]".
@@ -542,12 +552,16 @@ Fact count: {fact_count}
 ## Facts (for this sub-topic only)
 {member_facts_json}
 Media: {media_json}
+
+Compiled topic titles (the ONLY valid targets for `[[Title]]` wikilinks — any other title was dropped by the threshold gate and has no page): {compiled_topic_titles_json}
 """
 
 # Phase 4 v2 variant of SUBTOPIC_PROMPT.
+# wiki-redesign-gap-fill / Group 6 — Key Facts is now item 5 (not 3) since
+# Parent context + Sub-topic scope were inserted ahead of the diagram.
 SUBTOPIC_PROMPT_V2 = (
     SUBTOPIC_PROMPT.replace(
-        "3. **Key Facts** — GFM table with columns: Fact, Source, Type, Importance — the most important facts with [N] citations",
+        "5. **Key Facts** — GFM table with columns: Fact, Source, Type, Importance — the most important facts with [N] citations",
         _KEY_FACTS_MARKER_INSTRUCTION,
     )
     + "\n\n"
@@ -1141,6 +1155,8 @@ Top decisions across descendants (pre-aggregated): {top_decisions_json}
 Top facts across descendants (for synthesis + citation): {top_facts_json}
 Open questions across descendants: {open_questions_json}
 
+Compiled topic titles (the ONLY valid targets for `[[Page Title]]` wikilinks inside narrative paragraphs — any other title was dropped by the threshold gate and has no page; pointing at it produces a red broken link): {compiled_topic_titles_json}
+
 {archetype_hint_block}
 
 ## Output
@@ -1266,6 +1282,7 @@ def build_module_compile_folder_prompt(
     top_facts: list[dict] | None = None,
     open_questions: list[dict] | None = None,
     archetype_hint_block: str = "",
+    compiled_topic_titles: list[str] | None = None,
 ) -> str:
     """Render ``MODULE_COMPILE_FOLDER_PROMPT`` with the folder data.
 
@@ -1339,6 +1356,7 @@ def build_module_compile_folder_prompt(
         top_decisions_json=_json.dumps(decisions_payload, indent=2),
         top_facts_json=_json.dumps(facts_payload, indent=2, default=str),
         open_questions_json=_json.dumps(open_questions_payload, indent=2, default=str),
+        compiled_topic_titles_json=_json.dumps(list(compiled_topic_titles or []), default=str),
         archetype_hint_block=archetype_hint_block or "",
     )
 

@@ -102,6 +102,9 @@ def test_plan_updates_routes_cluster_to_topic_page() -> None:
 
 
 def test_plan_updates_routes_entity_tags_to_entity_pages() -> None:
+    """``unified-llm-wiki-graph-redesign``: entity_tags route to the
+    canonical ``people`` + ``glossary`` pages (single canonical pages
+    each), NOT to per-entity ``entity:<slug>`` rows."""
     m = _make_maintainer()
     plan = m.plan_updates(
         [
@@ -113,7 +116,7 @@ def test_plan_updates_routes_entity_tags_to_entity_pages() -> None:
             }
         ]
     )
-    assert plan == {"entity:alice": ["f1"], "entity:bob": ["f1"]}
+    assert plan == {"people": ["f1"], "glossary": ["f1"]}
 
 
 def test_plan_updates_routes_decision_to_decisions_page() -> None:
@@ -130,7 +133,8 @@ def test_plan_updates_routes_decision_to_decisions_page() -> None:
     )
     assert plan == {
         "topic:auth": ["f1"],
-        "entity:alice": ["f1"],
+        "people": ["f1"],
+        "glossary": ["f1"],
         "decisions": ["f1"],
     }
 
@@ -200,7 +204,10 @@ async def test_on_extraction_done_manual_marks_pages_dirty() -> None:
 
     maintainer._load_facts = _stub_load  # type: ignore[method-assign]
     counters = await maintainer.on_extraction_done("C1", ["f1"], mode="manual")
-    assert counters["affected_pages"] == 3  # topic, entity, decisions
+    # Redesign routing: topic + people + glossary + decisions.
+    # Entity-tagged facts route to canonical people + glossary pages
+    # (one each), not to per-entity ``entity:<slug>`` rows.
+    assert counters["affected_pages"] == 4
     page_store.mark_dirty.assert_awaited_once()
     # apply_update was NOT called in manual mode.
     page_store.save_page.assert_not_awaited()
@@ -213,11 +220,16 @@ async def test_on_extraction_done_manual_marks_pages_dirty() -> None:
 
 @pytest.mark.asyncio
 async def test_on_extraction_done_auto_applies_rewrites() -> None:
-    """Spec scenario: ``WIKI_MAINTENANCE_MODE=auto``."""
+    """Spec scenario: ``WIKI_MAINTENANCE_MODE=auto``.
+
+    Uses ``debounce_seconds=0`` to flush inline so the synchronous
+    ``rewritten`` counter reflects the per-page work. The debounce
+    mechanics are exercised in ``test_wiki_maintainer_debounce.py``.
+    """
     page_store = AsyncMock()
     page_store.get_page = AsyncMock(return_value=None)  # first-touch path
     page_store.save_page = AsyncMock()
-    maintainer = WikiMaintainer(page_store=page_store)
+    maintainer = WikiMaintainer(page_store=page_store, debounce_seconds=0)
 
     async def _stub_load(*args, **kwargs):
         return [{"id": "f1", "cluster_id": "auth", "entity_tags": []}]
@@ -249,13 +261,14 @@ async def test_on_extraction_done_auto_isolates_per_page_failures() -> None:
     """A bad page rewrite must not stop other affected pages from updating.
 
     Mirrors the ExtractionWorker subscriber-isolation contract — this
-    is the receiving end of that pipeline.
+    is the receiving end of that pipeline. ``debounce_seconds=0`` flushes
+    inline so the synchronous counters reflect the per-page outcomes.
     """
     page_store = AsyncMock()
     page_store.get_page = AsyncMock(return_value=None)
     save_results: list[Any] = [RuntimeError("flaky"), None]
     page_store.save_page = AsyncMock(side_effect=save_results)
-    maintainer = WikiMaintainer(page_store=page_store)
+    maintainer = WikiMaintainer(page_store=page_store, debounce_seconds=0)
 
     async def _stub_load(*args, **kwargs):
         return [
@@ -277,7 +290,9 @@ async def test_on_extraction_done_auto_isolates_per_page_failures() -> None:
     maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
     counters = await maintainer.on_extraction_done("C1", ["f1"], mode="auto")
     # At least one page rewrote successfully; the other was logged.
-    assert counters["affected_pages"] == 2  # topic + entity
+    # Redesign routing: topic + people + glossary (no role page since
+    # fact_type=observation isn't a role).
+    assert counters["affected_pages"] == 3
     assert counters["rewritten"] >= 1
 
 
@@ -969,8 +984,13 @@ async def test_resolve_first_touch_title_falls_back_to_slug(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_on_consolidation_complete_with_fact_ids_routes_in_auto(_fake_stores) -> None:
-    """Spec scenario: consolidation produces fact_ids → maintainer fires
-    for affected pages only (auto mode)."""
+    """memory-then-wiki realignment: consolidation_complete routes facts via
+    the accumulator path (on_memory_changed) and does NOT fire apply_update
+    or save_page inline — the terminal flush is owned by memory_settled.
+
+    The ``mode`` argument is accepted for backwards-compatibility but is
+    ignored: routing is always queue-only.
+    """
     _fake_stores.weaviate._ids = {
         "f10": _FakeAtomicFact(
             "f10", cluster_id="auth", entity_tags=["alice"], fact_type="decision"
@@ -980,44 +1000,49 @@ async def test_on_consolidation_complete_with_fact_ids_routes_in_auto(_fake_stor
     page_store = AsyncMock()
     page_store.get_page = AsyncMock(return_value=None)
     page_store.save_page = AsyncMock()
-    maintainer = WikiMaintainer(page_store=page_store)
+    maintainer = WikiMaintainer(page_store=page_store, debounce_seconds=0)
 
-    async def _stub_llm(prompt: str) -> str:
-        return '{"affected_sections": [{"id": "overview", "title": "Overview", "content_md": "x"}]}'
-
-    maintainer._invoke_apply_update_llm = _stub_llm  # type: ignore[method-assign]
     counters = await maintainer.on_consolidation_complete("C1", ["f10", "f11"], mode="auto")
-    # f10 routes to topic:auth + entity:alice + decisions = 3 pages.
-    # f11 routes to topic:ops = 1 page. Total affected: 4.
-    assert counters["affected_pages"] == 4
-    # save_page called once per affected page (4 pages).
-    assert page_store.save_page.await_count == 4
+    # Routing is unchanged:
+    #   f10 → topic:auth + people + glossary + decisions = 4 pages.
+    #   f11 → topic:ops (no entity_tags, no role) = 1 page.
+    # Total affected: 5 pages.
+    assert counters["affected_pages"] == 5
+    # Critically: NO inline save_page calls — the realignment moves the
+    # flush to memory_settled. This is the regression test for the
+    # mid-sync wiki rewrite bug.
+    page_store.save_page.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_on_consolidation_complete_with_fact_ids_marks_dirty_in_manual(_fake_stores) -> None:
-    """Spec scenario: consolidation in manual mode marks affected pages dirty
-    (does NOT auto-fire apply_update)."""
+    """memory-then-wiki realignment: consolidation_complete is queue-only in
+    BOTH manual and auto mode. The legacy distinction (manual marks dirty
+    via page_store, auto fires apply_update) is gone — both paths accumulate
+    into the internal dirty set for the terminal flush owned by
+    memory_settled."""
     _fake_stores.weaviate._ids = {
         "f10": _FakeAtomicFact(
             "f10", cluster_id="auth", entity_tags=["alice"], fact_type="decision"
         ),
     }
     page_store = AsyncMock()
-    page_store.mark_dirty = AsyncMock(return_value=3)
+    page_store.mark_dirty = AsyncMock(return_value=0)
     page_store.save_page = AsyncMock()
     maintainer = WikiMaintainer(page_store=page_store)
 
     counters = await maintainer.on_consolidation_complete("C1", ["f10"], mode="manual")
-    # 3 pages marked dirty (topic:auth, entity:alice, decisions), no save calls.
-    assert counters["marked_dirty"] == 3
+    # Routing still surfaces affected pages so callers can observe scope.
+    assert counters["affected_pages"] >= 1
+    # No inline mark_dirty or save_page — flush is deferred to
+    # memory_settled (or to operator-triggered maintain_now).
     page_store.save_page.assert_not_awaited()
+    page_store.mark_dirty.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_on_consolidation_complete_with_empty_fact_ids_is_noop(_fake_stores) -> None:
-    """Spec scenario: empty fact_ids → maintainer is a no-op (no pages
-    touched, no dirty flag changes)."""
+    """Spec scenario: empty fact_ids → maintainer is a no-op."""
     page_store = AsyncMock()
     page_store.save_page = AsyncMock()
     page_store.mark_dirty = AsyncMock()
@@ -1025,7 +1050,10 @@ async def test_on_consolidation_complete_with_empty_fact_ids_is_noop(_fake_store
 
     counters = await maintainer.on_consolidation_complete("C1", [], mode="auto")
 
-    assert counters == {"affected_pages": 0, "marked_dirty": 0, "rewritten": 0}
+    # on_memory_changed returns its own counter shape — affected_pages=0
+    # is the load-bearing assertion. The flush counters from the legacy
+    # on_extraction_done path are no longer relevant here.
+    assert counters.get("affected_pages", 0) == 0
     page_store.save_page.assert_not_awaited()
     page_store.mark_dirty.assert_not_awaited()
 

@@ -18,6 +18,7 @@ import { useWikiRefresh, type WikiGenerationStatus } from "@/hooks/useWikiRefres
 import { useWikiVersions } from "@/hooks/useWikiVersions";
 import { useWikiVersion } from "@/hooks/useWikiVersion";
 import { useChannelMemoryCount } from "@/hooks/useChannelMemoryCount";
+import { useRegenerateOverview } from "@/hooks/useRegenerateOverview";
 import { WikiLayout } from "@/components/wiki/WikiLayout";
 import { WikiHealthToolbar } from "@/components/wiki/WikiHealthToolbar";
 import { SegmentedToggle } from "@/components/shared/SegmentedToggle";
@@ -31,6 +32,7 @@ import { TopicPage } from "@/components/wiki/TopicPage";
 import { GenericPage } from "@/components/wiki/GenericPage";
 import { FaqPage } from "@/components/wiki/FaqPage";
 import { WikiRegenerateButton } from "@/components/channel/WikiRegenerateButton";
+import { CurationDropdown } from "@/components/wiki/CurationControls";
 import { Button } from "@/components/ui/button";
 import { api, authFetch, API_BASE } from "@/lib/api";
 import type { WikiPage, WikiPageNode } from "@/lib/types";
@@ -461,6 +463,120 @@ function WikiEmptyState({
         </div>
       </div>
     </div>
+  );
+}
+
+/** Format an elapsed-seconds count as a compact human-readable string.
+ *  Under 60s → "Xs"; under an hour → "Xm Ys"; otherwise → "Xh Ym".
+ *  Used by the overview-wiki in-flight screen to show "Elapsed: 3m 42s"
+ *  ticking live so the user knows the build is still alive and roughly
+ *  when they can reasonably expect to retry. */
+function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return `${m}m ${rem}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+interface OverviewInFlightStateProps {
+  channelId: string | undefined;
+  description: string;
+  startedAt?: string;
+}
+
+/** In-flight loading screen for the auto-overview build with a live
+ *  elapsed-time counter and graduated retry affordances:
+ *    * elapsed > 3 min → subdued "Taking longer than usual. Retry?" link
+ *    * elapsed > 10 min → prominent "Retry overview generation" button
+ *
+ *  Falls back gracefully when ``startedAt`` is missing (legacy
+ *  backends) — renders the description without a number and surfaces
+ *  the Retry button immediately so the user is never trapped. */
+function OverviewInFlightState({
+  channelId,
+  description,
+  startedAt,
+}: OverviewInFlightStateProps) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const startedMs = useMemo(() => {
+    if (!startedAt) return null;
+    const t = Date.parse(startedAt);
+    return Number.isFinite(t) ? t : null;
+  }, [startedAt]);
+
+  const elapsedSeconds =
+    startedMs !== null ? Math.max(0, Math.round((nowMs - startedMs) / 1000)) : null;
+
+  const showSubduedRetry = elapsedSeconds !== null && elapsedSeconds > 180;
+  const showProminentRetry =
+    elapsedSeconds === null || elapsedSeconds > 600;
+
+  const {
+    isPending: isRetryPending,
+    error: retryError,
+    succeeded: retrySucceeded,
+    regenerate,
+  } = useRegenerateOverview(channelId);
+
+  const onRetry = useCallback(() => {
+    void regenerate();
+  }, [regenerate]);
+
+  return (
+    <PipelineEmptyState
+      icon={BookOpen}
+      title="Generating overview wiki…"
+      description={
+        elapsedSeconds !== null
+          ? `${description} Elapsed: ${formatElapsed(elapsedSeconds)}.`
+          : `${description} The build has been running for a while.`
+      }
+      steps={[
+        { label: "Sync channel", icon: FolderSync, done: true, active: false },
+        { label: "Build memories", icon: Sparkles, done: true, active: false },
+        { label: "Generate wiki", icon: BookOpen, done: false, active: true },
+      ]}
+    >
+      {retrySucceeded && (
+        <p className="text-xs text-emerald-600 dark:text-emerald-500">
+          Restarted — give it a few moments.
+        </p>
+      )}
+      {retryError && (
+        <p className="text-xs text-red-600 dark:text-red-500">
+          {retryError.message}
+        </p>
+      )}
+      {showProminentRetry ? (
+        <Button
+          size="lg"
+          onClick={onRetry}
+          disabled={isRetryPending}
+          className="px-5"
+        >
+          <RefreshCw className={isRetryPending ? "animate-spin" : ""} />
+          {isRetryPending ? "Restarting…" : "Retry overview generation"}
+        </Button>
+      ) : showSubduedRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={isRetryPending}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+        >
+          {isRetryPending ? "Restarting…" : "Taking longer than usual. Retry?"}
+        </button>
+      ) : null}
+    </PipelineEmptyState>
   );
 }
 
@@ -1019,6 +1135,103 @@ export function WikiTab() {
   // 404: wiki has never been generated for this language — show a targeted empty state
   if (!wiki && isNotFound && !isRefreshing) {
     const supported = langConfig?.supported_languages ?? [targetLang];
+    // ── PR-3 — phase-aware empty-state copy ─────────────────────────
+    // The new ``/sync/status`` payload threads phases through
+    // ``SyncState`` (see useSync.ts). When the auto-overview pipeline
+    // is mid-flight we replace the static "No Wiki Yet" copy with a
+    // dynamic message reflecting WHAT is currently happening, so the
+    // user doesn't see a misleading "ready to generate" CTA while the
+    // backend is already generating it.
+    const phases = syncState?.phases ?? [];
+    const overviewPhase = phases.find((p) => p.name === "overview_wiki");
+    const wikiMaintPhase = phases.find((p) => p.name === "wiki_maintenance");
+    const overviewState = overviewPhase?.state;
+    const wikiMaintDone = wikiMaintPhase?.done ?? 0;
+
+    // ``in_flight`` — auto-overview wiki is being generated right now.
+    // Hide the manual Generate button (redundant) and the "Sync now"
+    // CTA (sync already happened). The OverviewInFlightState renders a
+    // live elapsed-time counter and a graduated Retry affordance so a
+    // hung upstream call doesn't trap the user on this screen forever.
+    //
+    // Guard: only honour the in_flight state when this channel has
+    // actually been synced (hasMemories === true). The backend's
+    // ``_attempted`` set can carry stale ``in_flight`` reports across
+    // channels in a process; rendering the spinner for never-synced
+    // channels strands the user on a misleading screen. When the
+    // channel has zero memories we drop through to the standard
+    // "No Wiki Yet" empty state instead.
+    if (overviewState === "in_flight" && hasMemories) {
+      return (
+        <OverviewInFlightState
+          channelId={channelId}
+          description={
+            overviewPhase?.last_event_label ??
+            "Beever Atlas is auto-generating the overview wiki for this channel."
+          }
+          startedAt={overviewPhase?.started_at}
+        />
+      );
+    }
+
+    // ``pending`` AND ``wiki_maintenance.done > 0`` — entity pages
+    // exist, the overview is still queued. Surface the maintenance
+    // progress AND keep the Generate button visible so the user can
+    // publish before extraction completes if they want.
+    if (overviewState === "pending" && wikiMaintDone > 0) {
+      return (
+        <PipelineEmptyState
+          icon={BookOpen}
+          title="Wiki being built"
+          description={`${wikiMaintDone} entity page${
+            wikiMaintDone === 1 ? "" : "s"
+          } refreshed — overview wiki queued.`}
+          steps={[
+            { label: "Sync channel", icon: FolderSync, done: true, active: false },
+            { label: "Build memories", icon: Sparkles, done: true, active: false },
+            { label: "Generate wiki", icon: BookOpen, done: false, active: true },
+          ]}
+        >
+          <WikiRegenerateButton
+            currentLang={targetLang}
+            supportedLanguages={supported}
+            isRefreshing={isRefreshing}
+            onRegenerate={() => handleRegenerateInLang(targetLang)}
+            onRegenerateInLang={handleSwitchLang}
+            label="Generate"
+            size="lg"
+          />
+        </PipelineEmptyState>
+      );
+    }
+
+    // Default path — ``pending`` (no maintenance yet), ``skipped``
+    // (feature flag off), or no phases at all (legacy backend).
+    // Original behaviour: show the Sync / Generate CTA depending on
+    // whether the channel has any memories.
+    //
+    // sync-monitor-redesign — hide the Generate CTA while any pipeline
+    // phase is ``in_flight``. The SyncProgressV2 card above already
+    // tells the user the wiki is being built; showing a "Generate"
+    // button at the same time teases an action they can't usefully take.
+    //
+    // Guard: on never-synced channels (isNoMemory === true), ignore any
+    // ``in_flight`` phase reports. The backend's per-process subscriber
+    // state (AutoOverviewSubscriber._attempted, ExtractionWorker queue
+    // residue) can bleed stale ``in_flight`` signals onto channels that
+    // never started a pipeline. Without this guard, never-synced
+    // channels render the "Pipeline in progress" message AND lose
+    // the "Sync Channel Now" CTA, stranding the user on a screen with
+    // no actionable next step.
+    const isPipelineInFlight =
+      !isNoMemory && phases.some((p) => p.state === "in_flight");
+    // Previously we ``return null`` here on the rationale that the
+    // monitor card at the top of the page already shows progress. But
+    // when the monitor is COLLAPSED, the user sees only a compact
+    // stepper strip and a blank canvas below it — caught by UI testing
+    // as "blank page when sync and monitoring is running". Fall through
+    // to the phase-aware PipelineEmptyState below so the wiki tab body
+    // always shows SOMETHING informative.
     const steps = [
       { label: "Sync channel", icon: FolderSync, done: !isNoMemory, active: isNoMemory },
       { label: "Build memories", icon: Sparkles, done: !isNoMemory, active: false },
@@ -1027,22 +1240,42 @@ export function WikiTab() {
     return (
       <PipelineEmptyState
         icon={BookOpen}
-        title={isNoMemory ? "Build your channel wiki" : wikiT(targetLang, "noWikiYet")}
+        title={
+          isPipelineInFlight
+            ? "Pipeline in progress"
+            : isNoMemory
+              ? "Build your channel wiki"
+              : wikiT(targetLang, "noWikiYet")
+        }
         description={
-          isNoMemory
-            ? "Turn conversations into a structured wiki with topics, decisions, and references."
-            : wikiT(targetLang, "noWikiEmptySubtitle")
+          isPipelineInFlight
+            ? "The activity stream above shows what's happening live."
+            : isNoMemory
+              ? "Turn conversations into a structured wiki with topics, decisions, and references."
+              : wikiT(targetLang, "noWikiEmptySubtitle")
         }
         steps={steps}
-        primaryActionLabel={isNoMemory ? "Sync Channel Now" : undefined}
-        onPrimaryAction={isNoMemory && triggerSync ? () => void triggerSync() : undefined}
+        primaryActionLabel={
+          !isPipelineInFlight && isNoMemory ? "Sync Channel Now" : undefined
+        }
+        onPrimaryAction={
+          !isPipelineInFlight && isNoMemory && triggerSync
+            ? () => void triggerSync()
+            : undefined
+        }
         primaryActionDisabled={!triggerSync || !!isSyncing}
         primaryActionLoading={!!isSyncing}
-        secondaryActionLabel={isNoMemory ? "View sync history" : undefined}
-        onSecondaryAction={isNoMemory ? () => navigate(`/channels/${channelId}/sync-history`) : undefined}
+        secondaryActionLabel={
+          !isPipelineInFlight && isNoMemory ? "View sync history" : undefined
+        }
+        onSecondaryAction={
+          !isPipelineInFlight && isNoMemory
+            ? () => navigate(`/channels/${channelId}/sync-history`)
+            : undefined
+        }
         secondaryActionVariant="link"
       >
-        {isNoMemory ? (
+        {isPipelineInFlight || isNoMemory ? (
           <></>
         ) : (
           <WikiRegenerateButton
@@ -1172,7 +1405,17 @@ export function WikiTab() {
       (activePage.page_type === "fixed" && activePage.slug === "overview");
     pageContent = isOverviewPage ? renderedPage : (
       <div className="relative">
-        <div className="absolute right-0 top-0 z-10">
+        <div className="absolute right-0 top-0 z-10 flex items-center gap-2">
+          {channelId && (
+            <CurationDropdown
+              channelId={channelId}
+              slug={activePage.slug}
+              curationMode={
+                (activePage.curation_mode as "auto" | "manual" | "frozen") ?? "auto"
+              }
+              targetLang={displayedLang}
+            />
+          )}
           <button
             type="button"
             title="Download this page as Markdown"

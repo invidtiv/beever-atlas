@@ -2,7 +2,7 @@
 
 import logging
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
@@ -88,6 +88,16 @@ class Settings(BaseSettings):
     # destructive ops (e.g. /api/dev/reset) to scope wipes away from the
     # default graph when a shared cluster hosts multiple tenants.
     neo4j_database: str = Field(default="neo4j", alias="NEO4J_DATABASE")
+    neo4j_batch_name_vector: bool = Field(
+        default=True,
+        alias="NEO4J_BATCH_NAME_VECTOR",
+        description="When true, persister batches name_vector writes via a single UNWIND Cypher call. Falls back to per-entity on failure.",
+    )
+    neo4j_relationship_stub_endpoints: bool = Field(
+        default=True,
+        alias="NEO4J_RELATIONSHIP_STUB_ENDPOINTS",
+        description="When true, MATCH→MERGE in upsert_relationship + batch_create_episodic_links auto-creates stub Entity nodes for unknown endpoint names. Eliminates silent relationship loss from cross-batch races. Set false to revert to legacy MATCH-and-skip behaviour.",
+    )
     mongodb_uri: str = Field(default="mongodb://localhost:27017/beever_atlas")
     redis_url: str = Field(default="redis://localhost:6379")
 
@@ -102,15 +112,79 @@ class Settings(BaseSettings):
     llm_fast_model: str = Field(default="gemini-2.5-flash")
     llm_quality_model: str = Field(default="gemini-2.5-flash")
 
+    # Cutover flag for the agent-llm-provider-pluggable change. When True,
+    # every provider — including Gemini — is wrapped in ``LiteLlm(...)`` inside
+    # ``resolve_model_object``, so completions flow through ``litellm.acompletion``
+    # (and therefore through ``dispatch_completion`` + ``LLMThrottle``) instead of
+    # ADK's native ``google.genai`` client.
+    #
+    # DEFAULT IS FALSE (since F12). The post-cutover True default silently broke
+    # the extraction pipeline: ADK's LiteLlm wrapper does NOT translate
+    # ``GenerateContentConfig.response_mime_type="application/json"`` (set by
+    # fact_extractor, entity_extractor, coreference_resolver, …) into LiteLLM's
+    # ``response_format`` parameter. The model returned unstructured text, the
+    # fact-extractor recovery parser found no fact array, and every batch
+    # persisted ``facts=0 entities=0``. LLM calls all reported ``ok: true`` so
+    # the regression was invisible to operators until they checked the wiki.
+    #
+    # With the default False, Gemini agent calls go through ADK's native
+    # ``google.genai`` client which fully honors ``response_mime_type`` and
+    # produces extractable JSON. Non-Gemini providers (OpenAI, Anthropic,
+    # Mistral, DeepSeek, Groq, MiniMax, Ollama) still flow through LiteLlm
+    # — they aren't affected by this flag. The unified ``dispatch_completion``
+    # path (used by the QA pipeline and embedding shim) is also unaffected;
+    # only the per-agent ADK ``LlmAgent`` path returns to native.
+    #
+    # Set to True via env if a future change makes the LiteLlm wrapper honor
+    # response_mime_type / response_format symmetrically — then we can fully
+    # close the cutover. Until that lands, False is the only safe default.
+    llm_use_litellm_for_gemini: bool = Field(default=False)
+
+    # SSRF guard for the operator-facing Endpoint Test/Discover routes. When
+    # True, ``base_url`` is resolved + validated against ``infra.http_safe``
+    # before any outbound probe — private/link-local/metadata IPs are refused.
+    # Default False so the first-class "fully local (Ollama/vLLM/LM Studio)"
+    # presets (which point at ``localhost``) keep working out of the box;
+    # turn it on for hardened multi-operator deployments.
+    llm_endpoint_ssrf_guard: bool = Field(default=False)
+
     # Pipeline config
-    sync_batch_size: int = Field(default=10)
+    # memory-then-wiki-pipeline-realignment perf P0 — bumped from 10 to 25.
+    # Combined with default ``ingest_batch_concurrency=4`` this gives the
+    # ExtractionWorker a 100-message claim_size per tick, reducing the
+    # tick count by 2.5× on bulk syncs.
+    sync_batch_size: int = Field(default=25)
     sync_max_messages: int = Field(default=1000)
     quality_threshold: float = Field(default=0.5)
     entity_threshold: float = Field(default=0.6)
     max_facts_per_message: int = Field(default=2)
     sync_batch_timeout_seconds: int = Field(default=600)
 
-    # Jina embeddings
+    # ── Embedding (provider-pluggable via LiteLLM) ────────────────────────
+    # Defaults preserve the legacy Jina-v4 @ 2048d behaviour bit-for-bit so
+    # existing installations keep working without a .env edit. Set
+    # EMBEDDING_PROVIDER + EMBEDDING_MODEL + EMBEDDING_DIMENSIONS to switch
+    # providers (OpenAI / Cohere / Voyage / Gemini / Ollama / etc).
+    # Switching on a populated install requires `make reembed-all` first
+    # (the boot-time dim guard refuses to start otherwise).
+    embedding_provider: str = Field(default="jina_ai")
+    embedding_model: str = Field(default="jina-embeddings-v4")
+    embedding_dimensions: int = Field(default=2048)
+    embedding_rpm: int = Field(default=500)
+    embedding_api_base: str = Field(default="")
+    embedding_api_key: str = Field(default="")
+    embedding_task: str = Field(default="text-matching")
+    # Boot-time dimension guard — refuses to start when configured dim
+    # disagrees with the dim already persisted to Weaviate. Set false to
+    # bypass (loud WARN per boot, no abort).
+    embedding_dim_guard: bool = Field(default=True)
+    # In-flight LiteLLM batches during a re-embed migration job.
+    embedding_reembed_concurrency: int = Field(default=4, ge=1, le=16)
+
+    # ── Legacy Jina aliases (DEPRECATED — see Embedding block above) ──────
+    # Loaded for one minor release; an init-time bridge copies these into the
+    # generic embedding_* fields when the new ones are unset, with a
+    # one-shot deprecation warning per field. Removed in v0.3.
     jina_api_url: str = Field(default="https://api.jina.ai/v1/embeddings")
     jina_model: str = Field(default="jina-embeddings-v4")
     jina_dimensions: int = Field(default=2048)
@@ -129,6 +203,25 @@ class Settings(BaseSettings):
     # Semantic entity deduplication
     entity_similarity_threshold: float = Field(default=0.85)
     merge_rejection_ttl_days: int = Field(default=30)
+
+    # Cross-batch validator — P0-3 (plan ``pipeline-cost-latency-reduction-v2.md``).
+    # When True, the cross_batch_validator stage runs a deterministic
+    # ``BaseAgent`` (name normalization + embedding cosine similarity)
+    # instead of the legacy LLM-based validator. Default True — the
+    # deterministic path eliminates ~24 Gemini calls/sync and removes the
+    # ``json_recovery: truncated validation result`` failure mode. The
+    # legacy LlmAgent path was removed in this change; the flag is
+    # retained for forward compatibility (a False value logs a one-shot
+    # WARN and falls through to the deterministic agent). Roll back via
+    # git revert if a regression is observed during the soak window.
+    cross_batch_validator_deterministic: bool = Field(default=True)
+    # When True (default), the deterministic validator falls back to a
+    # bounded LLM call (max 5 pairs per batch) for ambiguous cosine band
+    # 0.85–0.92. Architect demanded the safety net stay ON until 2 weeks
+    # of soak data confirm the deterministic-only path is safe to default
+    # OFF. The per-batch fallback counter is logged as
+    # ``cross_batch_validator_llm_fallback_count`` for calibration.
+    cross_batch_validator_llm_fallback: bool = Field(default=True)
 
     # Multimodal expansion
     media_video_max_duration_minutes: int = Field(default=10)
@@ -149,6 +242,13 @@ class Settings(BaseSettings):
     # Temporal fact lifecycle
     contradiction_confidence_threshold: float = Field(default=0.8)
     contradiction_flag_threshold: float = Field(default=0.5)
+
+    # P0-1 (pipeline-cost-latency-reduction-v2): when True, BatchProcessor
+    # skips its per-batch detached contradiction check; a single bulk pass
+    # fires post-sync on ``memory_settled`` via ``check_and_supersede_for_channel``.
+    # When False, the legacy per-batch fire-and-forget behaviour is restored
+    # (kill switch for emergency rollback without redeploy).
+    defer_contradiction: bool = Field(default=True, alias="DEFER_CONTRADICTION")
 
     # Provider rate limits (requests per minute)
     gemini_rpm: int = Field(default=300)
@@ -181,6 +281,15 @@ class Settings(BaseSettings):
     cluster_max_size: int = Field(default=100)
     consolidation_max_concurrent_llm: int = Field(default=5)
     consolidation_enabled: bool = Field(default=True)
+    # Defer cluster/channel summary LLM calls from per-batch consolidation to
+    # the ``memory_settled`` event so summaries fire exactly once per channel
+    # per sync (against the stable post-drain state) instead of once per
+    # extraction batch. Saves ~40-80s and ~$0.05 per 25-batch sync. Set to
+    # ``false`` to restore the legacy per-batch behaviour.
+    consolidation_summarize_on_settle: bool = Field(
+        default=True,
+        alias="CONSOLIDATION_SUMMARIZE_ON_SETTLE",
+    )
 
     # Citation registry — enterprise citation architecture.
     # Enabled by default: QA tool outputs flow through SourceRegistry and
@@ -230,7 +339,11 @@ class Settings(BaseSettings):
     use_batch_api: bool = Field(default=False)
     batch_poll_interval_seconds: int = Field(default=15)
     batch_max_wait_seconds: int = Field(default=3600)
-    batch_max_prompt_tokens: int = Field(default=6000)
+    # memory-then-wiki-pipeline-realignment perf P0 — bumped from 6000
+    # to 12000. Gemini 2.5 Flash comfortably handles 12-15k input tokens,
+    # and the doubling cuts the number of sub-batches in half (fewer LLM
+    # round trips → faster extraction wall time).
+    batch_max_prompt_tokens: int = Field(default=12000)
     batch_time_window_seconds: int = Field(default=600)
     # Output-token ceiling for adaptive batching. Projects expected response
     # size per batch so we split BEFORE Gemini hits its max_output_tokens
@@ -453,10 +566,13 @@ class Settings(BaseSettings):
     # runs the 6-stage ADK pipeline asynchronously. This is the primary
     # lever that makes a Gemini 503 storm survivable — sync (fetch + persist)
     # finishes in seconds; extraction proceeds in the background and retries
-    # with exponential backoff. Default OFF — staging soak (48 h) before
-    # flipping in production. Rollback is reversible: flipping OFF returns to
-    # inline extraction; the worker idles harmlessly with no rows to claim.
-    decouple_extraction: bool = Field(default=False, alias="DECOUPLE_EXTRACTION")
+    # with exponential backoff. Default ON — the durable channel_messages
+    # queue makes uvicorn restarts, worker crashes, and Gemini outages
+    # recoverable without re-fetching from the source. Flip OFF only for
+    # CI tests that need single-process determinism, or local dev sessions
+    # where you Ctrl-C uvicorn often and want to avoid orphan extracting
+    # rows (the stale-sweep recovers them in 5 min either way).
+    decouple_extraction: bool = Field(default=True, alias="DECOUPLE_EXTRACTION")
 
     # Tuning knobs (worker tick interval, stale-recovery window, max
     # retries, breaker cooldown, LLM failover enablement, fallback
@@ -505,6 +621,20 @@ class Settings(BaseSettings):
         default=10, alias="WIKI_AUTO_INITIAL_BUILD_THRESHOLD"
     )
 
+    # ``sync-pipeline-feedback-and-auto-wiki`` Phase 2.
+    # Auto-build the channel-overview wiki page once the first extraction
+    # batch wave finishes for a channel. The subscriber lives in
+    # ``services/auto_overview_subscriber.py`` and runs INDEPENDENTLY of
+    # ``WIKI_MAINTENANCE_MODE`` so the "Channel Wiki" tab no longer shows
+    # "No Wiki Yet" forever on a fresh sync regardless of maintainer mode.
+    # Default True for fresh installs; the lifespan auto-detects upgrades
+    # (existing rows in ``wiki_pages`` with ``page_type=overview``) and
+    # flips this OFF so existing operators are not surprised by an
+    # auto-build on the first post-upgrade sync. The operator override
+    # ``AUTO_OVERVIEW_WIKI=true|false`` always wins. Read fresh on every
+    # event so a runtime flip takes effect on the very next sync.
+    auto_overview_wiki: bool = Field(default=True, alias="AUTO_OVERVIEW_WIKI")
+
     # Wiki page-voice drift A/B comparator.
     # When True, every successful ``WikiMaintainer.apply_update`` ALSO
     # schedules a fire-and-forget ``compare_apply_update_vs_regenerate``
@@ -517,6 +647,38 @@ class Settings(BaseSettings):
     # default ON. The maintainer's primary path is unaffected when this
     # flag is OFF.
     wiki_drift_ab: bool = Field(default=False, alias="WIKI_DRIFT_AB")
+
+    # WikiMaintainer per-page debounce window (seconds).
+    # On every ``ExtractionWorker.on_extraction_done`` event the maintainer
+    # routes facts to affected pages and accumulates them into an in-memory
+    # dirty-set, then schedules ONE flush task that sleeps this many seconds
+    # before draining + issuing per-page LLM rewrites. A burst of N events
+    # touching the same page within the window collapses to a single rewrite
+    # (carrying every event's facts). Default 60s — see design D3 in
+    # ``openspec/changes/sync-pipeline-feedback-and-auto-wiki/design.md``.
+    # Set to 0 to flush immediately (useful in unit tests). The dirty-set is
+    # in-memory only; if the worker process crashes mid-window, pending
+    # rewrites are lost and the next extraction event re-routes the affected
+    # pages to a fresh dirty-set (worst-case loss = one window).
+    # P0: lowered from 60s → 10s. The debounce coalesces multiple
+    # memory_changed/memory_settled events into a single flush. With
+    # the new memory-then-wiki gate, settlement only fires once per
+    # channel-drain anyway, so a 60s coalescing window is pure dead
+    # time at sync end. 10s preserves coalescing for any straggler
+    # events without wasting the full minute waiting on nothing.
+    wiki_maintainer_debounce_seconds: int = Field(
+        default=60, alias="WIKI_MAINTAINER_DEBOUNCE_SECONDS"
+    )
+
+    # WikiMaintainer settle-path debounce window (seconds).
+    # Used ONLY by ``on_memory_settled`` (the terminal event that fires once
+    # per channel-drain). Unlike ``wiki_maintainer_debounce_seconds`` (60s,
+    # designed to coalesce rapid mid-sync events), this window only needs to
+    # cover a tiny grace period in case extraction barely missed the
+    # queue-drain check. Default 5s. Set to 0 for immediate flush (unit tests).
+    wiki_maintainer_settle_debounce_seconds: int = Field(
+        default=5, alias="WIKI_MAINTAINER_SETTLE_DEBOUNCE_SECONDS"
+    )
 
     # Per-(channel, page) rate-limit window for the drift comparator.
     # The maintainer skips a comparator invocation when the same
@@ -556,7 +718,7 @@ class Settings(BaseSettings):
     # heuristic candidate signals don't accumulate enough evidence to
     # be reliable. Operators can lower it for testing on small
     # channels but the default is conservative.
-    wiki_min_topics_for_folders: int = Field(default=8, alias="WIKI_MIN_TOPICS_FOR_FOLDERS")
+    wiki_min_topics_for_folders: int = Field(default=6, alias="WIKI_MIN_TOPICS_FOR_FOLDERS")
 
     # Per-kind drift-A/B sample rate (§8.1). The legacy ``WIKI_DRIFT_AB``
     # rate-limiter applies only to the legacy single-prompt comparison;
@@ -577,6 +739,14 @@ class Settings(BaseSettings):
     # conservative; tune up if false-positive rate exceeds 1/week.
     wiki_page_merge_threshold: float = Field(default=0.70, alias="WIKI_PAGE_MERGE_THRESHOLD")
 
+    wiki_topic_compile_parallelism: int = Field(
+        default=6,
+        ge=1,
+        le=16,
+        alias="WIKI_TOPIC_COMPILE_PARALLELISM",
+        description="Max concurrent topic page LLM compilations. Default 6 matches Gemini Flash RPM ceiling. Set to 16 for ultra-large channels (50+ topics) on paid tiers.",
+    )
+
     # Single-tenant compatibility mode for the v1.0 OSS launch. When True,
     # any authenticated user principal is granted access to channels whose
     # owning PlatformConnection has ``owner_principal_id`` set to the shared
@@ -587,6 +757,17 @@ class Settings(BaseSettings):
     # ``stores.platform_store.PlatformStore.backfill_legacy_owners``).
     beever_single_tenant: bool = Field(default=True, alias="BEEVER_SINGLE_TENANT")
 
+    # Media extractor content-hash cache (P0-2).
+    # When True, ImageExtractor / VideoExtractor / AudioExtractor skip the
+    # Gemini vision/audio call and return the cached description when the same
+    # file bytes have been seen before (SHA-256 keyed, stored in MongoDB
+    # ``media_cache``). Set MEDIA_CACHE_ENABLED=false to disable globally.
+    media_cache_enabled: bool = Field(default=True, alias="MEDIA_CACHE_ENABLED")
+    # Bump MEDIA_CACHE_VERSION to invalidate all cached descriptions — e.g.
+    # after a Gemini model upgrade. The version is mixed into the hash so old
+    # entries become unreachable without requiring a manual collection drop.
+    media_cache_version: int = Field(default=1, alias="MEDIA_CACHE_VERSION")
+
     @property
     def neo4j_user(self) -> str:
         return self.neo4j_auth.split("/")[0]
@@ -595,6 +776,75 @@ class Settings(BaseSettings):
     def neo4j_password(self) -> str:
         parts = self.neo4j_auth.split("/", 1)
         return parts[1] if len(parts) > 1 else ""
+
+    # Set of legacy fields that have already emitted a deprecation warning
+    # this process. Populated by ``_bridge_legacy_jina_aliases`` so the
+    # warning fires exactly once per ``(field, env-var)`` rather than on
+    # every Settings re-instantiation in tests.
+    _DEPRECATED_LEGACY_WARNED: "ClassVar[set[str]]" = set()
+
+    @model_validator(mode="after")
+    def _bridge_legacy_jina_aliases(self) -> "Settings":
+        """Copy legacy ``JINA_*`` env values into the generic ``embedding_*``
+        fields when the new env vars are unset.
+
+        Detection:
+          We can't tell from field values alone whether ``embedding_model``
+          equals its default because the operator set it to that, or because
+          it fell through. So we check ``os.environ`` directly for the
+          ``EMBEDDING_*`` form. If it's absent AND the legacy ``JINA_*`` form
+          is present, the bridge copies + warns once.
+
+        Warning policy:
+          One WARN line per ``(legacy_var → new_var)`` pair per process.
+          Tests that re-instantiate Settings won't spam the log.
+
+        Removed in v0.3 — at which point the legacy fields can also be
+        deleted from this Settings class and `.env.example`.
+        """
+        import os
+
+        bridges = (
+            ("EMBEDDING_API_BASE", "JINA_API_URL", "embedding_api_base", "jina_api_url"),
+            ("EMBEDDING_MODEL", "JINA_MODEL", "embedding_model", "jina_model"),
+            ("EMBEDDING_DIMENSIONS", "JINA_DIMENSIONS", "embedding_dimensions", "jina_dimensions"),
+            ("EMBEDDING_RPM", "JINA_RPM", "embedding_rpm", "jina_rpm"),
+        )
+
+        for new_env, legacy_env, new_attr, legacy_attr in bridges:
+            new_in_env = new_env in os.environ
+            legacy_in_env = legacy_env in os.environ
+
+            # Only bridge when the new field is still at its class default —
+            # protects explicit constructor kwargs from being clobbered (test
+            # setups, programmatic overrides). Operators using only env vars
+            # always hit this branch because the new field defaulted in.
+            new_default = Settings.model_fields[new_attr].default
+            new_at_default = getattr(self, new_attr) == new_default
+
+            if not new_in_env and legacy_in_env and new_at_default:
+                legacy_value = getattr(self, legacy_attr)
+                setattr(self, new_attr, legacy_value)
+                marker = f"{legacy_env}->{new_env}"
+                if marker not in Settings._DEPRECATED_LEGACY_WARNED:
+                    Settings._DEPRECATED_LEGACY_WARNED.add(marker)
+                    logger.warning(
+                        "config: %s is deprecated, mapped → %s=%r (remove from .env in v0.3)",
+                        legacy_env,
+                        new_env,
+                        legacy_value,
+                    )
+            elif new_in_env and legacy_in_env:
+                marker = f"{legacy_env}+{new_env}"
+                if marker not in Settings._DEPRECATED_LEGACY_WARNED:
+                    Settings._DEPRECATED_LEGACY_WARNED.add(marker)
+                    logger.warning(
+                        "config: both %s (deprecated) and %s set — using %s",
+                        legacy_env,
+                        new_env,
+                        new_env,
+                    )
+        return self
 
     @model_validator(mode="after")
     def _validate_production(self) -> "Settings":

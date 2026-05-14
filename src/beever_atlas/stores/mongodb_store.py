@@ -64,6 +64,16 @@ class MongoDBStore:
         # the collection is created with TTL/indexes so the v2 ship is
         # a code-only change.
         self._wiki_proposed_edits = self._db["wiki_proposed_edits"]
+        # memory-then-wiki-pipeline-realignment — durable per-page dirty
+        # queue. Replaces the in-memory ``WikiMaintainer._dirty`` dict so
+        # backend crashes during the debounce window no longer lose
+        # queued page rewrites. See specs/wiki-dirty-queue/spec.md.
+        self._wiki_dirty_queue = self._db["wiki_dirty_queue"]
+        # P0-2: media extractor content-hash cache.  One document per unique
+        # (hash, mime_type) pair; compound unique index created in startup().
+        from beever_atlas.stores.media_cache_store import MediaCacheStore
+
+        self._media_cache_store = MediaCacheStore(self._db["media_cache"])
 
     @property
     def db(self):
@@ -81,6 +91,11 @@ class MongoDBStore:
         """Reserved for §7.9 — v2 agent ``propose_wiki_edit`` writes here."""
         return self._wiki_proposed_edits
 
+    @property
+    def media_cache(self):
+        """P0-2: content-hash cache for media extractor outputs."""
+        return self._media_cache_store
+
     async def startup(self) -> None:
         """Ping MongoDB to verify the connection is alive."""
         await self._client.admin.command("ping")
@@ -92,6 +107,19 @@ class MongoDBStore:
         await self._activity_events.create_index([("timestamp", -1)])
         await self._channel_policies.create_index("channel_id", unique=True)
         await self._pipeline_checkpoints.create_index("batch_key", unique=True)
+        # memory-then-wiki-pipeline-realignment — wiki_dirty_queue indexes.
+        # Primary lookup is by ``(channel_id, page_id)`` for upsert; status
+        # field is the predicate for claim/recover sweeps.
+        await self._wiki_dirty_queue.create_index(
+            [("channel_id", 1), ("page_id", 1)],
+            unique=True,
+            name="wiki_dirty_queue_channel_page_unique",
+        )
+        # Stale-flushing recovery: scan rows by status + age.
+        await self._wiki_dirty_queue.create_index(
+            [("status", 1), ("updated_at", 1)],
+            name="wiki_dirty_queue_status_age",
+        )
         # ``channel_messages`` indexes.
         # 1) Compound unique key for idempotent upsert.
         await self._channel_messages.create_index(
@@ -179,6 +207,8 @@ class MongoDBStore:
             [("channel_id", 1), ("slug", 1), ("status", 1)],
             name="wiki_proposed_edits_channel_slug_status",
         )
+        # P0-2: media extractor content-hash cache index.
+        await self._media_cache_store.ensure_indexes()
         # Seed global policy defaults from Settings if not present
         existing = await self._global_policy_defaults.find_one({"id": "global"})
         if existing is None:
@@ -243,6 +273,29 @@ class MongoDBStore:
         MUST treat missing/None values as owned by the ``"legacy:shared"``
         sentinel.
         """
+        # Defensive: any prior ``running`` row for this channel/kind is
+        # orphaned by construction — a new sync was just triggered.
+        # Mark such rows as ``orphaned`` and clear their ``batch_results`` +
+        # ``batches_completed`` so the brief window between this insert
+        # and the runner stamping the new row can't leak the previous
+        # run's done chips to ``/sync/status``. ``orphaned`` is treated as
+        # a terminal status by ``get_sync_status``'s status filter — it
+        # only prefers ``running`` rows, so an ``orphaned`` row is invisible
+        # to that path.
+        await self._sync_jobs.update_many(
+            {
+                "channel_id": channel_id,
+                "kind": kind,
+                "status": "running",
+            },
+            {
+                "$set": {
+                    "status": "orphaned",
+                    "batch_results": [],
+                    "batches_completed": 0,
+                }
+            },
+        )
         job = SyncJob(
             channel_id=channel_id,
             sync_type=sync_type,
@@ -286,6 +339,103 @@ class MongoDBStore:
 
         await self._sync_jobs.update_one({"id": job_id}, ops)
 
+    async def refresh_sync_progress_for_channel(self, channel_id: str) -> None:
+        """Patch the latest ``sync_jobs`` row's progress fields from the
+        ``channel_messages.extraction_status`` source of truth.
+
+        The decoupled-mode ``ExtractionWorker`` doesn't have a direct
+        update path to ``sync_jobs`` — it synthesises a per-tick
+        ``worker:<channel>:<ts>`` id and feeds the BatchProcessor with
+        that, so ``BatchProcessor.update_sync_progress`` writes go to
+        a synthetic id that nobody reads. The user-facing sync_jobs
+        row therefore stays at ``processed_messages=0`` /
+        ``current_stage=""`` for the entire run, even when extraction is
+        actively producing facts.
+
+        This helper is the bridge: it aggregates counts from the
+        durable ``channel_messages`` collection (the actual source of
+        truth) and patches the most recent sync row for the channel.
+        Idempotent — safe to call after every worker batch.
+        """
+        pipeline = [
+            {"$match": {"channel_id": channel_id}},
+            {"$group": {"_id": "$extraction_status", "count": {"$sum": 1}}},
+        ]
+        counts: dict[str, int] = {}
+        async for doc in self._channel_messages.aggregate(pipeline):
+            status = doc.get("_id") or "unknown"
+            counts[str(status)] = int(doc.get("count") or 0)
+
+        done = counts.get("done", 0)
+        extracting = counts.get("extracting", 0)
+        pending = counts.get("pending", 0)
+        failed = counts.get("failed", 0)
+
+        if extracting > 0:
+            stage = f"Extracting — {extracting} in flight"
+        elif pending > 0:
+            stage = f"Queued — {pending} pending"
+        elif failed > 0 and done == 0:
+            stage = f"Extraction failed — {failed} rows"
+        else:
+            stage = "Extraction complete"
+
+        # ``sort=[("created_at", -1)]`` picks the most-recent sync row
+        # so re-triggering a sync naturally retargets the new row.
+        # ``find_one_and_update`` (not ``update_one``) is the only motor
+        # call that supports sort — needed because we have no other way
+        # to disambiguate when multiple sync rows exist per channel.
+        await self._sync_jobs.find_one_and_update(
+            {"channel_id": channel_id, "kind": "sync"},
+            {
+                "$set": {
+                    "processed_messages": done,
+                    "current_stage": stage,
+                },
+                "$inc": {"version": 1},
+            },
+            sort=[("created_at", -1)],
+        )
+
+    async def set_sync_job_totals(
+        self,
+        job_id: str,
+        total_messages: int,
+        parent_messages: int,
+        sync_type: str | None = None,
+        total_batches: int | None = None,
+    ) -> None:
+        """Patch a sync job's message totals after creation.
+
+        Used by the async sync-trigger path: the API endpoint creates a
+        placeholder job row (total_messages=0) and returns immediately
+        with the job_id, then a background task does the slow bridge
+        fetch and calls this method to fill in the real totals before
+        the pipeline starts processing.
+
+        ``sync_type`` is optional because the type may be promoted from
+        ``incremental`` to ``full`` mid-fetch (when an incremental sync
+        finds zero new messages and falls back to a full re-pull).
+
+        ``total_batches`` is the global batch count for the whole sync
+        (``ceil(total_messages / batch_size)``) — stable for the entire
+        run. Without this, the user-facing sync_jobs row's total_batches
+        stays 0 because the decoupled ExtractionWorker only writes
+        per-tick totals to synthetic ``worker:*`` rows.
+        """
+        update: dict[str, Any] = {
+            "total_messages": total_messages,
+            "parent_messages": parent_messages,
+        }
+        if sync_type is not None:
+            update["sync_type"] = sync_type
+        if total_batches is not None:
+            update["total_batches"] = total_batches
+        await self._sync_jobs.update_one(
+            {"id": job_id},
+            {"$set": update, "$inc": {"version": 1}},
+        )
+
     async def update_batch_stage(
         self,
         job_id: str,
@@ -321,19 +471,50 @@ class MongoDBStore:
 
         Tags the entry with batch_idx so the frontend can group/filter per batch.
         Uses $push + $slice to avoid unbounded growth — race-safe under concurrency.
+
+        memory-then-wiki-pipeline-realignment fix: ``upsert=True`` so the
+        synthetic ``worker:<channel>:<ts>`` job_ids used by the decoupled
+        ExtractionWorker auto-create a sync_jobs document on first write.
+        Without this, activity_log entries silently dropped because the
+        target document never existed. Parses channel_id + started_at
+        from the synthetic id format so the merge in
+        ``list_recent_activity_log`` (used by /sync/status) can find it.
         """
         tagged_entry = {**entry, "batch_idx": batch_idx}
+        # Parse channel_id + started_at from the synthetic worker job_id
+        # so the upsert document carries enough metadata for the merge
+        # query to find it. Format: ``worker:<channel_id>:<epoch_ms>``.
+        set_on_insert: dict[str, Any] = {}
+        if job_id.startswith("worker:"):
+            try:
+                parts = job_id.split(":", 2)
+                if len(parts) == 3:
+                    set_on_insert["channel_id"] = parts[1]
+                    # epoch_ms → ISO datetime so list_recent_activity_log
+                    # can filter by ``started_at >= main_job.started_at``.
+                    epoch_ms = int(parts[2])
+                    set_on_insert["started_at"] = datetime.fromtimestamp(
+                        epoch_ms / 1000.0, tz=UTC
+                    ).isoformat()
+                    set_on_insert["kind"] = "worker_extraction"
+                    set_on_insert["status"] = "running"
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+        update: dict[str, Any] = {
+            "$push": {
+                "stage_details.activity_log": {
+                    "$each": [tagged_entry],
+                    "$slice": -500,
+                }
+            },
+            "$inc": {"version": 1},
+        }
+        if set_on_insert:
+            update["$setOnInsert"] = set_on_insert
         await self._sync_jobs.update_one(
             {"id": job_id},
-            {
-                "$push": {
-                    "stage_details.activity_log": {
-                        "$each": [tagged_entry],
-                        "$slice": -50,
-                    }
-                },
-                "$inc": {"version": 1},
-            },
+            update,
+            upsert=True,
         )
 
     async def increment_batches_completed(self, job_id: str) -> None:
@@ -342,6 +523,98 @@ class MongoDBStore:
             {"id": job_id},
             {"$inc": {"batches_completed": 1, "version": 1}},
         )
+
+    async def increment_batches_completed_for_channel(
+        self,
+        channel_id: str,
+        count: int,
+        max_batch_num: int | None = None,
+    ) -> None:
+        """Increment ``batches_completed`` on the most-recent user-facing
+        sync_jobs row for a channel.
+
+        The decoupled ExtractionWorker uses synthetic ``worker:*`` job_ids
+        so ``increment_batches_completed(job_id)`` calls inside BatchProcessor
+        never reach the row the UI reads. This helper bridges that gap —
+        the worker calls it once per tick with ``count = len(breakdowns)``,
+        keeping the user-facing row's global ``batches_completed`` accurate
+        for the BATCHES tile and as the offset for the next tick's global
+        batch_index numbering.
+        """
+        if count <= 0:
+            return
+        # First bump batches_completed atomically.
+        doc = await self._sync_jobs.find_one_and_update(
+            {"channel_id": channel_id, "kind": "sync"},
+            {"$inc": {"batches_completed": count, "version": 1}},
+            sort=[("created_at", -1)],
+            return_document=True,
+        )
+        # SyncRunner's initial ``total_batches`` is a fixed-size estimate
+        # (``ceil(total_messages / sync_batch_size)``) but the worker
+        # actually uses token-aware batching that can yield more, smaller
+        # batches. Bump ``total_batches`` to track the high-water mark of
+        # ``batches_completed`` so the API never returns "21 done / 15
+        # total" nonsense.
+        if doc is None:
+            return
+        completed = int(doc.get("batches_completed") or 0)
+        total = int(doc.get("total_batches") or 0)
+        # SyncRunner's initial ``total_batches`` is a fixed-size estimate
+        # (``ceil(total_messages / sync_batch_size)``). Token-aware
+        # batching in BatchProcessor can yield more batches than the
+        # estimate, so bump ``total_batches`` to the high-water mark of
+        # either the completed counter OR the actual batch_num the
+        # caller is reporting. Without this, the UI shows weirdness
+        # like ``14/15`` while the chip strip extends to Batch 21.
+        target = max(completed, max_batch_num or 0)
+        if target > total:
+            await self._sync_jobs.update_one(
+                {"id": doc.get("id")},
+                {"$set": {"total_batches": target}, "$inc": {"version": 1}},
+            )
+
+    async def append_batch_results_for_channel(
+        self,
+        channel_id: str,
+        batch_results: list[dict[str, Any]],
+    ) -> None:
+        """Append per-batch breakdown rows to the user-facing sync_jobs
+        row for a channel.
+
+        Without this bridge, BatchProcessor's ``update_sync_progress``
+        calls only persist to the synthetic ``worker:*`` job_ids that
+        nobody reads — and the frontend's MetricsBar tiles end up
+        reflecting only whatever happens to still be in the
+        ``activity_log`` $slice buffer. With this bridge, each tick's
+        batch breakdowns land on the row the UI polls, so per-batch
+        facts/entities/embedded/media counts are accurate even after
+        the activity_log entries evict.
+        """
+        if not batch_results:
+            return
+        await self._sync_jobs.find_one_and_update(
+            {"channel_id": channel_id, "kind": "sync"},
+            {
+                "$push": {"batch_results": {"$each": batch_results}},
+                "$inc": {"version": 1},
+            },
+            sort=[("created_at", -1)],
+        )
+
+    async def get_user_facing_batches_completed(self, channel_id: str) -> int:
+        """Return ``batches_completed`` from the most-recent user-facing
+        sync_jobs row for a channel. Used by ExtractionWorker as the global
+        ``batch_index_offset`` for BatchProcessor invocations.
+        """
+        doc = await self._sync_jobs.find_one(
+            {"channel_id": channel_id, "kind": "sync"},
+            {"_id": 0, "batches_completed": 1},
+            sort=[("created_at", -1)],
+        )
+        if not doc:
+            return 0
+        return int(doc.get("batches_completed") or 0)
 
     async def complete_sync_job(
         self,
@@ -369,15 +642,76 @@ class MongoDBStore:
         await self._sync_jobs.update_one({"id": job_id}, {"$set": update})
 
     async def get_sync_status(self, channel_id: str) -> SyncJob | None:
-        """Return the most recent SyncJob for the given channel, or None."""
-        doc = await self._sync_jobs.find_one(
+        """Return the active SyncJob for the given channel, or None.
+
+        Prefers the currently-running sync row when one exists. Without
+        this preference, the row returned by ``/sync/status`` during the
+        brief window between trigger and the new ``sync_jobs`` row
+        landing is the *previous* run's completed row — whose
+        ``batch_results`` array then pollutes the frontend's chip strip
+        with stale DONE batches before any new work has been done.
+
+        Falls back to the most-recent row (any status) when no running
+        sync exists so legacy callers reading historical state — e.g.
+        cooldown checks in ``capabilities.sync`` — keep working.
+        """
+        running = await self._sync_jobs.find_one(
+            {"channel_id": channel_id, "kind": "sync", "status": "running"},
+            sort=[("started_at", -1)],
+        )
+        if running is not None:
+            running.pop("_id", None)
+            return SyncJob(**running)
+        latest = await self._sync_jobs.find_one(
             {"channel_id": channel_id},
             sort=[("started_at", -1)],
         )
-        if doc is None:
+        if latest is None:
             return None
-        doc.pop("_id", None)
-        return SyncJob(**doc)
+        latest.pop("_id", None)
+        return SyncJob(**latest)
+
+    async def list_recent_activity_log(
+        self,
+        channel_id: str,
+        since_iso: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Merge activity_log entries from every recent sync_job for the channel.
+
+        The decoupled ExtractionWorker writes its rich ``stage_output``
+        entries to a synthetic ``worker:<channel>:<ts>`` sync_job_id —
+        those entries don't land on the user-facing sync_job row that
+        ``/sync/status`` returns. This method walks every sync_job for
+        the channel started within the last ~10 minutes and concatenates
+        their ``stage_details.activity_log`` arrays into one chronological
+        feed for the SyncProgressV2 UI.
+
+        Args:
+            channel_id: Channel to fetch for.
+            since_iso: ISO timestamp lower bound. When None, defaults to
+                10 minutes ago so per-batch worker rows that finished long
+                before the active sync are filtered out.
+            limit: Cap on the merged result — newest-first within each
+                job, then concatenated jobs newest-first.
+        """
+        if since_iso is None:
+            since = datetime.now(tz=UTC) - timedelta(minutes=10)
+            since_iso = since.isoformat()
+        cursor = self._sync_jobs.find(
+            {
+                "channel_id": channel_id,
+                "started_at": {"$gte": since_iso},
+            },
+            {"_id": 0, "id": 1, "started_at": 1, "stage_details.activity_log": 1},
+        ).sort("started_at", -1)
+        merged: list[dict[str, Any]] = []
+        async for doc in cursor:
+            entries = (doc.get("stage_details") or {}).get("activity_log") or []
+            merged.extend(entries)
+            if len(merged) >= limit:
+                break
+        return merged[:limit]
 
     async def get_last_job_by_kind(self, channel_id: str, kind: str) -> SyncJob | None:
         """Return the most recent SyncJob of ``kind`` for *channel_id*, or None.
@@ -523,6 +857,95 @@ class MongoDBStore:
         """Delete the sync state for a channel, forcing a full re-sync next time."""
         await self._channel_sync_state.delete_one({"channel_id": channel_id})
         await self._sync_jobs.delete_many({"channel_id": channel_id})
+
+    # ------------------------------------------------------------------
+    # Contradiction watermark (P0-1 pipeline-cost-latency-reduction-v2)
+    # ------------------------------------------------------------------
+
+    async def get_contradiction_watermark(self, channel_id: str) -> datetime:
+        """Return the channel's persisted ``contradiction_watermark``.
+
+        Rows that pre-date the watermark field (i.e. existing pre-deploy
+        documents OR brand-new channels with no sync state yet) are
+        treated as the Unix epoch ``datetime(1970, 1, 1, tzinfo=UTC)``
+        so the very first post-deploy ``check_and_supersede_for_channel``
+        call processes every fact written for the channel.
+
+        No schema migration is required — the ``advance_contradiction_watermark``
+        ``$lte`` filter combined with this epoch default handles missing
+        values uniformly.
+        """
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        doc = await self._channel_sync_state.find_one(
+            {"channel_id": channel_id},
+            {"contradiction_watermark": 1},
+        )
+        if doc is None:
+            return epoch
+        wm = doc.get("contradiction_watermark")
+        if wm is None:
+            return epoch
+        if isinstance(wm, datetime):
+            return wm if wm.tzinfo is not None else wm.replace(tzinfo=UTC)
+        # Defensive — ISO-8601 string fallback in case a future writer
+        # persists the watermark as a string. Pymongo normally stores
+        # ``datetime`` natively as BSON Date so this branch is rarely hit.
+        if isinstance(wm, str):
+            try:
+                parsed = datetime.fromisoformat(wm.replace("Z", "+00:00"))
+                return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+            except ValueError:
+                logger.warning(
+                    "get_contradiction_watermark: unparseable string watermark "
+                    "channel=%s value=%r — falling back to epoch",
+                    channel_id,
+                    wm,
+                )
+        return epoch
+
+    async def advance_contradiction_watermark(
+        self,
+        channel_id: str,
+        pre_check: datetime,
+        post_check: datetime,
+    ) -> bool:
+        """Atomically advance ``contradiction_watermark`` from ``pre_check`` → ``post_check``.
+
+        Uses ``find_one_and_update`` with a ``$lte`` filter on the existing
+        watermark to guarantee that two concurrent post-sync checks
+        cannot both succeed — the loser observes ``result is None`` and
+        the caller treats that as "another invocation already advanced
+        the watermark; the work is done".
+
+        The filter accepts either ``contradiction_watermark <= pre_check``
+        OR a missing field (existing pre-deploy rows / fresh channels),
+        so the first post-deploy call always wins regardless of whether
+        the field was ever persisted.
+
+        Returns:
+            True when this caller successfully advanced the watermark,
+            False when a concurrent caller had already moved it past
+            ``pre_check``.
+        """
+        # Normalise tzinfo so the BSON write is always UTC-aware.
+        if pre_check.tzinfo is None:
+            pre_check = pre_check.replace(tzinfo=UTC)
+        if post_check.tzinfo is None:
+            post_check = post_check.replace(tzinfo=UTC)
+
+        result = await self._channel_sync_state.find_one_and_update(
+            {
+                "channel_id": channel_id,
+                "$or": [
+                    {"contradiction_watermark": {"$lte": pre_check}},
+                    {"contradiction_watermark": {"$exists": False}},
+                ],
+            },
+            {"$set": {"contradiction_watermark": post_check}},
+            upsert=False,
+            return_document=False,
+        )
+        return result is not None
 
     async def count_synced_channels(self) -> int:
         """Return the number of channels that have a sync state record."""
@@ -797,6 +1220,98 @@ class MongoDBStore:
         )
 
     # ------------------------------------------------------------------
+    # Embedding meta — drives the boot-time dimension guard.
+    # ------------------------------------------------------------------
+    # Schema:
+    #   {
+    #     "_id": "embedding_meta",
+    #     "provider": "<litellm prefix>",
+    #     "model": "<model id>",
+    #     "dimensions": <int>,
+    #     "last_probe_at": <ISO timestamp>,
+    #     "last_probe_ok": <bool>,
+    #     "last_probe_error": <str | None>,
+    #   }
+    #
+    # Updated by ``llm.embedding_health.probe_and_validate`` once at boot,
+    # and by the re-embed migration after a successful run. The dim guard
+    # compares ``dimensions`` against the configured ``EMBEDDING_DIMENSIONS``
+    # to refuse boots that would corrupt the existing Weaviate index.
+
+    async def get_embedding_meta(self) -> dict[str, Any] | None:
+        """Return the persisted embedding configuration record, or None."""
+        doc = await self.db["embedding_meta"].find_one({"_id": "embedding_meta"})
+        if doc:
+            doc.pop("_id", None)
+        return doc
+
+    async def set_embedding_meta(
+        self,
+        *,
+        provider: str,
+        model: str,
+        dimensions: int,
+        ok: bool,
+        error: str | None = None,
+    ) -> None:
+        """Upsert the embedding meta record after a probe / migration."""
+        from datetime import UTC, datetime
+
+        await self.db["embedding_meta"].update_one(
+            {"_id": "embedding_meta"},
+            {
+                "$set": {
+                    "provider": provider,
+                    "model": model,
+                    "dimensions": dimensions,
+                    "last_probe_at": datetime.now(tz=UTC).isoformat(),
+                    "last_probe_ok": ok,
+                    "last_probe_error": error,
+                }
+            },
+            upsert=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Encrypted embedding API key — written by the Settings UI, decrypted
+    # only inside the embedding shim immediately before the LiteLLM call.
+    # ------------------------------------------------------------------
+
+    async def get_embedding_secret(self) -> dict[str, Any] | None:
+        """Return the ciphertext + iv + tag for the stored API key, or None."""
+        doc = await self.db["embedding_secret"].find_one({"_id": "embedding_api_key"})
+        if doc:
+            doc.pop("_id", None)
+        return doc
+
+    async def set_embedding_secret(
+        self,
+        *,
+        ciphertext_b64: str,
+        iv_b64: str,
+        tag_b64: str,
+    ) -> None:
+        """Persist an encrypted API key — values are pre-encoded base64
+        strings so the document JSON-serialises cleanly."""
+        from datetime import UTC, datetime
+
+        await self.db["embedding_secret"].update_one(
+            {"_id": "embedding_api_key"},
+            {
+                "$set": {
+                    "ciphertext_b64": ciphertext_b64,
+                    "iv_b64": iv_b64,
+                    "tag_b64": tag_b64,
+                    "updated_at": datetime.now(tz=UTC).isoformat(),
+                }
+            },
+            upsert=True,
+        )
+
+    async def clear_embedding_secret(self) -> None:
+        await self.db["embedding_secret"].delete_one({"_id": "embedding_api_key"})
+
+    # ------------------------------------------------------------------
     # Message Store (channel_messages collection)
     # ------------------------------------------------------------------
 
@@ -936,6 +1451,83 @@ class MongoDBStore:
             if isinstance(status, str) and status in counts:
                 counts[status] = int(row.get("n", 0))
         return counts
+
+    async def count_channel_messages_failure_subtypes(
+        self,
+        channel_id: str,
+        max_retries: int,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Split ``failed`` rows into ``retrying`` vs ``abandoned``.
+
+        Phase 3 / Task 4.2.4 — the legacy ``failed`` count conflates two
+        very different states: rows the worker will retry shortly (still
+        below ``max_retries`` AND ``next_attempt_at`` in the near future)
+        versus rows the worker has given up on (``attempt_count >=
+        max_retries``). The UI surfaces these as distinct chips so an
+        operator knows whether to wait or to act.
+
+        Returns ``{"retrying": int, "abandoned": int}``. The legacy
+        ``failed`` field on the response equals ``retrying + abandoned``.
+        """
+        ref_now = now or datetime.now(tz=UTC)
+        pipeline: list[dict[str, Any]] = [
+            {
+                "$match": {
+                    "channel_id": channel_id,
+                    "extraction_status": "failed",
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "abandoned": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$gte": [
+                                        {"$ifNull": ["$attempt_count", 0]},
+                                        max_retries,
+                                    ]
+                                },
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                    "retrying": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$and": [
+                                        {
+                                            "$lt": [
+                                                {"$ifNull": ["$attempt_count", 0]},
+                                                max_retries,
+                                            ]
+                                        },
+                                        {
+                                            "$gt": [
+                                                {"$ifNull": ["$next_attempt_at", ref_now]},
+                                                ref_now,
+                                            ]
+                                        },
+                                    ]
+                                },
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                }
+            },
+        ]
+        out: dict[str, int] = {"retrying": 0, "abandoned": 0}
+        async for row in self._channel_messages.aggregate(pipeline):
+            out["retrying"] = int(row.get("retrying", 0) or 0)
+            out["abandoned"] = int(row.get("abandoned", 0) or 0)
+            break
+        return out
 
     async def find_channel_message_by_message_id(
         self,
@@ -1512,3 +2104,111 @@ class MongoDBStore:
                 stale_seconds,
             )
         return result.modified_count
+
+    # ------------------------------------------------------------------
+    # memory-then-wiki-pipeline-realignment — wiki_dirty_queue
+    # ------------------------------------------------------------------
+
+    async def enqueue_dirty(
+        self,
+        channel_id: str,
+        page_id: str,
+        fact_ids: list[str],
+    ) -> None:
+        """Append ``fact_ids`` to the per-page dirty row, upserting if absent.
+
+        Uses ``$addToSet`` so duplicate fact_ids never accumulate. On
+        insert, status is ``pending`` and ``created_at`` is stamped.
+        On every call ``updated_at`` is bumped. If the row was previously
+        ``done`` (last flush finished cleanly), the upsert flips it back
+        to ``pending`` — the same page can re-enter the queue when new
+        facts arrive after a successful flush.
+        """
+        if not fact_ids:
+            return
+        now = datetime.now(tz=UTC)
+        await self._wiki_dirty_queue.update_one(
+            {"channel_id": channel_id, "page_id": page_id},
+            {
+                "$addToSet": {"fact_ids": {"$each": list(set(fact_ids))}},
+                "$set": {
+                    "status": "pending",
+                    "updated_at": now,
+                },
+                "$setOnInsert": {
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+
+    async def claim_dirty(self, channel_id: str) -> list[dict[str, Any]]:
+        """Atomically claim every pending dirty row for the channel.
+
+        Flips ``status: pending → flushing`` for all matching rows in one
+        update_many, then returns the rows with their ``_id``, ``page_id``,
+        ``fact_ids``. Idempotent — a second concurrent call sees nothing
+        to claim and returns an empty list.
+        """
+        now = datetime.now(tz=UTC)
+        await self._wiki_dirty_queue.update_many(
+            {"channel_id": channel_id, "status": "pending"},
+            {"$set": {"status": "flushing", "updated_at": now}},
+        )
+        cursor = self._wiki_dirty_queue.find(
+            {"channel_id": channel_id, "status": "flushing"},
+            {"_id": 1, "page_id": 1, "fact_ids": 1},
+        )
+        claimed: list[dict[str, Any]] = []
+        async for doc in cursor:
+            claimed.append(doc)
+        return claimed
+
+    async def mark_dirty_done(self, doc_ids: list[Any]) -> None:
+        """Flip the supplied dirty-queue rows to ``status="done"``."""
+        if not doc_ids:
+            return
+        now = datetime.now(tz=UTC)
+        await self._wiki_dirty_queue.update_many(
+            {"_id": {"$in": doc_ids}},
+            {"$set": {"status": "done", "updated_at": now}},
+        )
+
+    async def recover_stale_flushing(self, stale_seconds: int = 600) -> int:
+        """Reset rows stuck in ``flushing`` longer than ``stale_seconds``
+        back to ``pending`` so the next flush re-claims them.
+
+        Crash recovery for maintainer-mid-flush failures. Default 10 min.
+        Returns the number of rows reset.
+        """
+        now = datetime.now(tz=UTC)
+        threshold = now - timedelta(seconds=stale_seconds)
+        result = await self._wiki_dirty_queue.update_many(
+            {"status": "flushing", "updated_at": {"$lt": threshold}},
+            {"$set": {"status": "pending", "updated_at": now}},
+        )
+        if result.modified_count:
+            logger.warning(
+                "WikiMaintainer: recovered %d stale-flushing dirty rows older than %ds",
+                result.modified_count,
+                stale_seconds,
+            )
+        return result.modified_count
+
+    async def cleanup_done_dirty(self, retention_days: int = 7) -> int:
+        """Delete ``done`` rows older than ``retention_days``.
+
+        Bounds the collection size while keeping recent audit history
+        for the operator console.
+        """
+        cutoff = datetime.now(tz=UTC) - timedelta(days=retention_days)
+        result = await self._wiki_dirty_queue.delete_many(
+            {"status": "done", "updated_at": {"$lt": cutoff}}
+        )
+        if result.deleted_count:
+            logger.info(
+                "WikiMaintainer: cleaned %d done dirty rows older than %dd",
+                result.deleted_count,
+                retention_days,
+            )
+        return result.deleted_count

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -433,6 +433,59 @@ class WikiPage(BaseModel):
     citation/parse gates and the page falls back to module-only
     rendering. See ``openspec/changes/wiki-narrative-articles/`` for
     the schema + citation discipline rules."""
+
+    # ---- unified-llm-wiki-graph-redesign fields --------------------------
+    # The redesign collapses the parallel entity-page pipeline into a
+    # single graph-shaped Channel Wiki. The fields below give pages the
+    # metadata the new builder + maintainer + agent retrieval layers need
+    # without a schema migration. Defaults preserve legacy behavior so
+    # existing rows keep working under the transition feature flags.
+    archetype: str | None = None
+    """Optional adaptive-rendering hint. Examples: ``project``, ``system``,
+    ``decision-log-entry``, ``sub-topic``, ``folder``. Used by the
+    compiler to pick rendering templates and by the structure planner
+    to inform sub-topic splits. ``None`` falls through to ``kind``-driven
+    rendering."""
+
+    page_embedding: list[float] | None = None
+    """Cosine-comparable embedding vector of the prose body. Used by
+    tier-1 wiki-first agent retrieval. Refreshed when ``content_hash``
+    changes; ``None`` means embedding generation has not run for this
+    page yet (legacy rows pre-redesign)."""
+
+    content_hash: str = ""
+    """SHA-256 of the page's prose body. Used to detect content
+    staleness on tier-1 retrieval (mismatch = downgrade to tier-3) and
+    to gate ``page_embedding`` refresh (skip when hash matches prior).
+    Empty string for legacy rows; first patch / Builder run populates."""
+
+    kind_schema_hash: str | None = None
+    """SHA-256 of the canonical ``kind_schema`` payload (the structured
+    input data that produced this page) used by the Builder's
+    recompile-skip optimisation. When the new build's hash matches the
+    stored hash, the LLM compile call is skipped and the prior prose
+    is reused. ``None`` means recompile-skip is disabled for this page
+    (forces a real compile next run)."""
+
+    curation_mode: Literal["auto", "manual", "frozen"] = "auto"
+    """Per-page maintenance contract. ``auto``: maintainer marks dirty
+    AND applies LLM patches. ``manual``: maintainer marks dirty but
+    operator must explicitly trigger the rewrite. ``frozen``: maintainer
+    skips the page entirely. Authoritative for new pages; legacy
+    ``pin_state.pinned`` and ``pin_state.hidden`` remain readable for
+    backward compatibility but are not consulted on new pages once the
+    redesign rolls out."""
+
+    quality_metrics: dict[str, Any] | None = None
+    """Snapshot of per-page graph quality counters: orphan-edge count,
+    broken-link count, last-rewrite-cost. Surfaced in the Wiki Health
+    admin view. ``None`` means metrics have not been computed for this
+    page yet."""
+
+    archived: bool = False
+    """Set to ``True`` for legacy ``kind=entity`` rows during the cleanup
+    phase of the redesign. Archived rows are excluded from human-facing
+    listings and MCP tool results; retained 30 days then dropped."""
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
